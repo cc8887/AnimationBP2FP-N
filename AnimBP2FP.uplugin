@@ -1,1 +1,40 @@
-{"FileVersion": 3}
+{
+  \"FileVersion\": 3,
+  \"Version\": 1,
+  \"VersionName\": \"0.1.0-alpha\",
+  \"FriendlyName\": \"AnimBP2FP - Animation Blueprint to Functional Programming\",
+  \"Description\": \"Convert UE Animation Blueprints to functional programming DSL and back\",
+  \"Category\": \"Animation\",
+  \"CreatedBy\": \"OpenClaw Research\",
+  \"CreatedByURL\": \"https://github.com/openclaw/AnimBP2FP\",
+  \"DocsURL\": \"https://github.com/openclaw/AnimBP2FP/docs\",
+  \"MarketplaceURL\": \"\",
+  \"SupportURL\": \"https://github.com/openclaw/AnimBP2FP/issues\",
+  \"CanContainContent\": true,
+  \"IsBetaVersion\": true,
+  \"IsExperimentalVersion\": true,
+  \"Installed\": false,
+  \"Modules\": [
+    {
+      \"Name\": \"AnimBP2FP\",
+      \"Type\": \"Runtime\",
+      \"LoadingPhase\": \"PreDefault\",
+      \"WhitelistPlatforms\": [
+        \"Win64\",
+        \"Mac\",
+        \"Linux\"
+      ]
+    },
+    {
+      \"Name\": \"AnimBP2FPEditor\",
+      \"Type\": \"Editor\",
+      \"LoadingPhase\": \"PostEngineInit\",
+      \"WhitelistPlatforms\": [
+        \"Win64\",
+        \"Mac\",
+        \"Linux\"
+      ]
+    }
+  ],
+  \"Plugins\": []
+}
