@@ -1,0 +1,14 @@
+;; Simple Blend Example
+;; 在两个动画之间进行简单的混合
+
+(anim-blueprint \"SimpleBlend\"
+  
+  ;; 输入参数
+  :variables
+    [(float :blend-alpha 0.5 :range [0.0 1.0])]
+  
+  ;; 动画图
+  :anim-graph
+    (blend :blend-alpha
+      (sequence-player \"Idle\" :loop true)
+      (sequence-player \"Walk\" :loop true)))
