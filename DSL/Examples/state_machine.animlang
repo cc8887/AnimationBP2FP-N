@@ -1,0 +1,38 @@
+;; State Machine Example
+;; 简单的 Idle/Walk/Run 状态机
+
+(anim-blueprint "SimpleStateMachine"
+  
+  :variables
+    [(float :speed 0.0 :range [0.0 600.0])]
+  
+  :anim-graph
+    (state-machine :locomotion
+      :initial :idle
+      
+      :states
+        [(state :idle
+           (sequence-player "Idle_Rifle" :loop true))
+         
+         (state :walk
+           (sequence-player "Walk_Fwd" :loop true))
+         
+         (state :run
+           (sequence-player "Run_Fwd" :loop true))]
+      
+      :transitions
+        [(transition :idle :walk
+           :condition (and (> :speed 10.0) (< :speed 300.0))
+           :duration 0.2)
+         
+         (transition :walk :idle
+           :condition (< :speed 10.0)
+           :duration 0.25)
+         
+         (transition :walk :run
+           :condition (> :speed 300.0)
+           :duration 0.15)
+         
+         (transition :run :walk
+           :condition (< :speed 300.0)
+           :duration 0.2)]))
