@@ -4,11 +4,18 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Animation/AnimBlueprint.h"
 #include "AnimLangAST.h"
+
+// 注意：FAnimBPExporter 是编辑器专用功能，仅用于编辑器构建
+// 非编辑器构建时，此类不可用
+
+#if WITH_EDITOR
+
+#include "Animation/AnimBlueprint.h"
 
 /**
  * Exports UAnimBlueprint to AnimLang DSL code
+ * 编辑器专用：仅用于编辑器构建
  */
 class ANIMBP2FP_API FAnimBPExporter
 {
@@ -50,3 +57,5 @@ private:
 	// Pretty printer
 	static FString ASTToString(const TSharedPtr<FAnimGraphAST>& AST, const FExportOptions& Options);
 };
+
+#endif // WITH_EDITOR

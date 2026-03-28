@@ -24,16 +24,28 @@ AnimLang 支持类型存根文件，类似于：
 
 ### 2. `animlang-nodes.rkt` - 节点库
 - **路径**: `Tools/animlang-nodes.rkt`
-- **内容**: 18 个核心动画节点的类型定义
-- **状态**: ✅ 已创建（手动整理）
+- **内容**: 23 个动画节点 + `(define Name body)` 语法
+- **状态**: ✅ 已更新 (2026-03-25)
+
+**新格式说明**：
+- `SaveCachedPose` → `(define Name body)` 顶层绑定 (Lisp define 语义)
+- `UseCachedPose` → `(Name)` 裸变量引用
+- 所有参数使用 `:key value` 关键字风格
+- 动画数据输入使用 `:pin-name (child ...)` 命名子节点
+- 外部引用使用 `(ref "Node Title")` 表示
+- 节点名称使用 kebab-case
 
 **包含的节点**：
-- **基础播放**（3 个）：sequence-player、blendspace-1d/2d
-- **混合**（5 个）：blend、blend-list、layered-blend-per-bone 等
-- **状态机**（1 个）：state-machine
-- **修改器**（4 个）：slot、two-bone-ik、modify-bone、look-at
-- **缓存**（2 个）：save/use-cached-pose
-- **工具**（3 个）：reference-pose、component-to-local 等
+- **基础播放**（3 个）：sequence-player、sequence-evaluator、blendspace-player
+- **混合**（5 个）：blend、blend-list、apply-additive、apply-mesh-space-additive、layered-bone-blend
+- **状态机**（1 个）：state-machine（完整展开状态 + 转换）
+- **定义绑定**：`(define Name body)` ← SaveCachedPose，`(Name)` ← UseCachedPose
+- **骨骼修改**（4 个）：two-bone-i-k、modify-bone、modify-curve、constraint
+- **空间转换**（2 个）：component-to-local-space、local-to-component-space
+- **层/链接**（2 个）：linked-anim-layer、linked-input-pose
+- **Slot**（1 个）：slot
+- **其他**（3 个）：look-at、aim-offset、identity-pose
+- **通用回退**：未列出的节点自动提取 pin 参数和 pose 输入
 
 ---
 
@@ -66,13 +78,40 @@ UnrealEditor-Cmd.exe YourProject \
 
 **输出示例**：
 ```racket
-;; Sequence Player
-;; UE Class: UAnimGraphNode_SequencePlayer
-(: sequence-player (->* (AnimSequence)
-                        (#:loop Boolean
-                         #:play-rate (U Float Symbol)
-                         #:start-position Float)
-                        AnimNode))
+;; define 绑定 (SaveCachedPose → 顶层 define)
+(define Post-Layering
+  (linked-anim-layer
+    :base-layer-input (linked-anim-layer)
+    :overlay-layer-input (linked-anim-layer)))
+
+;; 变量引用 (UseCachedPose → 裸变量名)
+(apply-mesh-space-additive :alpha (ref "Get Enable_AimOffset")
+  :base (Post-Layering)           ;; ← 引用 define 绑定
+  :additive (linked-anim-layer))
+
+;; Blend List (多个命名 Pose 输入)
+(blend-list :class "AnimGraphNode_BlendListByEnum"
+            :blend-time-0 0.400000 :blend-time-1 0.500000
+            :active-enum-value (ref "Get MovementState")
+  :blend-pose-0
+    (linked-anim-layer :in-pose (Post-Layering))
+  :blend-pose-1
+    (state-machine :name "Ragdoll States" :initial "In Ragdoll"
+        :transitions [(In Ragdoll -> Blend Out Pose :duration 0.0 :priority 1 :rule (ref "不相等（枚举）"))]
+      :in-ragdoll
+        (sequence-player :name "ALS_Flail" :loop true :play-rate (ref "Get FlailRate"))
+      :blend-out-pose
+        (pose-snapshot :snapshot-name "RagdollPose")))
+
+;; 多个 define 形成依赖链 (拓扑排序: 依赖在前)
+(define Main-Camera-States
+  (state-machine :name "Main Camera States" :initial "Velocity Direction"
+      :transitions [(Velocity Direction -> Looking Direction ...) ...]
+    :velocity-direction (blendspace-player ...)
+    :looking-direction (blendspace-player ...)
+    :aiming (blendspace-player ...)))
+(define ShoulderSwap
+  (blend-list ... :blend-pose-0 (Main-Camera-States) ...))
 ```
 
 ---
@@ -272,8 +311,8 @@ jobs:
 
 | 文件 | 作用 | 状态 |
 |------|------|------|
-| `animlang-types.rkt` | 基础类型定义 | ✅ 已创建 |
-| `animlang-nodes.rkt` | 节点库（手动） | ✅ 已创建 |
+| `animlang-types.rkt` | 基础类型定义 (含 RefExpr/AssetRef/State/Transition) | ✅ 已更新 (2026-03-25) |
+| `animlang-nodes.rkt` | 节点库 (23 个 + define 语法，含状态机展开) | ✅ 已更新 (2026-03-25) |
 | `AnimNodeExporter.h/cpp` | C++ 自动导出器 | ✅ 已创建 |
 | `animlang-nodes-generated.rkt` | 自动生成存根 | ⏳ 待运行 |
 
@@ -289,5 +328,5 @@ jobs:
 
 ---
 
-**最后更新**: 2026-03-23 20:50 GMT+8  
+**最后更新**: 2026-03-25 06:45 GMT+8  
 **作者**: OpenClaw AI Assistant

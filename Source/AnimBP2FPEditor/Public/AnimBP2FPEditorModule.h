@@ -33,6 +33,12 @@ private:
 	// 导出节点命令
 	void ExportNodes();
 	
+	// 导出 AnimBP 到 DSL
+	void ExportAnimBPToDSL();
+	
+	// 往返验证测试
+	void RunRoundTripTest();
+	
 	// 检查是否需要重新生成 stub
 	bool ShouldRegenerateStub();
 	

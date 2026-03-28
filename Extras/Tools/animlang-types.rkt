@@ -1,27 +1,53 @@
 ;; AnimLang Type Definitions (Stub File)
 ;; 类似于 TypeScript 的 .d.ts 或 Python 的 .pyi
 ;; 用于 IDE 自动补全、类型检查和文档生成
+;;
+;; 更新于 2026-03-25: define 绑定 + 变量引用
+;;   - SaveCachedPose → (define Name body) 顶层绑定
+;;   - UseCachedPose → (Name) 变量引用
+;;   - 所有参数使用 :key value 关键字风格
+;;   - 动画数据输入使用 :pin-name (child ...) 关键字
+;;   - 外部引用使用 (ref "Node Title") 表示
+;;   - 节点名称使用 kebab-case
 
 #lang typed/racket
 
 ;; ========== 基础类型 ==========
 
 (define-type PinType
-  (U 'Pose 'Float 'Int 'Bool 'Vector 'Rotator 'Transform 'Name 'Object))
+  (U 'Pose 'Float 'Int 'Bool 'Vector 'Rotator 'Transform 'Name 'Object 'Byte))
 
-(define-type AnimSequence String)  ;; 资产路径
-(define-type BlendSpace String)
-(define-type BoneName String)
-(define-type SlotName String)
+(define-type AnimSequence String)  ;; 资产名称（如 "Walk_Fwd_Rifle"）
+(define-type BlendSpace String)    ;; BlendSpace 资产名称
+(define-type BoneName String)      ;; 骨骼名称
+(define-type SlotName String)      ;; Slot 名称
+(define-type CacheName String)     ;; 缓存姿态名称
+(define-type CurveName String)     ;; 曲线名称
 
-;; ========== 表达式类型 ==========
+;; ========== 值表达式类型 ==========
 
+;; 参数值可以是字面量或外部引用
+(define-type ParamValue
+  (U Float
+     Integer
+     Boolean
+     String
+     RefExpr))  ;; (ref "Node Title")
+
+;; 外部引用 - 连接到蓝图逻辑节点（Get/Set/函数调用等）
+;; 在导出格式中表示为: (ref "Get VariableName") 或 (ref "Some Function")
+(struct RefExpr
+  ([target : String])   ;; 被引用的蓝图节点标题
+  #:transparent)
+
+;; 通用表达式类型（包括算术/比较/逻辑）
 (define-type Expr
   (U Float
      Integer
      Boolean
      String
-     Symbol  ;; :parameter-reference
+     Symbol        ;; :parameter-reference
+     RefExpr       ;; (ref "Node Title")
      (List '+ Expr Expr)
      (List '- Expr Expr)
      (List '* Expr Expr)
@@ -38,65 +64,16 @@
 
 ;; ========== 动画节点类型 ==========
 
-;; 序列播放器
-(: sequence-player (->* (AnimSequence)
-                        (#:loop Boolean
-                         #:play-rate (U Float Symbol)
-                         #:start-position Float)
-                        AnimNode))
-
-;; 混合
-(: blend (->* (Expr AnimNode AnimNode)
-              (#:blend-time Float)
-              AnimNode))
-
-;; 混合空间 1D
-(: blendspace-1d (->* (BlendSpace)
-                      (#:axis Symbol
-                       #:loop Boolean
-                       #:play-rate (U Float Symbol))
-                      AnimNode))
-
-;; 混合空间 2D
-(: blendspace-2d (->* (BlendSpace)
-                      (#:x Symbol
-                       #:y Symbol
-                       #:loop Boolean
-                       #:play-rate (U Float Symbol))
-                      AnimNode))
-
-;; 状态机
-(: state-machine (->* (Symbol)
-                      (#:initial Symbol
-                       #:states (Listof State)
-                       #:transitions (Listof Transition))
-                      AnimNode))
-
-;; 分层混合
-(: layered-blend-per-bone (->* ()
-                               (#:base AnimNode
-                                #:layers (Listof BlendLayer))
-                               AnimNode))
-
-;; 槽
-(: slot (->* (SlotName)
-             (#:default AnimNode)
-             AnimNode))
-
-;; Aim Offset
-(: aimoffset-2d (->* (String)
-                     (#:x Symbol
-                      #:y Symbol)
-                     AnimNode))
-
-;; IK
-(: two-bone-ik (->* ()
-                    (#:effector-location Expr
-                     #:joint-target Expr)
-                    AnimNode))
+;; AnimNode 是所有动画节点的抽象类型
+;; 每个动画节点都是一个 S-expression:
+;;   (node-type :param1 value1 :param2 value2
+;;     :pose-input-a (child-node ...)
+;;     :pose-input-b (child-node ...))
+(define-type AnimNode Any)
 
 ;; ========== 辅助结构 ==========
 
+;; 状态机状态（待完善：当前状态机仅输出名称）
 (struct State
   ([name : Symbol]
    [animation : AnimNode]
@@ -104,6 +81,7 @@
    [on-finish : Boolean])
   #:transparent)
 
+;; 状态转换
 (struct Transition
   ([from-state : (U Symbol 'any)]
    [to-state : Symbol]
@@ -111,12 +89,13 @@
    [duration : Float]
    [interruptible : Boolean]
    [priority : Integer]
-   [from-states : (Listof Symbol)])  ;; For 'any transitions
+   [from-states : (Listof Symbol)])
   #:transparent)
 
+;; 分层混合层
 (struct BlendLayer
   ([name : String]
-   [weight : (U Float Symbol)]
+   [weight : (U Float RefExpr)]
    [blend-mode : (U 'blend 'replace)]
    [bone-filter : BoneName]
    [blend-depth : Integer]
@@ -125,32 +104,51 @@
 
 ;; ========== 变量定义 ==========
 
+;; 在导出格式中:
+;;   (float :VariableName)
+;;   (bool :VariableName)
+;;   (int :VariableName)
 (struct VariableDef
-  ([type : PinType]
+  ([type : (U 'float 'bool 'int 'byte 'name 'object)]
    [name : Symbol]
    [default : Any]
    [range : (Option (List Float Float))]
    [description : (Option String)])
   #:transparent)
 
-;; ========== 动画蓝图 ==========
+;; ========== 定义绑定 ==========
 
+;; (define Name body)
+;; 将 SaveCachedPose 提升为顶层绑定，引用处用 (Name) 代替
+;; 等价于 Scheme 的 (define name expr)
+;;
+;; 示例:
+;;   (define Post-Layering
+;;     (layered-bone-blend ...))
+;;
+;; 引用:
+;;   (apply-mesh-space-additive :base (Post-Layering) ...)
+(struct CachedPoseDef
+  ([name : Symbol]        ;; kebab-case 标识符，如 Post-Layering
+   [body : AnimNode])     ;; 绑定的子树
+  #:transparent)
+
+;; ========== 动画蓝图（顶层结构） ==========
+
+;; 导出格式:
+;;   (anim-blueprint "Name"
+;;     :variables [ (float :Var1) (bool :Var2) ... ]
+;;
+;;     (define Binding-A (some-node ...))
+;;     (define Binding-B (other-node ... (Binding-A) ...))
+;;
+;;     :anim-graph (root-node ... (Binding-B) ...))
 (struct AnimBlueprint
   ([name : String]
    [variables : (Listof VariableDef)]
-   [anim-graph : AnimNode]
-   [layers : (Listof BlendLayer)]
-   [anim-notifies : (Listof AnimNotify)])
+   [defines : (Listof CachedPoseDef)]  ;; (define ...) 绑定
+   [anim-graph : AnimNode])
   #:transparent)
-
-(struct AnimNotify
-  ([name : String]
-   [callback : Symbol])
-  #:transparent)
-
-;; ========== 抽象类型 ==========
-
-(define-type AnimNode Any)  ;; 暂定为 Any，实际使用时会推导具体类型
 
 ;; ========== 导出 ==========
 
@@ -159,20 +157,15 @@
          BlendSpace
          BoneName
          SlotName
+         CacheName
+         CurveName
+         ParamValue
+         RefExpr
          Expr
          State
          Transition
          BlendLayer
          VariableDef
+         CachedPoseDef
          AnimBlueprint
-         AnimNotify
-         AnimNode
-         sequence-player
-         blend
-         blendspace-1d
-         blendspace-2d
-         state-machine
-         layered-blend-per-bone
-         slot
-         aimoffset-2d
-         two-bone-ik)
+         AnimNode)

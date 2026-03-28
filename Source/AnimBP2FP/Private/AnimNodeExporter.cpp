@@ -2,6 +2,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
 #include "AnimNodeExporter.h"
+
+#if WITH_EDITOR
 #include "AnimGraphNode_SequencePlayer.h"
 #include "AnimGraphNode_BlendListByBool.h"
 #include "AnimGraphNode_BlendSpacePlayer.h"
@@ -10,6 +12,43 @@
 #include "AnimGraphNode_Slot.h"
 #include "Misc/FileHelper.h"
 #include "UObject/UObjectIterator.h"
+#include "EdGraphSchema_K2.h"
+#include "Animation/BlendSpace.h"
+
+// ========== 辅助函数：获取引脚类型 ==========
+
+static EPinType GetPinType(UEdGraphPin* Pin)
+{
+	if (!Pin) return EPinType::Object;
+
+	const FName& PinCategory = Pin->PinType.PinCategory;
+
+	if (PinCategory == UEdGraphSchema_K2::PC_Float || PinCategory == UEdGraphSchema_K2::PC_Real)
+		return EPinType::Float;
+	if (PinCategory == UEdGraphSchema_K2::PC_Int)
+		return EPinType::Int;
+	if (PinCategory == UEdGraphSchema_K2::PC_Boolean)
+		return EPinType::Bool;
+	if (PinCategory == TEXT("struct"))
+	{
+		if (UScriptStruct* Struct = Cast<UScriptStruct>(Pin->PinType.PinSubCategoryObject.Get()))
+		{
+			if (Struct->GetFName() == NAME_Vector)
+				return EPinType::Vector;
+			if (Struct->GetFName() == NAME_Rotator)
+				return EPinType::Rotator;
+			if (Struct->GetFName() == NAME_Transform)
+				return EPinType::Transform;
+		}
+	}
+	if (PinCategory == UEdGraphSchema_K2::PC_Name)
+		return EPinType::Name;
+	// 动画姿势引脚
+	if (PinCategory == TEXT("pose") || PinCategory == TEXT("Pose"))
+		return EPinType::Pose;
+
+	return EPinType::Object;
+}
 
 // ========== 主导出函数 ==========
 
@@ -21,7 +60,7 @@ bool FAnimNodeExporter::ExportAllNodes(const FString& OutputPath)
 	Output += TEXT(";; Generated from Unreal Engine 5.6\n");
 	Output += TEXT(";; Do not edit manually\n\n");
 	Output += TEXT("#lang typed/racket\n\n");
-	Output += TEXT("(require \animlang-types.rkt\)\n\n");
+	Output += TEXT("(require \"animlang-types.rkt\")\n\n");
 	
 	// 导出每个节点
 	for (const FNodeInfo& Node : AllNodes)
@@ -227,33 +266,4 @@ FString FAnimNodeExporter::ToKebabCase(const FString& PascalCase)
 	return Result;
 }
 
-// ========== Commandlet ==========
-
-UAnimNodeExporterCommandlet::UAnimNodeExporterCommandlet()
-{
-	IsClient = false;
-	IsEditor = true;
-	IsServer = false;
-	LogToConsole = true;
-}
-
-int32 UAnimNodeExporterCommandlet::Main(const FString& Params)
-{
-	FString OutputPath = TEXT("AnimLangNodes.rkt");
-	
-	// 解析命令行参数
-	FParse::Value(*Params, TEXT("output="), OutputPath);
-	
-	UE_LOG(LogTemp, Log, TEXT("Exporting animation nodes to %s"), *OutputPath);
-	
-	if (FAnimNodeExporter::ExportAllNodes(OutputPath))
-	{
-		UE_LOG(LogTemp, Log, TEXT("Successfully exported animation nodes"));
-		return 0;
-	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("Failed to export animation nodes"));
-		return 1;
-	}
-}
+#endif // WITH_EDITOR

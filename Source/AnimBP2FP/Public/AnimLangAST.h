@@ -67,6 +67,15 @@ struct FLogicalExpr : public FExpressionAST
 };
 
 /**
+ * 命名子节点 - 保留 pin 名称以区分多个动画数据输入
+ */
+struct FNamedChild
+{
+	FString PinName;  // e.g. "base-pose", "blend-pose-0", "additive", "a", "b"
+	TSharedPtr<struct FAnimNodeAST> Node;
+};
+
+/**
  * 动画节点 AST
  */
 struct ANIMBP2FP_API FAnimNodeAST
@@ -74,10 +83,17 @@ struct ANIMBP2FP_API FAnimNodeAST
 	virtual ~FAnimNodeAST() = default;
 	
 	FString NodeType;  // "sequence-player", "blend", "state-machine", etc.
-	TMap<FString, FString> Properties;
-	TArray<TSharedPtr<FAnimNodeAST>> Children;
+	FString NodeId;    // Stable ID for incremental update (maps to UE NodeGuid)
+	TMap<FString, FString> Properties;  // Non-pose parameters (float, bool, int, enum, etc.)
+	TArray<FNamedChild> Children;  // Pose inputs with pin names
 	
 	virtual FString ToString(int32 Indent = 0) const;
+	
+	// Helper to add a named child
+	void AddChild(const FString& PinName, TSharedPtr<FAnimNodeAST> ChildNode);
+	
+	// Helper to add an unnamed child (auto-numbered)
+	void AddChild(TSharedPtr<FAnimNodeAST> ChildNode);
 	
 	// Helper: Get property as float
 	float GetFloatProperty(const FString& Key, float Default = 0.0f) const;
@@ -138,12 +154,27 @@ struct ANIMBP2FP_API FVariableDef
 };
 
 /**
+ * Cached pose 定义 — 对应 Lisp 的 (define name body)
+ * SaveCachedPose 提升为顶层绑定，UseCachedPose 退化为变量引用
+ */
+struct ANIMBP2FP_API FCachedPoseDef
+{
+	FString Name;  // 缓存名（作为变量名，空格替换为连字符）
+	TSharedPtr<FAnimNodeAST> Body;  // 绑定的子树
+	
+	/** 将名称转为合法的 DSL 标识符 (kebab-case, 无空格) */
+	FString GetIdentifier() const;
+};
+
+/**
  * 完整的动画蓝图 AST
  */
 struct ANIMBP2FP_API FAnimGraphAST
 {
 	FString Name;
+	FString SkeletonPath;  // Target skeleton asset path (e.g. "/Game/Mannequin/Skeleton")
 	TArray<FVariableDef> Variables;
+	TArray<FCachedPoseDef> Defines;  // (define ...) 块 — SaveCachedPose 节点
 	TSharedPtr<FAnimNodeAST> RootNode;
 	
 	// Optional: Anim Notifies

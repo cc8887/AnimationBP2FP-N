@@ -26,7 +26,8 @@ public class AnimBP2FPEditor : ModuleRules
 			"SlateCore",
 			"EditorStyle",
 			"ToolMenus",           // Editor menus
-			"DeveloperSettings"    // Project settings
+			"DeveloperSettings",   // Project settings
+			"AssetRegistry"        // Asset discovery
 		});
 	}
 }
