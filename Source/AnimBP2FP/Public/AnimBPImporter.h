@@ -15,6 +15,7 @@
 
 class UAnimGraphNode_Base;
 class UAnimGraphNode_StateMachine;
+class UAnimGraphNode_SaveCachedPose;
 class UEdGraph;
 class UEdGraphPin;
 class UEdGraphNode;
@@ -122,10 +123,12 @@ private:
 	static bool BuildVariables(UAnimBlueprint* Blueprint, const TArray<FVariableDef>& Variables);
 
 	/** Build a single animation node from AST, placing it in the given graph */
-	static UAnimGraphNode_Base* BuildAnimNode(const TSharedPtr<FAnimNodeAST>& NodeAST, UEdGraph* Graph);
+	static UAnimGraphNode_Base* BuildAnimNode(const TSharedPtr<FAnimNodeAST>& NodeAST, UEdGraph* Graph,
+		const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes = nullptr);
 
 	/** Build a state machine node */
-	static bool BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, const TSharedPtr<FAnimNodeAST>& NodeAST);
+	static bool BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, const TSharedPtr<FAnimNodeAST>& NodeAST,
+		const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes = nullptr);
 
 	// ========== Pin Utilities ==========
 

@@ -36,5 +36,10 @@
       ]
     }
   ],
-  "Plugins": []
+  "Plugins": [
+    {
+      "Name": "BlueprintLisp",
+      "Enabled": true
+    }
+  ]
 }

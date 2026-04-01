@@ -1,3 +1,43 @@
+# Build artifacts
+Binaries/
+Intermediate/
 
-Binaries/Win64
-Intermediate
+# Output / Host project
+Output/HostProject/
+
+# Saved data
+Saved/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE / Editor files
+.vs/
+.vscode/
+*.user
+*.suo
+*.ncb
+*.sdf
+*.opensdf
+*.aps
+*.cachefile
+*.sbr
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.tlog
+*.idb
+*.log
+*.tlog
+*.res
+*.pch
+
+# Derived Data
+DerivedDataCache/
+
+# OS files
+Thumbs.db
+.DS_Store

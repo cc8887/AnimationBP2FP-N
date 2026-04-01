@@ -42,6 +42,8 @@ public class AnimBP2FP : ModuleRules
 					"AnimGraph",
 					"AnimGraphRuntime",
 					"BlueprintGraph",
+					// BlueprintLisp: EventGraph -> DSL export
+					"BlueprintLisp",
 				}
 			);
 

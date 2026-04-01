@@ -19,6 +19,7 @@ public class AnimBP2FPEditor : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"AnimBP2FP",           // Runtime module
+			"BlueprintLisp",       // EventGraph DSL export
 			"UnrealEd",            // Editor framework
 			"AnimGraph",           // Animation graph nodes
 			"BlueprintGraph",      // Blueprint graph base

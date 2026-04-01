@@ -47,6 +47,34 @@ public:
 	
 	static FString ExportWithOptions(UAnimBlueprint* AnimBlueprint, const FExportOptions& Options);
 
+	// ---------------------------------------------------------------
+	// EventGraph export via BlueprintLisp
+	// ---------------------------------------------------------------
+
+	struct FEventGraphExportOptions
+	{
+		FString GraphName         = TEXT("EventGraph");
+		bool    bPrettyPrint      = true;
+		bool    bIncludePositions = false;
+		bool    bStableIds        = true;  // Emit :id tags for incremental update
+	};
+
+	/**
+	 * Export the EventGraph (or any BP graph) of this AnimBlueprint to
+	 * BlueprintLisp DSL using the BlueprintLisp plugin.
+	 *
+	 * @param AnimBlueprint   The AnimBlueprint whose EventGraph is exported
+	 * @param Options         Export options
+	 * @param OutLispCode     Receives the DSL text on success
+	 * @param OutError        Receives the error message on failure
+	 * @return true on success
+	 */
+	static bool ExportEventGraph(
+		UAnimBlueprint*                AnimBlueprint,
+		const FEventGraphExportOptions& Options,
+		FString&                        OutLispCode,
+		FString&                        OutError);
+
 private:
 	// Internal conversion methods
 	static void TraverseAnimGraph(UEdGraph* Graph, TSharedPtr<FAnimGraphAST> OutAST);

@@ -1425,4 +1425,45 @@ FString FAnimBPExporter::ASTToString(const TSharedPtr<FAnimGraphAST>& AST, const
 	}
 }
 
+// ============================================================================
+// EventGraph export via BlueprintLisp plugin
+// ============================================================================
+
+#include "BlueprintLispConverter.h"
+
+bool FAnimBPExporter::ExportEventGraph(
+	UAnimBlueprint*                 AnimBlueprint,
+	const FEventGraphExportOptions& Options,
+	FString&                        OutLispCode,
+	FString&                        OutError)
+{
+	if (!AnimBlueprint)
+	{
+		OutError = TEXT("AnimBlueprint is null");
+		return false;
+	}
+
+	// Delegate to BlueprintLisp plugin
+	FBlueprintLispConverter::FExportOptions ExportOpts;
+	ExportOpts.bPrettyPrint      = Options.bPrettyPrint;
+	ExportOpts.bIncludePositions = Options.bIncludePositions;
+	ExportOpts.bStableIds        = Options.bStableIds;
+
+	FBlueprintLispResult Result = FBlueprintLispConverter::Export(
+		AnimBlueprint,
+		Options.GraphName,
+		ExportOpts);
+
+	if (Result.bSuccess)
+	{
+		OutLispCode = Result.LispCode;
+		return true;
+	}
+	else
+	{
+		OutError = Result.Error;
+		return false;
+	}
+}
+
 #endif // WITH_EDITOR

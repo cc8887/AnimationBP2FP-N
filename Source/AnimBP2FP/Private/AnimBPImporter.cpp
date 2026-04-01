@@ -501,21 +501,22 @@ bool FAnimBPImporter::BuildVariables(UAnimBlueprint* Blueprint, const TArray<FVa
 
 // ========== Node Building ==========
 
-UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAST>& NodeAST, UEdGraph* Graph)
+UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAST>& NodeAST, UEdGraph* Graph,
+	const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes)
 {
 	if (!NodeAST.IsValid() || !Graph)
 	{
 		return nullptr;
 	}
-	
+
 	const FString& NodeType = NodeAST->NodeType;
-	
+
 	// Skip identity-pose (no actual node)
 	if (NodeType == TEXT("identity-pose"))
 	{
 		return nullptr;
 	}
-	
+
 	// Handle blend-list: the :class property contains the actual UE class name
 	FString EffectiveNodeType = NodeType;
 	if (NodeType == TEXT("blend-list"))
@@ -527,7 +528,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 			// ClassProp might be "AnimGraphNode_BlendListByEnum" — use directly
 		}
 	}
-	
+
 	// Handle variable references (bare identifiers like "Post-Layering" for UseCachedPose)
 	// These won't have parentheses in DSL; they are plain identifiers
 	// We detect them by checking: no children, no properties, and name doesn't match a known node class
@@ -543,19 +544,73 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 			UseNode->PostPlacedNewNode();
 			UseNode->AllocateDefaultPins();
 			
-			// Set the cache name (convert kebab back to space-separated)
+			// Convert kebab-case identifier back to space-separated CacheName
+			// "Post-Layering" -> "Post Layering"
 			FString CacheName = NodeType;
 			CacheName.ReplaceInline(TEXT("-"), TEXT(" "));
-			// The internal property for linked cache name
-			// UseCachedPose stores the reference name differently per engine version
-			// We'll try the common approach
+			
+			// Try to find and link to the corresponding SaveCachedPose node
+			bool bLinked = false;
+			if (DefineNodes && DefineNodes->Num() > 0)
+			{
+				// Build a normalized key for matching: convert CacheName (space-sep) to kebab-case
+				FString NormalizedName = CacheName;
+				NormalizedName.ReplaceInline(TEXT(" "), TEXT("-"));
+				
+				// TMap::Find() returns const pointer in UE, use FindRef() for non-const access
+				UAnimGraphNode_SaveCachedPose* SaveNode = nullptr;
+				if (DefineNodes->Contains(NormalizedName))
+				{
+					SaveNode = DefineNodes->FindRef(NormalizedName);
+				}
+				else if (DefineNodes->Contains(CacheName))
+				{
+					SaveNode = DefineNodes->FindRef(CacheName);
+				}
+				
+				if (SaveNode)
+				{
+					// UseCachedPose stores the link via the internal FAnimNode_UseCachedPose struct.
+					// The SaveCachedPoseNode property is a direct pointer to the SaveCachedPose graph node.
+					// We access it through FProperty reflection since the class may be MinimalAPI.
+					for (TFieldIterator<FStructProperty> PropIt(UseNode->GetClass()); PropIt; ++PropIt)
+					{
+						FStructProperty* StructProp = *PropIt;
+						if (StructProp->Struct && StructProp->Struct->IsChildOf(FAnimNode_Base::StaticStruct()))
+						{
+							void* StructPtr = StructProp->ContainerPtrToValuePtr<void>(UseNode);
+							// Look for SaveCachedPoseNode property in the internal anim node
+							for (TFieldIterator<FObjectProperty> ObjIt(StructProp->Struct); ObjIt; ++ObjIt)
+							{
+								FObjectProperty* ObjProp = *ObjIt;
+								if (ObjProp->GetName() == TEXT("SaveCachedPoseNode"))
+								{
+									ObjProp->SetObjectPropertyValue_InContainer(StructPtr, SaveNode);
+									bLinked = true;
+									break;
+								}
+							}
+							break;
+						}
+					}
+					
+					if (bLinked)
+					{
+						UE_LOG(LogAnimBPImporter, Log, TEXT("Linked UseCachedPose to SaveCachedPose '%s'"), *CacheName);
+					}
+				}
+			}
 			
 			Graph->AddNode(UseNode, false, false);
-			UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:CachedPoseLink] Created UseCachedPose for '%s' but cannot set link to SaveCachedPose — node will show as 'None'"),
-				*CacheName);
+			
+			if (!bLinked)
+			{
+				UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:CachedPoseLink] Created UseCachedPose for '%s' but could not link to SaveCachedPose — node will show as 'None'"),
+					*CacheName);
+			}
 			return UseNode;
 		}
-		
+
 		UE_LOG(LogAnimBPImporter, Warning, TEXT("Could not create node for type '%s'"), *NodeType);
 		return nullptr;
 	}
@@ -1100,7 +1155,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		UAnimGraphNode_StateMachine* SMNode = Cast<UAnimGraphNode_StateMachine>(NewNode);
 		if (SMNode)
 		{
-			BuildStateMachine(SMNode, NodeAST);
+			BuildStateMachine(SMNode, NodeAST, DefineNodes);
 		}
 	}
 	
@@ -1109,7 +1164,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 	{
 		if (!Child.Node.IsValid()) continue;
 		
-		UAnimGraphNode_Base* ChildNode = BuildAnimNode(Child.Node, Graph);
+		UAnimGraphNode_Base* ChildNode = BuildAnimNode(Child.Node, Graph, DefineNodes);
 		if (!ChildNode) continue;
 		
 		// Find the output pin on the child
@@ -1145,7 +1200,8 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 
 // ========== State Machine Building ==========
 
-bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, const TSharedPtr<FAnimNodeAST>& NodeAST)
+bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, const TSharedPtr<FAnimNodeAST>& NodeAST,
+	const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes)
 {
 	if (!SMNode || !NodeAST.IsValid()) return false;
 	
@@ -1238,7 +1294,7 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 				}
 				
 				// Build the animation subtree for this state
-				UAnimGraphNode_Base* AnimTree = BuildAnimNode(Child.Node, StateNode->BoundGraph);
+				UAnimGraphNode_Base* AnimTree = BuildAnimNode(Child.Node, StateNode->BoundGraph, DefineNodes);
 				if (AnimTree && ResultNode)
 				{
 					UEdGraphPin* AnimOutput = FindOutputPosePin(AnimTree);
@@ -1647,7 +1703,9 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 	BuildVariables(Blueprint, AST->Variables);
 	
 	// Build defines (SaveCachedPose nodes)
-	TMap<FString, UAnimGraphNode_SaveCachedPose*> DefineNodes;
+	// Use pointer map so we can pass it to BuildAnimNode without copying
+	TMap<FString, UAnimGraphNode_SaveCachedPose*> DefineNodesRaw;
+	TMap<FString, UAnimGraphNode_SaveCachedPose*> DefineNodesPtr;
 	for (const FCachedPoseDef& Def : AST->Defines)
 	{
 		UAnimGraphNode_SaveCachedPose* SaveNode = NewObject<UAnimGraphNode_SaveCachedPose>(AnimGraph);
@@ -1664,7 +1722,7 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 			// Build the body subtree
 			if (Def.Body.IsValid())
 			{
-				UAnimGraphNode_Base* BodyNode = BuildAnimNode(Def.Body, AnimGraph);
+				UAnimGraphNode_Base* BodyNode = BuildAnimNode(Def.Body, AnimGraph, &DefineNodesRaw);
 				if (BodyNode)
 				{
 					UEdGraphPin* BodyOutput = FindOutputPosePin(BodyNode);
@@ -1686,7 +1744,7 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 				}
 			}
 			
-			DefineNodes.Add(Def.GetIdentifier(), SaveNode);
+			DefineNodesRaw.Add(Def.GetIdentifier(), SaveNode);
 			UE_LOG(LogAnimBPImporter, Log, TEXT("Created define: %s"), *Def.Name);
 		}
 	}
@@ -1694,7 +1752,7 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 	// Build the root animation tree
 	if (AST->RootNode.IsValid())
 	{
-		UAnimGraphNode_Base* RootTree = BuildAnimNode(AST->RootNode, AnimGraph);
+		UAnimGraphNode_Base* RootTree = BuildAnimNode(AST->RootNode, AnimGraph, &DefineNodesRaw);
 		
 		if (RootTree)
 		{
@@ -1917,6 +1975,7 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 	}
 	
 	// Step 3: Build defines (SaveCachedPose nodes)
+	TMap<FString, UAnimGraphNode_SaveCachedPose*> DefineNodesRaw;
 	for (const FCachedPoseDef& Def : NewAST->Defines)
 	{
 		UAnimGraphNode_SaveCachedPose* SaveNode = NewObject<UAnimGraphNode_SaveCachedPose>(AnimGraph);
@@ -1931,7 +1990,7 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 			
 			if (Def.Body.IsValid())
 			{
-				UAnimGraphNode_Base* BodyNode = BuildAnimNode(Def.Body, AnimGraph);
+				UAnimGraphNode_Base* BodyNode = BuildAnimNode(Def.Body, AnimGraph, &DefineNodesRaw);
 				if (BodyNode)
 				{
 					UEdGraphPin* BodyOutput = FindOutputPosePin(BodyNode);
@@ -1957,7 +2016,7 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 	// Step 4: Build the root animation tree
 	if (NewAST->RootNode.IsValid())
 	{
-		UAnimGraphNode_Base* RootTree = BuildAnimNode(NewAST->RootNode, AnimGraph);
+		UAnimGraphNode_Base* RootTree = BuildAnimNode(NewAST->RootNode, AnimGraph, &DefineNodesRaw);
 		
 		if (RootTree)
 		{
