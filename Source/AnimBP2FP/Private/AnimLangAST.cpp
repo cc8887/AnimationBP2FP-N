@@ -163,6 +163,17 @@ FString FStateMachineAST::ToString(int32 Indent) const
 			{
 				Result += FString::Printf(TEXT(" :rule %s"), *Trans.Condition->ToString());
 			}
+			// BlueprintLisp export of the full transition graph (for import-side restore)
+			if (!Trans.RuleGraph.IsEmpty())
+			{
+				// Escape inner double-quotes and store as a single quoted string
+				FString EscapedGraph = Trans.RuleGraph;
+				EscapedGraph.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+				EscapedGraph.ReplaceInline(TEXT("\""), TEXT("\\\""));
+				EscapedGraph.ReplaceInline(TEXT("\n"), TEXT("\\n"));
+				EscapedGraph.ReplaceInline(TEXT("\r"), TEXT("\\r"));
+				Result += FString::Printf(TEXT(" :rule-graph \"%s\""), *EscapedGraph);
+			}
 			Result += TEXT(")\n");
 		}
 		Result += FString::Printf(TEXT("%s]\n"), *ChildIndent);
@@ -209,6 +220,17 @@ FString FAnimGraphAST::ToString() const
 	if (!SkeletonPath.IsEmpty())
 	{
 		Result += FString::Printf(TEXT("  :skeleton \"%s\"\n"), *SkeletonPath);
+	}
+	
+	// Implemented interfaces (AnimLayerInterfaces)
+	if (ImplementedInterfaces.Num() > 0)
+	{
+		Result += TEXT("  :implements [\n");
+		for (const FString& InterfacePath : ImplementedInterfaces)
+		{
+			Result += FString::Printf(TEXT("    (interface \"%s\")\n"), *InterfacePath);
+		}
+		Result += TEXT("  ]\n");
 	}
 	
 	// Variables

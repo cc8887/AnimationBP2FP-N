@@ -18,6 +18,7 @@
 #include "AnimGraphNode_SequencePlayer.h"
 #include "AnimGraphNode_TwoWayBlend.h"
 #include "AnimGraphNode_BlendListBase.h"
+#include "AnimGraphNode_BlendListByEnum.h"
 #include "AnimGraphNode_BlendSpacePlayer.h"
 #include "AnimGraphNode_LayeredBoneBlend.h"
 #include "AnimGraphNode_ApplyAdditive.h"
@@ -27,6 +28,8 @@
 #include "AnimGraphNode_StateMachineBase.h"
 #include "AnimGraphNode_LinkedAnimLayer.h"
 #include "AnimationStateMachineGraph.h"
+#include "Animation/AnimLayerInterface.h"
+#include "BlueprintLispConverter.h"
 
 // State machine node headers
 #include "AnimStateEntryNode.h"
@@ -112,6 +115,7 @@ static UAnimGraphNode_Base* GetFirstConnectedPoseNode(UAnimGraphNode_Base* Node)
 }
 
 // Get a pin's value as string - either default value, connected expression ref, or fallback
+// NOTE: EventGraph-driven connections are exported as (var "NodeTitle") — cannot be auto-restored on import
 static FString GetPinValueOrDefault(UAnimGraphNode_Base* Node, const FName& PinName, const FString& DefaultVal)
 {
 	if (!Node) return DefaultVal;
@@ -120,13 +124,13 @@ static FString GetPinValueOrDefault(UAnimGraphNode_Base* Node, const FName& PinN
 	{
 		if (Pin->PinName == PinName && Pin->Direction == EGPD_Input)
 		{
-			// If the pin has a linked node, return a reference to it
+			// If the pin has a linked node, return as (var ...) marking EventGraph-driven connection
 			if (Pin->LinkedTo.Num() > 0)
 			{
 				UEdGraphNode* LinkedNode = Pin->LinkedTo[0]->GetOwningNode();
 				if (LinkedNode)
 				{
-					return FString::Printf(TEXT("(ref \"%s\")"), *LinkedNode->GetNodeTitle(ENodeTitleType::ListView).ToString());
+					return FString::Printf(TEXT("(var \"%s\")"), *LinkedNode->GetNodeTitle(ENodeTitleType::ListView).ToString());
 				}
 			}
 			// Otherwise return the default value
@@ -152,8 +156,9 @@ static void CollectNonPoseParams(UAnimGraphNode_Base* Node, TMap<FString, FStrin
 		// Skip hidden or orphaned pins
 		if (Pin->bHidden || Pin->bOrphanedPin) continue;
 		
-		// Struct pins: only output if connected (as a ref), skip unconnected ones
-		// (unconnected struct values are handled by CollectInternalProperties via reflection)
+		// Struct pins connected to another node: export as (var "NodeTitle") — marks EventGraph-driven connection
+		// NOTE: (var ...) is exported for traceability but cannot be automatically restored on import
+		// because it requires K2Node_VariableGet/Function nodes in the EventGraph.
 		if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
 		{
 			if (Pin->LinkedTo.Num() > 0)
@@ -162,7 +167,7 @@ static void CollectNonPoseParams(UAnimGraphNode_Base* Node, TMap<FString, FStrin
 				if (LinkedNode)
 				{
 					FString ParamName = CamelToKebab(Pin->PinName.ToString());
-					FString Value = FString::Printf(TEXT("(ref \"%s\")"), 
+					FString Value = FString::Printf(TEXT("(var \"%s\")"), 
 						*LinkedNode->GetNodeTitle(ENodeTitleType::ListView).ToString());
 					OutProperties.Add(ParamName, Value);
 				}
@@ -177,11 +182,12 @@ static void CollectNonPoseParams(UAnimGraphNode_Base* Node, TMap<FString, FStrin
 		
 		if (Pin->LinkedTo.Num() > 0)
 		{
-			// Pin is connected to another node - output a reference
+			// Pin is connected to an EventGraph node — export as (var "NodeTitle")
+			// NOTE: (var ...) marks EventGraph-driven connection; cannot be auto-restored on import
 			UEdGraphNode* LinkedNode = Pin->LinkedTo[0]->GetOwningNode();
 			if (LinkedNode)
 			{
-				Value = FString::Printf(TEXT("(ref \"%s\")"), 
+				Value = FString::Printf(TEXT("(var \"%s\")"), 
 					*LinkedNode->GetNodeTitle(ENodeTitleType::ListView).ToString());
 			}
 		}
@@ -554,6 +560,7 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBluep
 {
 	if (!AnimBlueprint)
 	{
+		UE_LOG(LogAnimBP2FP, Error, TEXT("[INTERNAL] ExportToAST: AnimBlueprint is null"));
 		return nullptr;
 	}
 
@@ -585,6 +592,24 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBluep
 		
 		VarDef.DefaultValue = Var.DefaultValue;
 		ResultAST->Variables.Add(VarDef);
+	}
+
+	// Export implemented interfaces that are AnimLayerInterface subclasses
+	// This enables import to call ImplementNewInterface, which is required for self-layer LinkedAnimLayer nodes
+	for (const FBPInterfaceDescription& InterfaceDesc : AnimBlueprint->ImplementedInterfaces)
+	{
+		if (InterfaceDesc.Interface)
+		{
+			// Export all non-UObject interfaces (skip core engine interfaces that are not layer-related)
+			const FString InterfacePath = InterfaceDesc.Interface->GetPathName();
+			// Skip built-in engine paths
+			if (!InterfacePath.StartsWith(TEXT("/Script/Engine")) && 
+				!InterfacePath.StartsWith(TEXT("/Script/CoreUObject")))
+			{
+				ResultAST->ImplementedInterfaces.Add(InterfacePath);
+				UE_LOG(LogAnimBP2FP, Log, TEXT("  implements: %s"), *InterfacePath);
+			}
+		}
 	}
 
 	// Find the AnimGraph
@@ -860,6 +885,7 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 {
 	if (!Node)
 	{
+		UE_LOG(LogAnimBP2FP, Error, TEXT("[INTERNAL] ConvertAnimNode called with null Node"));
 		return nullptr;
 	}
 
@@ -1020,6 +1046,9 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 		{
 			return ConvertAnimNode(Child);
 		}
+		// No input connected — export as identity-pose but warn
+		UE_LOG(LogAnimBP2FP, Warning, TEXT("[DEGRADATION:EmptySaveCachedPose] SaveCachedPose '%s' encountered during tree traversal with no input connected — exporting as identity-pose"),
+			*SaveNode->CacheName);
 		Result->NodeType = TEXT("identity-pose");
 		return Result;
 	}
@@ -1051,6 +1080,15 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 	{
 		Result->NodeType = TEXT("blend-list");
 		Result->Properties.Add(TEXT("class"), FString::Printf(TEXT("\"%s\""), *ClassName));
+
+		// BlendListByEnum needs BoundEnum to reconstruct correctly on import
+		if (UAnimGraphNode_BlendListByEnum* BlendListByEnum = Cast<UAnimGraphNode_BlendListByEnum>(Node))
+		{
+			if (UEnum* BoundEnum = BlendListByEnum->GetEnum())
+			{
+				Result->Properties.Add(TEXT("bound-enum"), FString::Printf(TEXT("(asset \"%s\")"), *BoundEnum->GetPathName()));
+			}
+		}
 		
 		// Collect all non-pose parameters (ActiveChildIndex, etc.)
 		CollectNonPoseParams(Node, Result->Properties);
@@ -1091,19 +1129,21 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 			// Each state becomes a named child with its animation subtree
 			for (const FStateMachineAST::FState& State : SMAST->States)
 			{
-				if (State.Animation.IsValid())
-				{
-					FString StateId = CamelToKebab(State.Name);
-					Result->AddChild(StateId, State.Animation);
-				}
-				else
-				{
-					// State with no animation — emit a placeholder
-					TSharedPtr<FAnimNodeAST> Placeholder = MakeShared<FAnimNodeAST>();
-					Placeholder->NodeType = TEXT("identity-pose");
-					FString StateId = CamelToKebab(State.Name);
-					Result->AddChild(StateId, Placeholder);
-				}
+						if (State.Animation.IsValid())
+						{
+							FString StateId = CamelToKebab(State.Name);
+							Result->AddChild(StateId, State.Animation);
+						}
+						else
+						{
+							// State with no animation — emit identity-pose placeholder but warn
+							UE_LOG(LogAnimBP2FP, Warning, TEXT("[DEGRADATION:EmptyStatePose] State '%s' in StateMachine '%s' has no animation — exporting as identity-pose"),
+								*State.Name, *SMAST->Name);
+							TSharedPtr<FAnimNodeAST> Placeholder = MakeShared<FAnimNodeAST>();
+							Placeholder->NodeType = TEXT("identity-pose");
+							FString StateId = CamelToKebab(State.Name);
+							Result->AddChild(StateId, Placeholder);
+						}
 			}
 			
 			// Transitions are stored in Properties as a serialized list
@@ -1132,6 +1172,16 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 					{
 						TransStr += FString::Printf(TEXT(" :rule %s"), *Trans.Condition->ToString());
 					}
+					// Append :rule-graph (BlueprintLisp DSL of the full condition graph) if available
+					if (!Trans.RuleGraph.IsEmpty())
+					{
+						FString EscapedGraph = Trans.RuleGraph;
+						EscapedGraph.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+						EscapedGraph.ReplaceInline(TEXT("\""), TEXT("\\\""));
+						EscapedGraph.ReplaceInline(TEXT("\n"), TEXT("\\n"));
+						EscapedGraph.ReplaceInline(TEXT("\r"), TEXT("\\r"));
+						TransStr += FString::Printf(TEXT(" :rule-graph \"%s\""), *EscapedGraph);
+					}
 					TransStr += TEXT(")");
 				}
 				TransStr += TEXT("]");
@@ -1142,6 +1192,8 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 		}
 		
 		// Fallback if state machine graph is empty or unavailable
+		UE_LOG(LogAnimBP2FP, Warning, TEXT("[DEGRADATION:EmptyStateMachine] StateMachine '%s' has no states — exporting as empty shell"),
+			SMNode->EditorStateMachineGraph ? *SMNode->EditorStateMachineGraph->GetName() : TEXT("(unknown)"));
 		Result->NodeType = TEXT("state-machine");
 		if (SMNode->EditorStateMachineGraph)
 		{
@@ -1234,12 +1286,15 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 {
 	if (!SMNode)
 	{
+		UE_LOG(LogAnimBP2FP, Error, TEXT("[INTERNAL] ConvertStateMachine: SMNode is null"));
 		return nullptr;
 	}
 
 	UAnimationStateMachineGraph* SMGraph = SMNode->EditorStateMachineGraph;
 	if (!SMGraph)
 	{
+		UE_LOG(LogAnimBP2FP, Error, TEXT("[DEGRADATION:NoStateMachineGraph] StateMachine node '%s' has no EditorStateMachineGraph — state machine will export as empty shell"),
+			*SMNode->GetNodeTitle(ENodeTitleType::ListView).ToString());
 		return nullptr;
 	}
 
@@ -1335,13 +1390,47 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 					}
 					Trans.Condition = AutoExpr;
 				}
+				else if (TransNode->GetBoundGraph() == nullptr)
+				{
+					// BoundGraph is null — may not be loaded in commandlet mode
+					UE_LOG(LogAnimBP2FP, Warning, TEXT("    [DEGRADATION:NoBoundGraph] Transition %s -> %s: GetBoundGraph() returned null — condition cannot be exported"),
+						*Trans.FromState, *Trans.ToState);
+				}
 				else if (UEdGraph* CondGraph = TransNode->GetBoundGraph())
 				{
-					// Try to extract a readable condition from the transition graph
-					// Look for the result node in the transition graph
+					// Export the full transition condition graph as BlueprintLisp DSL
+					// This is stored in :rule-graph for import-side restoration
+					UAnimBlueprint* OwnerBP = Cast<UAnimBlueprint>(TransNode->GetGraph()->GetOuter()->GetOuter());
+					if (!OwnerBP)
+					{
+						// Try going up further: TransitionNode -> SMGraph -> SM_Node -> AnimGraph -> AnimBP
+						OwnerBP = TransNode->GetTypedOuter<UAnimBlueprint>();
+					}
+					
+					bool bExportedRuleGraph = false;
+					{
+						// Export the transition condition graph directly using ExportGraph
+						FBlueprintLispConverter::FExportOptions LispOpts;
+						LispOpts.bPrettyPrint = false;
+						LispOpts.bStableIds = true;
+						FBlueprintLispResult LispResult = FBlueprintLispConverter::ExportGraph(CondGraph, LispOpts);
+						if (LispResult.bSuccess && !LispResult.LispCode.IsEmpty())
+						{
+							Trans.RuleGraph = LispResult.LispCode;
+							bExportedRuleGraph = true;
+							UE_LOG(LogAnimBP2FP, Log, TEXT("    Transition %s -> %s: exported rule-graph (%d chars)"),
+								*Trans.FromState, *Trans.ToState, LispResult.LispCode.Len());
+						}
+						else
+						{
+							UE_LOG(LogAnimBP2FP, Warning, TEXT("    [DEGRADATION:RuleGraphExport] Transition %s -> %s: BlueprintLisp export failed: %s"),
+								*Trans.FromState, *Trans.ToState, *LispResult.Error);
+						}
+					}
+
+					// Also extract a human-readable summary as :rule for diagnostics
 					for (UEdGraphNode* CondNode : CondGraph->Nodes)
 					{
-						// Look for nodes connected to the result that provide the bool condition
 						if (CondNode->GetClass()->GetName().Contains(TEXT("TransitionResult")))
 						{
 							for (UEdGraphPin* Pin : CondNode->Pins)
@@ -1353,7 +1442,8 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 									{
 										TSharedPtr<FLiteralExpr> CondExpr = MakeShared<FLiteralExpr>();
 										CondExpr->Type = FLiteralExpr::EType::String;
-										CondExpr->Value = FString::Printf(TEXT("(ref \"%s\")"), 
+										// Export as (var "NodeTitle") — human-readable summary; full restore uses :rule-graph
+										CondExpr->Value = FString::Printf(TEXT("(var \"%s\")"), 
 											*CondSource->GetNodeTitle(ENodeTitleType::ListView).ToString());
 										Trans.Condition = CondExpr;
 									}
@@ -1361,6 +1451,12 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 							}
 							break;
 						}
+					}
+					
+					if (!bExportedRuleGraph && !Trans.Condition.IsValid())
+					{
+						UE_LOG(LogAnimBP2FP, Error, TEXT("[SKIP:TransitionRule] Transition %s -> %s: no condition and no rule-graph exported — transition will never fire on import"),
+							*Trans.FromState, *Trans.ToState);
 					}
 				}
 				
@@ -1428,8 +1524,6 @@ FString FAnimBPExporter::ASTToString(const TSharedPtr<FAnimGraphAST>& AST, const
 // ============================================================================
 // EventGraph export via BlueprintLisp plugin
 // ============================================================================
-
-#include "BlueprintLispConverter.h"
 
 bool FAnimBPExporter::ExportEventGraph(
 	UAnimBlueprint*                 AnimBlueprint,

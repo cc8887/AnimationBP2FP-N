@@ -6,6 +6,17 @@
 // Sentinel token for out-of-bounds access
 static const FAnimLangToken GEOFToken(EAnimLangTokenType::EndOfFile, TEXT(""), 0, 0, 0);
 
+// Helper: re-escape a string value for embedding back into DSL (re-adds \" around any inner quotes)
+static FString EscapeStringForDSL(const FString& Value)
+{
+	FString Esc = Value;
+	Esc.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+	Esc.ReplaceInline(TEXT("\""), TEXT("\\\""));
+	Esc.ReplaceInline(TEXT("\n"), TEXT("\\n"));
+	Esc.ReplaceInline(TEXT("\r"), TEXT("\\r"));
+	return FString::Printf(TEXT("\"%s\""), *Esc);
+}
+
 // ========== Construction & Token Access ==========
 
 FAnimLangParser::FAnimLangParser(const TArray<FAnimLangToken>& InTokens, TArray<FAnimLangParseError>& InErrors)
@@ -213,6 +224,44 @@ void FAnimLangParser::ParseTopLevel(TSharedPtr<FAnimGraphAST> AST)
 			{
 				Error(TEXT("Expected string after :skeleton"));
 			}
+		}
+		else if (Key == TEXT("implements"))
+		{
+			// :implements [ (interface "...") ... ]
+			if (!Expect(EAnimLangTokenType::LBracket, TEXT("implements")))
+				return;
+			while (!IsAtEnd() && !Check(EAnimLangTokenType::RBracket))
+			{
+				if (Check(EAnimLangTokenType::LParen))
+				{
+					Advance(); // consume '('
+					// expect identifier "interface"
+					if (CheckValue(EAnimLangTokenType::Identifier, TEXT("interface")))
+					{
+						Advance(); // consume "interface"
+						if (Check(EAnimLangTokenType::String))
+						{
+							AST->ImplementedInterfaces.Add(Advance().Value);
+						}
+						else
+						{
+							Error(TEXT("Expected string path after 'interface'"));
+						}
+					}
+					else
+					{
+						Error(FString::Printf(TEXT("Expected 'interface' in :implements block, got '%s'"), *Current().Value));
+					}
+					if (!Expect(EAnimLangTokenType::RParen, TEXT("interface entry")))
+						break;
+				}
+				else
+				{
+					Error(FString::Printf(TEXT("Expected '(' in :implements block, got '%s'"), *Current().Value));
+					Advance();
+				}
+			}
+			Expect(EAnimLangTokenType::RBracket, TEXT("implements"));
 		}
 		else if (Key == TEXT("variables"))
 		{
@@ -456,9 +505,9 @@ TSharedPtr<FAnimNodeAST> FAnimLangParser::ParseNodeBody()
 				if (Peek(1).Type == EAnimLangTokenType::Identifier)
 				{
 					FString NextIdent = Peek(1).Value;
-					if (NextIdent == TEXT("ref") || NextIdent == TEXT("asset"))
+					if (NextIdent == TEXT("ref") || NextIdent == TEXT("asset") || NextIdent == TEXT("var"))
 					{
-						// It's a special value form: (ref "...") or (asset "...")
+						// It's a special value form: (ref "..."), (asset "..."), or (var "...")
 						FString Value = ParseValue();
 						Node->Properties.Add(Key, Value);
 					}
@@ -556,8 +605,8 @@ FString FAnimLangParser::ParseValue()
 	{
 		if (Peek(1).Type == EAnimLangTokenType::Identifier)
 		{
-			FString Form = Peek(1).Value;
-			if (Form == TEXT("ref") || Form == TEXT("asset"))
+		FString Form = Peek(1).Value;
+		if (Form == TEXT("ref") || Form == TEXT("asset") || Form == TEXT("var"))
 			{
 				Advance();  // (
 				FString Keyword = Advance().Value;  // ref or asset
@@ -650,12 +699,12 @@ FString FAnimLangParser::ParseTransitionList()
 				{
 					if (bFirstInTrans)
 					{
-						Result += FString::Printf(TEXT("\"%s\""), *Tok.Value);
+						Result += EscapeStringForDSL(Tok.Value);
 						bFirstInTrans = false;
 					}
 					else
 					{
-						Result += FString::Printf(TEXT(" \"%s\""), *Tok.Value);
+						Result += TEXT(" ") + EscapeStringForDSL(Tok.Value);
 					}
 				}
 				else if (Tok.Type == EAnimLangTokenType::LParen)
@@ -682,12 +731,12 @@ FString FAnimLangParser::ParseTransitionList()
 							{
 								if (bFirstInNested)
 								{
-									Result += FString::Printf(TEXT("\"%s\""), *Inner.Value);
+									Result += EscapeStringForDSL(Inner.Value);
 									bFirstInNested = false;
 								}
 								else
 								{
-									Result += FString::Printf(TEXT(" \"%s\""), *Inner.Value);
+									Result += TEXT(" ") + EscapeStringForDSL(Inner.Value);
 								}
 							}
 							else

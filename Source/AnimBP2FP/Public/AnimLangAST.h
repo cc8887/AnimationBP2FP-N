@@ -124,6 +124,7 @@ struct ANIMBP2FP_API FStateMachineAST
 		FString FromState;  // "any" for wildcard
 		FString ToState;
 		TSharedPtr<FExpressionAST> Condition;
+		FString RuleGraph;          // BlueprintLisp DSL of the transition condition graph (for restore)
 		float BlendDuration = 0.2f;
 		bool bInterruptible = false;
 		TArray<FString> FromStates;  // For "any" transitions
@@ -172,7 +173,8 @@ struct ANIMBP2FP_API FCachedPoseDef
 struct ANIMBP2FP_API FAnimGraphAST
 {
 	FString Name;
-	FString SkeletonPath;  // Target skeleton asset path (e.g. "/Game/Mannequin/Skeleton")
+	FString SkeletonPath;       // Target skeleton asset path (e.g. "/Game/Mannequin/Skeleton")
+	TArray<FString> ImplementedInterfaces;  // Asset paths of AnimLayerInterfaces implemented by the BP
 	TArray<FVariableDef> Variables;
 	TArray<FCachedPoseDef> Defines;  // (define ...) 块 — SaveCachedPose 节点
 	TSharedPtr<FAnimNodeAST> RootNode;
