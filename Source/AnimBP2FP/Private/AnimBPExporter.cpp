@@ -1327,17 +1327,29 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 			UEdGraph* StateGraph = StateNode->GetBoundGraph();
 			if (StateGraph)
 			{
-				// Find the StateResult node inside the state's graph
-				UAnimGraphNode_StateResult* ResultNode = StateNode->GetResultNodeInsideState();
-				if (ResultNode)
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
+			// UE5.5+: GetResultNodeInsideState() was removed, use GetPoseSinkPinInsideState() instead
+			UEdGraphPin* PoseSinkPin = StateNode->GetPoseSinkPinInsideState();
+			if (PoseSinkPin && PoseSinkPin->LinkedTo.Num() > 0)
+			{
+				UAnimGraphNode_Base* AnimRoot = Cast<UAnimGraphNode_Base>(PoseSinkPin->LinkedTo[0]->GetOwningNode());
+				if (AnimRoot)
 				{
-					// Get the node connected to the StateResult's input
-					UAnimGraphNode_Base* AnimRoot = GetFirstConnectedPoseNode(ResultNode);
-					if (AnimRoot)
-					{
-						State.Animation = ConvertAnimNode(AnimRoot);
-					}
+					State.Animation = ConvertAnimNode(AnimRoot);
 				}
+			}
+#else
+			// UE < 5.5: Use legacy GetResultNodeInsideState()
+			UAnimGraphNode_StateResult* ResultNode = StateNode->GetResultNodeInsideState();
+			if (ResultNode)
+			{
+				UAnimGraphNode_Base* AnimRoot = GetFirstConnectedPoseNode(ResultNode);
+				if (AnimRoot)
+				{
+					State.Animation = ConvertAnimNode(AnimRoot);
+				}
+			}
+#endif
 			}
 			
 			Result->States.Add(State);
