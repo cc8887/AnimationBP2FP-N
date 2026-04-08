@@ -5,6 +5,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DeveloperSettings.h"
+#include "FBP2FPMapping.h"
 #include "AnimBP2FPSettings.generated.h"
 
 /**
@@ -43,13 +44,26 @@ public:
 		meta=(DisplayName="Stub Output Path"))
 	FString StubOutputPath;
 	
+	// ========== 自动同步设置 ==========
+
+	/** Auto-sync direction: None disables sync, BP2FP exports on compile, FP2BP imports on file change */
+	UPROPERTY(Config, EditAnywhere, Category="Auto Sync",
+		meta=(DisplayName="Auto Sync Mode"))
+	EBP2FPSyncMode AutoSyncMode;
+
+	/** DSL output subdirectory under Saved/BP2DSL/ */
+	UPROPERTY(Config, EditAnywhere, Category="Auto Sync",
+		meta=(DisplayName="DSL Output Category",
+		      EditCondition="AutoSyncMode != EBP2FPSyncMode::None"))
+	FString DSLOutputCategory;
+
 	// ========== 导出选项 ==========
 	
 	/** 是否包含已弃用的节点 */
 	UPROPERTY(Config, EditAnywhere, Category="Export Options",
 		meta=(DisplayName="Include Deprecated Nodes"))
 	bool bIncludeDeprecatedNodes;
-	
+
 	/** 是否包含实验性节点 */
 	UPROPERTY(Config, EditAnywhere, Category="Export Options",
 		meta=(DisplayName="Include Experimental Nodes"))

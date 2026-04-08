@@ -8,6 +8,8 @@ UAnimBP2FPSettings::UAnimBP2FPSettings()
 	, bGenerateOnStartup(true)
 	, bGenerateOnReload(false)  // 默认关闭，避免频繁重新生成
 	, StubOutputPath(TEXT("Intermediate/AnimLangStub/animlang-nodes-generated.rkt"))
+	, AutoSyncMode(EBP2FPSyncMode::None)  // 默认关闭，手动开启
+	, DSLOutputCategory(TEXT("AnimBP"))
 	, bIncludeDeprecatedNodes(false)
 	, bIncludeExperimentalNodes(false)
 {

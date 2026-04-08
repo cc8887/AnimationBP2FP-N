@@ -12,6 +12,7 @@
  * - 自动生成 AnimLang stub 文件
  * - 注册编辑器菜单命令
  * - 集成项目设置
+ * - 管理 Blueprint <-> DSL 自动同步
  */
 class FAnimBP2FPEditorModule : public IModuleInterface
 {
@@ -44,8 +45,17 @@ private:
 	
 	// 获取 stub 输出路径
 	FString GetStubPath();
-	
+
+	// 初始化 BP <-> DSL 映射注册表
+	void InitializeMappingRegistry();
+
+	// 根据设置启用/禁用自动同步
+	void SetupAutoSync();
+
 	// 委托句柄
 	FDelegateHandle PostEngineInitHandle;
 	FDelegateHandle ReloadCompleteHandle;
+
+	// Compiler hook for auto-sync (owned by module)
+	TUniquePtr<class FAnimBP2FPCompilerHook> CompilerHook;
 };

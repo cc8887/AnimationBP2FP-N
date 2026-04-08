@@ -3,6 +3,7 @@
 
 #include "AnimBP2FPExportCommandlet.h"
 #include "AnimBPExporter.h"
+#include "FBP2FPMappingRegistry.h"
 #include "Animation/AnimBlueprint.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Misc/FileHelper.h"
@@ -21,8 +22,8 @@ int32 UAnimBP2FPExportCommandlet::Main(const FString& Params)
 {
 	UE_LOG(LogTemp, Log, TEXT("=== AnimBP2FP Export Commandlet Starting ==="));
 	
-	// Output directory
-	FString OutputDir = FPaths::ProjectDir() / TEXT("AnimLang") / TEXT("Exported");
+	// Output directory: unified convention {Project}/Saved/BP2DSL/AnimBP
+	FString OutputDir = FPaths::ProjectDir() / TEXT("Saved") / TEXT("BP2DSL") / TEXT("AnimBP");
 	if (!IFileManager::Get().DirectoryExists(*OutputDir))
 	{
 		IFileManager::Get().MakeDirectory(*OutputDir, true);
@@ -54,6 +55,7 @@ int32 UAnimBP2FPExportCommandlet::Main(const FString& Params)
 	{
 		FString AssetName = AssetData.AssetName.ToString();
 		FString PackagePath = AssetData.PackageName.ToString();
+		FString ObjectPath = AssetData.GetObjectPathString();
 		
 		UE_LOG(LogTemp, Log, TEXT("Processing: %s (%s)"), *AssetName, *PackagePath);
 		
@@ -84,8 +86,23 @@ int32 UAnimBP2FPExportCommandlet::Main(const FString& Params)
 			*PackagePath, *AssetName, *DSLOutput
 		);
 		
-		// Write individual file
-		FString OutputFilePath = OutputDir / (AssetName + TEXT(".animlang"));
+		// Use unified path convention via mapping registry
+		FString FullPath = AnimBP->GetPathName();
+		FString OutputFilePath = FBP2FPMappingRegistry::BlueprintToDSLPath(FullPath, TEXT("AnimBP"), TEXT(".animlang"));
+		if (OutputFilePath.IsEmpty())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("  Cannot resolve DSL path for: %s"), *AssetName);
+			FailCount++;
+			continue;
+		}
+
+		// Ensure directory exists
+		FString Dir = FPaths::GetPath(OutputFilePath);
+		if (!IFileManager::Get().DirectoryExists(*Dir))
+		{
+			IFileManager::Get().MakeDirectory(*Dir, true);
+		}
+
 		if (FFileHelper::SaveStringToFile(FileContent, *OutputFilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 		{
 			UE_LOG(LogTemp, Log, TEXT("  OK -> %s"), *OutputFilePath);

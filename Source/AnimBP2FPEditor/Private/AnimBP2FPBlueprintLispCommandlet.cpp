@@ -5,6 +5,7 @@
 #include "AnimBPExporter.h"           // FAnimBPExporter::ExportEventGraph
 #include "BlueprintLispAST.h"         // FLispParser, BlueprintLisp::*
 #include "BlueprintLispConverter.h"   // FBlueprintLispConverter::Validate
+#include "FBP2FPMappingRegistry.h"    // Unified path convention
 
 #include "Animation/AnimBlueprint.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -45,7 +46,7 @@ int32 UAnimBP2FPBlueprintLispCommandlet::Main(const FString& Params)
 	FString TargetBP  = SwitchParams.FindRef(TEXT("bp"));
 	FString GraphName = SwitchParams.Contains(TEXT("graph")) ? SwitchParams[TEXT("graph")] : TEXT("EventGraph");
 	FString OutputDir = SwitchParams.Contains(TEXT("outdir")) ? SwitchParams[TEXT("outdir")]
-	                    : (FPaths::ProjectDir() / TEXT("AnimLang") / TEXT("EventGraph"));
+	                    : (FPaths::ProjectDir() / TEXT("Saved") / TEXT("BP2DSL") / TEXT("AnimBP"));
 	bool bRoundTrip   = Switches.Contains(TEXT("roundtrip"));
 	bool bNoWrite     = Switches.Contains(TEXT("nowrite"));
 
@@ -189,11 +190,26 @@ UAnimBP2FPBlueprintLispCommandlet::ExportOne(
 		}
 	}
 
-	// Write file
+	// Write file using unified path convention
 	if (bWriteFile)
 	{
-		FString SafeName = R.AssetName.Replace(TEXT("/"), TEXT("_")).Replace(TEXT("."), TEXT("_"));
-		FString FilePath = OutputDir / FString::Printf(TEXT("%s.bplisp"), *SafeName);
+		// Use mapping registry for hierarchical path: Saved/BP2DSL/AnimBP/{relative}.bplisp
+		FString FilePath = FBP2FPMappingRegistry::BlueprintToDSLPath(R.AssetPath, TEXT("AnimBP"), TEXT(".bplisp"));
+		if (FilePath.IsEmpty())
+		{
+			// Fallback: use OutputDir with safe name
+			FString SafeName = R.AssetName.Replace(TEXT("/"), TEXT("_")).Replace(TEXT("."), TEXT("_"));
+			FilePath = OutputDir / FString::Printf(TEXT("%s.bplisp"), *SafeName);
+		}
+		else
+		{
+			// Ensure directory exists
+			FString Dir = FPaths::GetPath(FilePath);
+			if (!IFileManager::Get().DirectoryExists(*Dir))
+			{
+				IFileManager::Get().MakeDirectory(*Dir, true);
+			}
+		}
 		FString Content  = FString::Printf(
 			TEXT(";; BlueprintLisp DSL - EventGraph Export\n")
 			TEXT(";; Blueprint: %s\n")
