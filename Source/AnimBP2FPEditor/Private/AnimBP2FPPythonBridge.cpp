@@ -5,6 +5,9 @@
 
 #include "AnimBPExporter.h"
 #include "AnimBPImporter.h"
+#include "AnimNodeExporter.h"
+#include "AnimLangRoundTrip.h"
+#include "FBP2FPMappingRegistry.h"
 #include "Animation/AnimBlueprint.h"
 #include "FileHelpers.h"
 #include "HAL/FileManager.h"
@@ -349,4 +352,169 @@ FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::ExportEventGraphToFile(
 	Result.FilePath = OutputFilePath;
 	Result.Message = FString::Printf(TEXT("Exported graph '%s' to file: %s"), *GraphName, *OutputFilePath);
 	return Result;
+}
+
+// ========== Mapping Registry ==========
+
+FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::GetMappingTable()
+{
+	FBP2FPMappingRegistry& Registry = FBP2FPMappingRegistry::Get();
+
+	FAnimBP2FPPythonResult Result;
+	Result.bSuccess = true;
+
+	TArray<FString> JsonEntries;
+	for (const FBP2FPMappingEntry& Entry : Registry.GetAllEntries())
+	{
+		FString StateStr;
+		switch (Entry.State)
+		{
+		case EBP2FPSyncState::Synced:    StateStr = TEXT("Synced");    break;
+		case EBP2FPSyncState::BPOnly:    StateStr = TEXT("BPOnly");    break;
+		case EBP2FPSyncState::DSLOnly:   StateStr = TEXT("DSLOnly");   break;
+		case EBP2FPSyncState::OutOfSync: StateStr = TEXT("OutOfSync"); break;
+		}
+
+		JsonEntries.Add(FString::Printf(
+			TEXT("{\"blueprint_path\":\"%s\",\"dsl_file_path\":\"%s\",\"category\":\"%s\",\"state\":\"%s\",\"has_blueprint\":%s,\"has_dsl\":%s}"),
+			*Entry.BlueprintPath,
+			*Entry.DSLFilePath,
+			*Entry.CategoryTag,
+			*StateStr,
+			Entry.bBlueprintExists ? TEXT("true") : TEXT("false"),
+			Entry.bDSLFileExists ? TEXT("true") : TEXT("false")
+		));
+	}
+
+	Result.DSLText = TEXT("[") + FString::Join(JsonEntries, TEXT(",")) + TEXT("]");
+	Result.Message = FString::Printf(TEXT("Mapping table: %d entries"), Registry.Num());
+	return Result;
+}
+
+FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::FindMappingByBlueprint(const FString& AnimBlueprintPath)
+{
+	FBP2FPMappingRegistry& Registry = FBP2FPMappingRegistry::Get();
+	const FBP2FPMappingEntry* Entry = Registry.FindByBlueprint(AnimBlueprintPath);
+
+	if (!Entry)
+	{
+		FAnimBP2FPPythonResult Result;
+		Result.bSuccess = false;
+		Result.Message = FString::Printf(TEXT("No mapping found for: %s"), *AnimBlueprintPath);
+		return Result;
+	}
+
+	FString StateStr;
+	switch (Entry->State)
+	{
+	case EBP2FPSyncState::Synced:    StateStr = TEXT("Synced");    break;
+	case EBP2FPSyncState::BPOnly:    StateStr = TEXT("BPOnly");    break;
+	case EBP2FPSyncState::DSLOnly:   StateStr = TEXT("DSLOnly");   break;
+	case EBP2FPSyncState::OutOfSync: StateStr = TEXT("OutOfSync"); break;
+	}
+
+	FAnimBP2FPPythonResult Result;
+	Result.bSuccess = true;
+	Result.AssetPath = Entry->BlueprintPath;
+	Result.FilePath = Entry->DSLFilePath;
+	Result.Message = FString::Printf(TEXT("State: %s | Blueprint: %s | DSL: %s"),
+		*StateStr, Entry->bBlueprintExists ? TEXT("yes") : TEXT("no"), Entry->bDSLFileExists ? TEXT("yes") : TEXT("no"));
+	return Result;
+}
+
+FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::AnimBlueprintPathToDSLPath(const FString& AnimBlueprintPath)
+{
+	FString DSLPath = FBP2FPMappingRegistry::BlueprintToDSLPath(AnimBlueprintPath, TEXT("AnimBP"), TEXT(".animlang"));
+
+	if (DSLPath.IsEmpty())
+	{
+		FAnimBP2FPPythonResult Result;
+		Result.bSuccess = false;
+		Result.Message = FString::Printf(TEXT("Invalid AnimBlueprint path (engine/system content not exportable): %s"), *AnimBlueprintPath);
+		return Result;
+	}
+
+	FAnimBP2FPPythonResult Result;
+	Result.bSuccess = true;
+	Result.AssetPath = AnimBlueprintPath;
+	Result.FilePath = DSLPath;
+	Result.Message = FString::Printf(TEXT("%s -> %s"), *AnimBlueprintPath, *DSLPath);
+	return Result;
+}
+
+// ========== Validation ==========
+
+FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::ValidateAnimBlueprintRoundTrip(const FString& AnimBlueprintPath)
+{
+	FString ResolvedPath;
+	FString Error;
+	UAnimBlueprint* AnimBlueprint = AnimBP2FPPythonBridge::LoadAnimBlueprintByPath(AnimBlueprintPath, ResolvedPath, Error);
+	if (!AnimBlueprint)
+	{
+		return AnimBP2FPPythonBridge::MakeFailure(Error);
+	}
+
+	// Export to DSL
+	FString DSLText = FAnimBPExporter::Export(AnimBlueprint);
+	if (DSLText.IsEmpty() || DSLText.StartsWith(TEXT("; Error:")))
+	{
+		FAnimBP2FPPythonResult Result;
+		Result.bSuccess = false;
+		Result.AssetPath = ResolvedPath;
+		Result.Message = FString::Printf(TEXT("Export failed for: %s"), *ResolvedPath);
+		if (!DSLText.IsEmpty())
+		{
+			Result.Warnings.Add(DSLText);
+		}
+		return Result;
+	}
+
+	// Run round-trip validation on the DSL text
+	FRoundTripResult RoundTrip = FAnimLangRoundTrip::TestString(DSLText, AnimBlueprint->GetName());
+
+	FAnimBP2FPPythonResult Result;
+	Result.AssetPath = ResolvedPath;
+	Result.bSuccess = RoundTrip.bSuccess;
+	Result.DSLText = DSLText;
+	Result.Warnings = RoundTrip.Differences;
+	if (RoundTrip.ParseErrors.Num() > 0)
+	{
+		Result.Warnings.Append(RoundTrip.ParseErrors);
+	}
+	Result.Message = FString::Printf(
+		TEXT("RoundTrip %s: %.1f%% similarity (%d/%d lines differ)"),
+		RoundTrip.bSuccess ? TEXT("PASS") : TEXT("FAIL"),
+		RoundTrip.SimilarityPercent,
+		RoundTrip.OriginalLines - RoundTrip.RoundTrippedLines,
+		RoundTrip.OriginalLines);
+	return Result;
+}
+
+// ========== Stub Export ==========
+
+FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::ExportStub(const FString& OutputFilePath)
+{
+#if WITH_EDITOR
+	FString StubPath = OutputFilePath;
+	if (StubPath.TrimStartAndEnd().IsEmpty())
+	{
+		StubPath = FPaths::ProjectDir() / TEXT("Saved") / TEXT("BP2DSL") / TEXT("AnimBP") / TEXT("animlang-nodes-generated.rkt");
+	}
+	FPaths::NormalizeFilename(StubPath);
+
+	bool bOk = FAnimNodeExporter::ExportAllNodes(StubPath);
+
+	FAnimBP2FPPythonResult Result;
+	Result.bSuccess = bOk;
+	Result.FilePath = StubPath;
+	Result.Message = bOk
+		? FString::Printf(TEXT("Animation node stub exported to: %s"), *StubPath)
+		: TEXT("Failed to export animation node stub");
+	return Result;
+#else
+	FAnimBP2FPPythonResult Result;
+	Result.bSuccess = false;
+	Result.Message = TEXT("Stub export is only available in editor builds");
+	return Result;
+#endif
 }

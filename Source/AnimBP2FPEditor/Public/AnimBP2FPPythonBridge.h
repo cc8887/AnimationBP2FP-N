@@ -125,4 +125,48 @@ public:
 		const FString& GraphName = TEXT("EventGraph"),
 		bool bIncludePositions = false,
 		bool bStableIds = true);
+
+	// ========== Mapping Registry ==========
+
+	/**
+	 * Query the AnimBlueprint <-> DSL mapping table.
+	 * Returns all entries as a JSON string: array of objects with keys:
+	 *   blueprint_path, dsl_file_path, category, state, has_blueprint, has_dsl
+	 * State values: "Synced", "BPOnly", "DSLOnly", "OutOfSync"
+	 */
+	UFUNCTION(BlueprintCallable, Category="AnimBP2FP|Python")
+	static FAnimBP2FPPythonResult GetMappingTable();
+
+	/**
+	 * Look up a single mapping entry by AnimBlueprint path.
+	 */
+	UFUNCTION(BlueprintCallable, Category="AnimBP2FP|Python")
+	static FAnimBP2FPPythonResult FindMappingByBlueprint(const FString& AnimBlueprintPath);
+
+	/**
+	 * Convert an AnimBlueprint package path to its corresponding DSL file path.
+	 *   /Game/Characters/ALS/ALS_Npc -> {Project}/Saved/BP2DSL/AnimBP/Characters/ALS/ALS_Npc.animlang
+	 */
+	UFUNCTION(BlueprintCallable, Category="AnimBP2FP|Python")
+	static FAnimBP2FPPythonResult AnimBlueprintPathToDSLPath(const FString& AnimBlueprintPath);
+
+	// ========== Validation ==========
+
+	/**
+	 * Run round-trip validation on a single AnimBlueprint:
+	 *   Export -> Parse -> ToString -> diff
+	 * Returns fidelity percentage and any diff lines in Warnings.
+	 */
+	UFUNCTION(BlueprintCallable, Category="AnimBP2FP|Python")
+	static FAnimBP2FPPythonResult ValidateAnimBlueprintRoundTrip(const FString& AnimBlueprintPath);
+
+	// ========== Stub Export ==========
+
+	/**
+	 * Export all UAnimGraphNode type definitions to a stub file.
+	 * Outputs Typed Racket format with node signatures for Lint/validation.
+	 * Default path: {Project}/Saved/BP2DSL/AnimBP/animlang-nodes-generated.rkt
+	 */
+	UFUNCTION(BlueprintCallable, Category="AnimBP2FP|Python")
+	static FAnimBP2FPPythonResult ExportStub(const FString& OutputFilePath = TEXT(""));
 };

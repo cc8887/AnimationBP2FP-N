@@ -20,27 +20,10 @@ class ANIMBP2FPEDITOR_API UAnimBP2FPSettings : public UDeveloperSettings
 public:
 	UAnimBP2FPSettings();
 	
-	// ========== Stub 生成设置 ==========
-	
-	/** 是否自动生成 stub 文件 */
-	UPROPERTY(Config, EditAnywhere, Category="Stub Generation",
-		meta=(DisplayName="Auto Generate Stub"))
-	bool bAutoGenerateStub;
-	
-	/** 是否在编辑器启动时生成 stub */
-	UPROPERTY(Config, EditAnywhere, Category="Stub Generation",
-		meta=(DisplayName="Generate On Startup",
-		      EditCondition="bAutoGenerateStub"))
-	bool bGenerateOnStartup;
-	
-	/** 是否在 C++ 热重载后生成 stub */
-	UPROPERTY(Config, EditAnywhere, Category="Stub Generation",
-		meta=(DisplayName="Generate On Reload",
-		      EditCondition="bAutoGenerateStub"))
-	bool bGenerateOnReload;
-	
+	// ========== Stub 设置 ==========
+
 	/** Stub 文件输出路径（相对于项目根目录） */
-	UPROPERTY(Config, EditAnywhere, Category="Stub Generation",
+	UPROPERTY(Config, EditAnywhere, Category="Stub",
 		meta=(DisplayName="Stub Output Path"))
 	FString StubOutputPath;
 	

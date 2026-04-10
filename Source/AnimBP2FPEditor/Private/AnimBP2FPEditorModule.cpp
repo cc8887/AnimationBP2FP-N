@@ -29,12 +29,7 @@ void FAnimBP2FPEditorModule::StartupModule()
 	PostEngineInitHandle = FCoreDelegates::OnPostEngineInit.AddRaw(
 		this, &FAnimBP2FPEditorModule::OnEngineInit
 	);
-	
-	// 注册热重载回调
-	ReloadCompleteHandle = FCoreUObjectDelegates::ReloadCompleteDelegate.AddRaw(
-		this, &FAnimBP2FPEditorModule::OnReloadComplete
-	);
-	
+
 	// 注册编辑器菜单（延迟到引擎初始化后）
 	UToolMenus::RegisterStartupCallback(
 		FSimpleMulticastDelegate::FDelegate::CreateRaw(
@@ -56,86 +51,39 @@ void FAnimBP2FPEditorModule::ShutdownModule()
 	
 	// 移除回调
 	FCoreDelegates::OnPostEngineInit.Remove(PostEngineInitHandle);
-	FCoreUObjectDelegates::ReloadCompleteDelegate.Remove(ReloadCompleteHandle);
 	
 	// 注销菜单
 	UToolMenus::UnRegisterStartupCallback(this);
 	UToolMenus::UnregisterOwner(this);
 }
 
-// ========== 自动生成逻辑 ==========
+// ========== 自动同步设置 ==========
 
 void FAnimBP2FPEditorModule::OnEngineInit()
 {
-	const UAnimBP2FPSettings* Settings = GetDefault<UAnimBP2FPSettings>();
-
 	// Initialize the BP <-> DSL mapping registry
 	InitializeMappingRegistry();
 
-	if (!Settings->bAutoGenerateStub || !Settings->bGenerateOnStartup)
-	{
-		// Even if stub generation is off, still setup auto-sync
-		SetupAutoSync();
-		return;
-	}
-	
-	if (ShouldRegenerateStub())
-	{
-		UE_LOG(LogTemp, Log, TEXT("AnimBP2FPEditor: Auto-generating stub on startup..."));
-		ExportNodes();
-	}
-
-	// Setup auto-sync after stub generation
+	// Setup auto-sync
 	SetupAutoSync();
 }
 
-void FAnimBP2FPEditorModule::OnReloadComplete(EReloadCompleteReason Reason)
-{
-	const UAnimBP2FPSettings* Settings = GetDefault<UAnimBP2FPSettings>();
-	
-	if (!Settings->bAutoGenerateStub || !Settings->bGenerateOnReload)
-	{
-		return;
-	}
-	
-	UE_LOG(LogTemp, Log, TEXT("AnimBP2FPEditor: Regenerating stub after reload..."));
-	ExportNodes();
-}
-
-bool FAnimBP2FPEditorModule::ShouldRegenerateStub()
-{
-	FString StubPath = GetStubPath();
-	
-	// 文件不存在，需要生成
-	if (!FPaths::FileExists(StubPath))
-	{
-		return true;
-	}
-	
-	// 比较时间戳（简化版本，实际应比较编译时间）
-	FDateTime StubTime = IFileManager::Get().GetTimeStamp(*StubPath);
-	FDateTime Now = FDateTime::Now();
-	
-	// 超过 1 天，重新生成
-	return (Now - StubTime).GetDays() >= 1;
-}
+// ========== 编辑器菜单 ==========
 
 FString FAnimBP2FPEditorModule::GetStubPath()
 {
 	const UAnimBP2FPSettings* Settings = GetDefault<UAnimBP2FPSettings>();
-	
+
 	FString Path = Settings->StubOutputPath;
-	
+
 	// 相对路径转绝对路径
 	if (FPaths::IsRelative(Path))
 	{
 		Path = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), Path);
 	}
-	
+
 	return Path;
 }
-
-// ========== 编辑器菜单 ==========
 
 void FAnimBP2FPEditorModule::RegisterMenuExtensions()
 {

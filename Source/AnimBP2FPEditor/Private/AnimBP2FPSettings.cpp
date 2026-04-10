@@ -4,10 +4,7 @@
 #include "AnimBP2FPSettings.h"
 
 UAnimBP2FPSettings::UAnimBP2FPSettings()
-	: bAutoGenerateStub(true)
-	, bGenerateOnStartup(true)
-	, bGenerateOnReload(false)  // 默认关闭，避免频繁重新生成
-	, StubOutputPath(TEXT("Intermediate/AnimLangStub/animlang-nodes-generated.rkt"))
+	: StubOutputPath(TEXT("Intermediate/AnimLangStub/animlang-nodes-generated.rkt"))
 	, AutoSyncMode(EBP2FPSyncMode::None)  // 默认关闭，手动开启
 	, DSLOutputCategory(TEXT("AnimBP"))
 	, bIncludeDeprecatedNodes(false)

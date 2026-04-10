@@ -24,25 +24,19 @@ public:
 private:
 	// 引擎初始化时回调
 	void OnEngineInit();
-	
-	// 热重载完成时回调
-	void OnReloadComplete(EReloadCompleteReason Reason);
-	
+
 	// 注册编辑器菜单
 	void RegisterMenuExtensions();
-	
+
 	// 导出节点命令
 	void ExportNodes();
-	
+
 	// 导出 AnimBP 到 DSL
 	void ExportAnimBPToDSL();
-	
+
 	// 往返验证测试
 	void RunRoundTripTest();
-	
-	// 检查是否需要重新生成 stub
-	bool ShouldRegenerateStub();
-	
+
 	// 获取 stub 输出路径
 	FString GetStubPath();
 
@@ -54,7 +48,6 @@ private:
 
 	// 委托句柄
 	FDelegateHandle PostEngineInitHandle;
-	FDelegateHandle ReloadCompleteHandle;
 
 	// Compiler hook for auto-sync (owned by module)
 	TUniquePtr<class FAnimBP2FPCompilerHook> CompilerHook;
