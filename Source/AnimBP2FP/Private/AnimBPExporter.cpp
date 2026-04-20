@@ -11,6 +11,8 @@
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
+#include "K2Node_VariableGet.h"
+#include "K2Node_VariableSet.h"
 
 // AnimGraph node headers
 #include "AnimGraphNode_Base.h"
@@ -75,6 +77,213 @@ static FString CamelToKebab(const FString& Input)
 	return Result;
 }
 
+namespace
+{
+	struct FHelperExportContext
+	{
+		TMap<FString, FHelperGraphDef> HelperByGeneratedVar;
+	};
+
+	static const FHelperExportContext* GActiveHelperExportContext = nullptr;
+
+	static FString QuoteDSLString(const FString& Value)
+	{
+		FString Escaped = Value;
+		Escaped.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+		Escaped.ReplaceInline(TEXT("\""), TEXT("\\\""));
+		return FString::Printf(TEXT("\"%s\""), *Escaped);
+	}
+
+	static bool IsManagedHelperGraphName(const FString& GraphName)
+	{
+		return GraphName.StartsWith(TEXT("__ABP2FP_HG_"));
+	}
+
+	static bool IsManagedGeneratedVarName(const FString& VariableName)
+	{
+		return VariableName.StartsWith(TEXT("__abp2fp_gv_"));
+	}
+
+	static FString DecodeManagedHelperId(const FString& Encoded)
+	{
+		FString Result = Encoded;
+		Result.ReplaceInline(TEXT("_"), TEXT("-"));
+		return Result;
+	}
+
+	static EPinType PinTypeToAnimLangType(const FEdGraphPinType& PinType)
+	{
+		const FString Category = PinType.PinCategory.ToString();
+		if (Category == TEXT("float") || Category == TEXT("real") || Category == TEXT("double"))
+		{
+			return EPinType::Float;
+		}
+		if (Category == TEXT("int") || Category == TEXT("int64"))
+		{
+			return EPinType::Int;
+		}
+		if (Category == TEXT("bool") || Category == TEXT("boolean"))
+		{
+			return EPinType::Bool;
+		}
+		if (Category == TEXT("name"))
+		{
+			return EPinType::Name;
+		}
+		if (Category == TEXT("object") || Category == TEXT("softobject"))
+		{
+			return EPinType::Object;
+		}
+		if (Category == UEdGraphSchema_K2::PC_Struct && PinType.PinSubCategoryObject == TBaseStructure<FVector>::Get())
+		{
+			return EPinType::Vector;
+		}
+		if (Category == UEdGraphSchema_K2::PC_Struct && PinType.PinSubCategoryObject == TBaseStructure<FRotator>::Get())
+		{
+			return EPinType::Rotator;
+		}
+		if (Category == UEdGraphSchema_K2::PC_Struct && PinType.PinSubCategoryObject == TBaseStructure<FTransform>::Get())
+		{
+			return EPinType::Transform;
+		}
+		return EPinType::Float;
+	}
+
+	static bool TryGetVariableNameFromLinkedPin(UEdGraphPin* Pin, FString& OutVariableName)
+	{
+		if (!Pin || Pin->LinkedTo.Num() == 0)
+		{
+			return false;
+		}
+
+		UEdGraphNode* LinkedNode = Pin->LinkedTo[0]->GetOwningNode();
+		if (UK2Node_VariableGet* VarGetNode = Cast<UK2Node_VariableGet>(LinkedNode))
+		{
+			OutVariableName = VarGetNode->VariableReference.GetMemberName().ToString();
+			return !OutVariableName.IsEmpty();
+		}
+
+		return false;
+	}
+
+	static FString GetLinkedNodeFallbackValue(UEdGraphPin* Pin)
+	{
+		if (!Pin || Pin->LinkedTo.Num() == 0)
+		{
+			return FString();
+		}
+
+		UEdGraphNode* LinkedNode = Pin->LinkedTo[0]->GetOwningNode();
+		if (!LinkedNode)
+		{
+			return FString();
+		}
+
+		return FString::Printf(TEXT("(var %s)"), *QuoteDSLString(LinkedNode->GetNodeTitle(ENodeTitleType::ListView).ToString()));
+	}
+
+	static FString ExportLinkedPinValue(UEdGraphPin* Pin)
+	{
+		FString VariableName;
+		if (TryGetVariableNameFromLinkedPin(Pin, VariableName))
+		{
+			if (GActiveHelperExportContext)
+			{
+				if (const FHelperGraphDef* Helper = GActiveHelperExportContext->HelperByGeneratedVar.Find(VariableName))
+				{
+					return FString::Printf(TEXT("(subgraph-ref %s)"), *QuoteDSLString(Helper->Id));
+				}
+			}
+			return FString::Printf(TEXT("(bind-var %s)"), *QuoteDSLString(VariableName));
+		}
+
+		return GetLinkedNodeFallbackValue(Pin);
+	}
+
+	static FString ResolveHelperGeneratedVarName(const UEdGraph* Graph)
+	{
+		if (!Graph)
+		{
+			return FString();
+		}
+
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (UK2Node_VariableSet* VarSetNode = Cast<UK2Node_VariableSet>(Node))
+			{
+				const FString VariableName = VarSetNode->VariableReference.GetMemberName().ToString();
+				if (IsManagedGeneratedVarName(VariableName))
+				{
+					return VariableName;
+				}
+			}
+		}
+
+		return FString();
+	}
+
+	static void CollectHelperGraphs(UAnimBlueprint* AnimBlueprint, const TSharedPtr<FAnimGraphAST>& ResultAST, FHelperExportContext& OutContext)
+	{
+		if (!AnimBlueprint || !ResultAST.IsValid())
+		{
+			return;
+		}
+
+		for (UEdGraph* Graph : AnimBlueprint->FunctionGraphs)
+		{
+			if (!Graph)
+			{
+				continue;
+			}
+
+			const FString GraphName = Graph->GetName();
+			const FString GeneratedVarName = ResolveHelperGeneratedVarName(Graph);
+			if (GeneratedVarName.IsEmpty())
+			{
+				continue;
+			}
+			if (!IsManagedHelperGraphName(GraphName) && !IsManagedGeneratedVarName(GeneratedVarName))
+			{
+				continue;
+			}
+
+			FBlueprintLispConverter::FExportOptions LispOptions;
+			LispOptions.bPrettyPrint = false;
+			LispOptions.bIncludeComments = false;
+			LispOptions.bIncludePositions = false;
+			LispOptions.bStableIds = true;
+			FBlueprintLispResult LispResult = FBlueprintLispConverter::ExportGraph(Graph, LispOptions);
+			if (!LispResult.bSuccess || LispResult.LispCode.IsEmpty())
+			{
+				UE_LOG(LogAnimBP2FP, Warning, TEXT("[DEGRADATION:HelperGraphExport] Failed to export helper graph '%s': %s"),
+					*GraphName, *LispResult.Error);
+				continue;
+			}
+
+			FHelperGraphDef Helper;
+			const FString HelperSuffix = GeneratedVarName.Mid(FCString::Strlen(TEXT("__abp2fp_gv_")));
+			Helper.Id = DecodeManagedHelperId(HelperSuffix);
+			Helper.GraphName = GraphName;
+			Helper.GeneratedVar = GeneratedVarName;
+			Helper.DSL = LispResult.LispCode;
+			Helper.UpdateGroup = TEXT("__ABP2FP_UpdateBindings");
+			Helper.GeneratedType = EPinType::Float;
+
+			for (const FBPVariableDescription& Var : AnimBlueprint->NewVariables)
+			{
+				if (Var.VarName == FName(*GeneratedVarName))
+				{
+					Helper.GeneratedType = PinTypeToAnimLangType(Var.VarType);
+					break;
+				}
+			}
+
+			ResultAST->HelperGraphs.Add(Helper);
+			OutContext.HelperByGeneratedVar.Add(GeneratedVarName, Helper);
+		}
+	}
+}
+
 // Follow a specific named input pose pin to its connected node
 static UAnimGraphNode_Base* GetConnectedPoseNode(UAnimGraphNode_Base* Node, const FName& PinName)
 {
@@ -124,13 +333,13 @@ static FString GetPinValueOrDefault(UAnimGraphNode_Base* Node, const FName& PinN
 	{
 		if (Pin->PinName == PinName && Pin->Direction == EGPD_Input)
 		{
-			// If the pin has a linked node, return as (var ...) marking EventGraph-driven connection
+			// If the pin has a linked node, prefer structured binding forms before falling back to (var ...)
 			if (Pin->LinkedTo.Num() > 0)
 			{
-				UEdGraphNode* LinkedNode = Pin->LinkedTo[0]->GetOwningNode();
-				if (LinkedNode)
+				const FString LinkedValue = ExportLinkedPinValue(Pin);
+				if (!LinkedValue.IsEmpty())
 				{
-					return FString::Printf(TEXT("(var \"%s\")"), *LinkedNode->GetNodeTitle(ENodeTitleType::ListView).ToString());
+					return LinkedValue;
 				}
 			}
 			// Otherwise return the default value
@@ -156,19 +365,15 @@ static void CollectNonPoseParams(UAnimGraphNode_Base* Node, TMap<FString, FStrin
 		// Skip hidden or orphaned pins
 		if (Pin->bHidden || Pin->bOrphanedPin) continue;
 		
-		// Struct pins connected to another node: export as (var "NodeTitle") — marks EventGraph-driven connection
-		// NOTE: (var ...) is exported for traceability but cannot be automatically restored on import
-		// because it requires K2Node_VariableGet/Function nodes in the EventGraph.
+		// Struct pins connected to another node: first try structured binding export, then fall back to (var ...)
 		if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
 		{
 			if (Pin->LinkedTo.Num() > 0)
 			{
-				UEdGraphNode* LinkedNode = Pin->LinkedTo[0]->GetOwningNode();
-				if (LinkedNode)
+				FString ParamName = CamelToKebab(Pin->PinName.ToString());
+				FString Value = ExportLinkedPinValue(Pin);
+				if (!Value.IsEmpty())
 				{
-					FString ParamName = CamelToKebab(Pin->PinName.ToString());
-					FString Value = FString::Printf(TEXT("(var \"%s\")"), 
-						*LinkedNode->GetNodeTitle(ENodeTitleType::ListView).ToString());
 					OutProperties.Add(ParamName, Value);
 				}
 			}
@@ -182,14 +387,8 @@ static void CollectNonPoseParams(UAnimGraphNode_Base* Node, TMap<FString, FStrin
 		
 		if (Pin->LinkedTo.Num() > 0)
 		{
-			// Pin is connected to an EventGraph node — export as (var "NodeTitle")
-			// NOTE: (var ...) marks EventGraph-driven connection; cannot be auto-restored on import
-			UEdGraphNode* LinkedNode = Pin->LinkedTo[0]->GetOwningNode();
-			if (LinkedNode)
-			{
-				Value = FString::Printf(TEXT("(var \"%s\")"), 
-					*LinkedNode->GetNodeTitle(ENodeTitleType::ListView).ToString());
-			}
+			// Prefer structured binding export for VariableGet / generated-var bridges before falling back
+			Value = ExportLinkedPinValue(Pin);
 		}
 		else if (!Pin->DefaultValue.IsEmpty())
 		{
@@ -612,6 +811,12 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBluep
 		}
 	}
 
+	FHelperExportContext HelperExportContext;
+	CollectHelperGraphs(AnimBlueprint, ResultAST, HelperExportContext);
+
+	const FHelperExportContext* PreviousHelperContext = GActiveHelperExportContext;
+	GActiveHelperExportContext = &HelperExportContext;
+
 	// Find the AnimGraph
 	UEdGraph* AnimGraph = nullptr;
 	for (UEdGraph* Graph : AnimBlueprint->FunctionGraphs)
@@ -661,6 +866,7 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBluep
 		}
 	}
 
+	GActiveHelperExportContext = PreviousHelperContext;
 	return ResultAST;
 }
 

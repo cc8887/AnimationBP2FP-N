@@ -2199,7 +2199,7 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 				if (BoundGraph)
 				{
 					FBlueprintLispConverter::FImportOptions LispOpts;
-					LispOpts.bClearExisting = true;
+					LispOpts.ImportMode = FBlueprintLispConverter::EImportMode::ReplaceGraph;
 					LispOpts.bAutoLayout = false;
 					LispOpts.bCompile = false;
 					FBlueprintLispResult LispResult = FBlueprintLispConverter::ImportGraph(
