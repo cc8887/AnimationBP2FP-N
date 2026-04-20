@@ -106,7 +106,6 @@ public:
 
 	/**
 	 * Export the EventGraph (or another graph) to BlueprintLisp text.
-	 * Current scope is export only; import is not implemented yet.
 	 */
 	UFUNCTION(BlueprintCallable, Category="AnimBP2FP|Python")
 	static FAnimBP2FPPythonResult ExportEventGraphToText(
@@ -125,6 +124,54 @@ public:
 		const FString& GraphName = TEXT("EventGraph"),
 		bool bIncludePositions = false,
 		bool bStableIds = true);
+
+	/**
+	 * Import BlueprintLisp text into the EventGraph (or another graph) of an AnimBlueprint.
+	 * Current implementation uses BlueprintLisp ReplaceGraph semantics.
+	 */
+	UFUNCTION(BlueprintCallable, Category="AnimBP2FP|Python")
+	static FAnimBP2FPPythonResult ImportEventGraphFromText(
+		const FString& AnimBlueprintPath,
+		const FString& GraphName,
+		const FString& DSLText,
+		bool bCompile = true,
+		bool bSavePackage = true);
+
+	/**
+	 * Import a BlueprintLisp file into the EventGraph (or another graph) of an AnimBlueprint.
+	 */
+	UFUNCTION(BlueprintCallable, Category="AnimBP2FP|Python")
+	static FAnimBP2FPPythonResult ImportEventGraphFromFile(
+		const FString& AnimBlueprintPath,
+		const FString& GraphName,
+		const FString& InputFilePath,
+		bool bCompile = true,
+		bool bSavePackage = true);
+
+	/**
+	 * Update the EventGraph (or another graph) of an AnimBlueprint from BlueprintLisp text.
+	 * Current implementation intentionally falls back to ReplaceGraph import until
+	 * BlueprintLisp semantic update is implemented.
+	 */
+	UFUNCTION(BlueprintCallable, Category="AnimBP2FP|Python")
+	static FAnimBP2FPPythonResult UpdateEventGraphFromText(
+		const FString& AnimBlueprintPath,
+		const FString& GraphName,
+		const FString& DSLText,
+		bool bCompile = true,
+		bool bSavePackage = true);
+
+	/**
+	 * Update the EventGraph (or another graph) of an AnimBlueprint from a BlueprintLisp file.
+	 */
+	UFUNCTION(BlueprintCallable, Category="AnimBP2FP|Python")
+	static FAnimBP2FPPythonResult UpdateEventGraphFromFile(
+		const FString& AnimBlueprintPath,
+		const FString& GraphName,
+		const FString& InputFilePath,
+		bool bCompile = true,
+		bool bSavePackage = true);
+
 
 	// ========== Mapping Registry ==========
 

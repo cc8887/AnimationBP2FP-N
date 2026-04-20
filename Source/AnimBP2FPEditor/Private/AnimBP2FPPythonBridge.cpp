@@ -8,12 +8,14 @@
 #include "AnimNodeExporter.h"
 #include "AnimLangRoundTrip.h"
 #include "FBP2FPMappingRegistry.h"
+#include "BlueprintLispConverter.h"
 #include "Animation/AnimBlueprint.h"
 #include "FileHelpers.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+
 
 namespace AnimBP2FPPythonBridge
 {
@@ -145,7 +147,71 @@ namespace AnimBP2FPPythonBridge
 			UpdateResult.NumPropertyChanges,
 			UpdateResult.NumStructuralChanges);
 	}
+
+	static FAnimBP2FPPythonResult FromBlueprintLispResult(
+		const FBlueprintLispResult& InResult,
+		const FString& AssetPath,
+		const FString& SuccessMessage)
+	{
+		FAnimBP2FPPythonResult Result;
+		Result.bSuccess = InResult.bSuccess;
+		Result.AssetPath = AssetPath;
+		Result.DSLText = InResult.LispCode;
+		Result.Warnings = InResult.Warnings;
+		if (!InResult.Error.IsEmpty())
+		{
+			Result.Warnings.Insert(InResult.Error, 0);
+		}
+		Result.Message = InResult.bSuccess
+			? SuccessMessage
+			: (InResult.Error.IsEmpty() ? TEXT("Operation failed") : InResult.Error);
+		return Result;
+	}
+
+	static FAnimBP2FPPythonResult ImportEventGraphInternal(
+		UAnimBlueprint* AnimBlueprint,
+		const FString& ResolvedPath,
+		const FString& GraphName,
+		const FString& DSLText,
+		bool bCompile,
+		bool bSavePackage,
+		const FString& SuccessMessage)
+	{
+		if (!AnimBlueprint)
+		{
+			return MakeFailure(TEXT("AnimBlueprint is null"));
+		}
+
+		FBlueprintLispConverter::FImportOptions Options;
+		Options.ImportMode = FBlueprintLispConverter::EImportMode::ReplaceGraph;
+		Options.bCompile = bCompile;
+		Options.bAutoLayout = true;
+		Options.bFailOnUnsupportedForm = true;
+
+		FBlueprintLispResult LispResult = FBlueprintLispConverter::Import(AnimBlueprint, GraphName, DSLText, Options);
+		FAnimBP2FPPythonResult Result = FromBlueprintLispResult(LispResult, ResolvedPath, SuccessMessage);
+		Result.DSLText = DSLText;
+
+		if (!Result.bSuccess)
+		{
+			return Result;
+		}
+
+		if (bSavePackage)
+		{
+			FString SaveError;
+			Result.bSavedPackage = SaveBlueprintPackage(AnimBlueprint, SaveError);
+			if (!Result.bSavedPackage)
+			{
+				Result.Warnings.Add(SaveError);
+				Result.Message += TEXT(" (package save failed)");
+			}
+		}
+
+		return Result;
+	}
 }
+
 
 FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::ExportAnimBlueprintToText(const FString& AnimBlueprintPath)
 {
@@ -354,7 +420,111 @@ FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::ExportEventGraphToFile(
 	return Result;
 }
 
+FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::ImportEventGraphFromText(
+	const FString& AnimBlueprintPath,
+	const FString& GraphName,
+	const FString& DSLText,
+	bool bCompile,
+	bool bSavePackage)
+{
+	if (DSLText.TrimStartAndEnd().IsEmpty())
+	{
+		return AnimBP2FPPythonBridge::MakeFailure(TEXT("DSLText is empty"));
+	}
+
+	FString ResolvedPath;
+	FString Error;
+	UAnimBlueprint* AnimBlueprint = AnimBP2FPPythonBridge::LoadAnimBlueprintByPath(AnimBlueprintPath, ResolvedPath, Error);
+	if (!AnimBlueprint)
+	{
+		return AnimBP2FPPythonBridge::MakeFailure(Error);
+	}
+
+	return AnimBP2FPPythonBridge::ImportEventGraphInternal(
+		AnimBlueprint,
+		ResolvedPath,
+		GraphName,
+		DSLText,
+		bCompile,
+		bSavePackage,
+		FString::Printf(TEXT("Imported graph '%s' into %s"), *GraphName, *ResolvedPath));
+}
+
+FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::ImportEventGraphFromFile(
+	const FString& AnimBlueprintPath,
+	const FString& GraphName,
+	const FString& InputFilePath,
+	bool bCompile,
+	bool bSavePackage)
+{
+	FString DSLText;
+	FString Error;
+	if (!AnimBP2FPPythonBridge::ReadTextFile(InputFilePath, DSLText, Error))
+	{
+		return AnimBP2FPPythonBridge::MakeFailure(Error);
+	}
+
+	FAnimBP2FPPythonResult Result = ImportEventGraphFromText(
+		AnimBlueprintPath,
+		GraphName,
+		DSLText,
+		bCompile,
+		bSavePackage);
+	Result.FilePath = InputFilePath;
+	return Result;
+}
+
+FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::UpdateEventGraphFromText(
+	const FString& AnimBlueprintPath,
+	const FString& GraphName,
+	const FString& DSLText,
+	bool bCompile,
+	bool bSavePackage)
+{
+	FAnimBP2FPPythonResult Result = ImportEventGraphFromText(
+		AnimBlueprintPath,
+		GraphName,
+		DSLText,
+		bCompile,
+		bSavePackage);
+
+	if (Result.bSuccess)
+	{
+		Result.Warnings.Insert(
+			TEXT("BlueprintLisp semantic Update is not implemented yet; UpdateEventGraph currently uses ReplaceGraph import semantics."),
+			0);
+		Result.Message = FString::Printf(TEXT("Updated graph '%s' in %s (ReplaceGraph fallback)"), *GraphName, *Result.AssetPath);
+	}
+
+	return Result;
+}
+
+FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::UpdateEventGraphFromFile(
+	const FString& AnimBlueprintPath,
+	const FString& GraphName,
+	const FString& InputFilePath,
+	bool bCompile,
+	bool bSavePackage)
+{
+	FString DSLText;
+	FString Error;
+	if (!AnimBP2FPPythonBridge::ReadTextFile(InputFilePath, DSLText, Error))
+	{
+		return AnimBP2FPPythonBridge::MakeFailure(Error);
+	}
+
+	FAnimBP2FPPythonResult Result = UpdateEventGraphFromText(
+		AnimBlueprintPath,
+		GraphName,
+		DSLText,
+		bCompile,
+		bSavePackage);
+	Result.FilePath = InputFilePath;
+	return Result;
+}
+
 // ========== Mapping Registry ==========
+
 
 FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::GetMappingTable()
 {
