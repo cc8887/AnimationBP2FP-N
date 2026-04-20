@@ -43,6 +43,7 @@
 #include "Animation/AnimLayerInterface.h"
 #include "Factories/AnimBlueprintFactory.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "BlueprintLispAST.h"
 #include "BlueprintLispConverter.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphPin.h"
@@ -50,6 +51,7 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "K2Node_VariableGet.h"
+#include "K2Node_VariableSet.h"
 #include "Engine/MemberReference.h"
 #include "UObject/UObjectIterator.h"
 
@@ -98,6 +100,215 @@ namespace
 			return Helper.GeneratedVar.TrimStartAndEnd();
 		}
 		return FString::Printf(TEXT("__abp2fp_gv_%s"), *SanitizeHelperIdentifier(Helper.Id));
+	}
+
+	static bool IMP_IsManagedHelperGraphName(const FString& GraphName)
+	{
+		return GraphName.StartsWith(TEXT("__ABP2FP_HG_"));
+	}
+
+	static bool IMP_IsManagedGeneratedVarName(const FString& VariableName)
+	{
+		return VariableName.StartsWith(TEXT("__abp2fp_gv_"));
+	}
+
+	static FString FindManagedGeneratedVarName(const UEdGraph* Graph)
+	{
+		if (!Graph)
+		{
+			return FString();
+		}
+
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (const UK2Node_VariableSet* VarSetNode = Cast<UK2Node_VariableSet>(Node))
+			{
+				const FString VariableName = VarSetNode->VariableReference.GetMemberName().ToString();
+				if (IMP_IsManagedGeneratedVarName(VariableName))
+				{
+					return VariableName;
+				}
+			}
+		}
+
+		return FString();
+	}
+
+	static FLispNodePtr CloneBlueprintLispNodeWithoutStableIds(const FLispNodePtr& Node)
+	{
+		if (!Node.IsValid())
+		{
+			return Node;
+		}
+
+		FLispNodePtr Copy = MakeShared<FLispNode>();
+		Copy->Type = Node->Type;
+		Copy->StringValue = Node->StringValue;
+		Copy->NumberValue = Node->NumberValue;
+		Copy->Line = Node->Line;
+		Copy->Column = Node->Column;
+
+		if (Node->IsList())
+		{
+			for (int32 Index = 0; Index < Node->Children.Num(); ++Index)
+			{
+				const FLispNodePtr& Child = Node->Children[Index];
+				if (Child.IsValid() && Child->IsKeyword()
+					&& (Child->StringValue == TEXT(":id") || Child->StringValue == TEXT(":event-id")))
+				{
+					++Index;
+					continue;
+				}
+
+				Copy->Children.Add(CloneBlueprintLispNodeWithoutStableIds(Child));
+			}
+		}
+
+		return Copy;
+	}
+
+	static FString CanonicalizeBlueprintLispForComparison(const FString& LispCode)
+	{
+		const FString Trimmed = LispCode.TrimStartAndEnd();
+		if (Trimmed.IsEmpty())
+		{
+			return FString();
+		}
+
+		const FLispParseResult ParseResult = FLispParser::Parse(Trimmed);
+		if (!ParseResult.bSuccess)
+		{
+			FString Fallback = Trimmed;
+			Fallback.ReplaceInline(TEXT("\r\n"), TEXT("\n"));
+			return Fallback;
+		}
+
+		TArray<FString> CanonicalNodes;
+		for (const FLispNodePtr& Node : ParseResult.Nodes)
+		{
+			const FLispNodePtr CanonNode = CloneBlueprintLispNodeWithoutStableIds(Node);
+			if (CanonNode.IsValid())
+			{
+				CanonicalNodes.Add(CanonNode->ToString(false, 0));
+			}
+		}
+		return FString::Join(CanonicalNodes, TEXT("\n"));
+	}
+
+	static FString MakeComparableHelperSignature(const FHelperGraphDef& Helper)
+	{
+		return FString::Printf(
+			TEXT("%s|%s|%s|%d|%s|%s"),
+			*Helper.Id.TrimStartAndEnd(),
+			*GetResolvedHelperGraphName(Helper),
+			*GetResolvedGeneratedVarName(Helper),
+			static_cast<int32>(Helper.GeneratedType),
+			*Helper.UpdateGroup.TrimStartAndEnd(),
+			*CanonicalizeBlueprintLispForComparison(Helper.DSL));
+	}
+
+	static bool AreEquivalentHelperSets(const TArray<FHelperGraphDef>& A, const TArray<FHelperGraphDef>& B)
+	{
+		if (A.Num() != B.Num())
+		{
+			return false;
+		}
+
+		TArray<FString> SignaturesA;
+		TArray<FString> SignaturesB;
+		SignaturesA.Reserve(A.Num());
+		SignaturesB.Reserve(B.Num());
+
+		for (const FHelperGraphDef& Helper : A)
+		{
+			SignaturesA.Add(MakeComparableHelperSignature(Helper));
+		}
+		for (const FHelperGraphDef& Helper : B)
+		{
+			SignaturesB.Add(MakeComparableHelperSignature(Helper));
+		}
+
+		SignaturesA.Sort();
+		SignaturesB.Sort();
+		return SignaturesA == SignaturesB;
+	}
+
+	static void RemoveStaleManagedHelperGraphs(UAnimBlueprint* Blueprint, const TArray<FHelperGraphDef>& DesiredHelpers)
+	{
+		if (!Blueprint)
+		{
+			return;
+		}
+
+		TSet<FName> DesiredGraphNames;
+		for (const FHelperGraphDef& Helper : DesiredHelpers)
+		{
+			DesiredGraphNames.Add(FName(*GetResolvedHelperGraphName(Helper)));
+		}
+
+		TArray<UEdGraph*> GraphsToRemove;
+		for (UEdGraph* Graph : Blueprint->FunctionGraphs)
+		{
+			if (!Graph)
+			{
+				continue;
+			}
+
+			const FString GraphName = Graph->GetName();
+			const FString ManagedGeneratedVar = FindManagedGeneratedVarName(Graph);
+			const bool bManagedGraph = IMP_IsManagedHelperGraphName(GraphName) || IMP_IsManagedGeneratedVarName(ManagedGeneratedVar);
+			if (!bManagedGraph)
+			{
+				continue;
+			}
+
+			if (!DesiredGraphNames.Contains(Graph->GetFName()))
+			{
+				GraphsToRemove.Add(Graph);
+			}
+		}
+
+		for (UEdGraph* GraphToRemove : GraphsToRemove)
+		{
+			UE_LOG(LogAnimBPImporter, Log, TEXT("Removing stale managed helper graph: %s"), *GraphToRemove->GetName());
+			FBlueprintEditorUtils::RemoveGraph(Blueprint, GraphToRemove, EGraphRemoveFlags::MarkTransient);
+			GraphToRemove->MarkAsGarbage();
+		}
+
+		if (GraphsToRemove.Num() > 0)
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		}
+	}
+
+	static void RemoveStaleManagedGeneratedVars(UAnimBlueprint* Blueprint, const TArray<FHelperGraphDef>& DesiredHelpers)
+	{
+		if (!Blueprint)
+		{
+			return;
+		}
+
+		TSet<FName> DesiredVariableNames;
+		for (const FHelperGraphDef& Helper : DesiredHelpers)
+		{
+			DesiredVariableNames.Add(FName(*GetResolvedGeneratedVarName(Helper)));
+		}
+
+		TArray<FName> VariablesToRemove;
+		for (const FBPVariableDescription& ExistingVar : Blueprint->NewVariables)
+		{
+			const FString VariableName = ExistingVar.VarName.ToString();
+			if (IMP_IsManagedGeneratedVarName(VariableName) && !DesiredVariableNames.Contains(ExistingVar.VarName))
+			{
+				VariablesToRemove.Add(ExistingVar.VarName);
+			}
+		}
+
+		for (const FName& VariableToRemove : VariablesToRemove)
+		{
+			UE_LOG(LogAnimBPImporter, Log, TEXT("Removing stale managed generated var: %s"), *VariableToRemove.ToString());
+			FBlueprintEditorUtils::RemoveMemberVariable(Blueprint, VariableToRemove);
+		}
 	}
 
 	static bool TryBuildEdGraphPinType(EPinType Type, FEdGraphPinType& OutPinType)
@@ -2641,10 +2852,11 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 	// Step 1: Clear all existing nodes (except Root)
 	ClearAnimGraph(AnimGraph);
 	ClearDefines(Blueprint);
+	RemoveStaleManagedHelperGraphs(Blueprint, NewAST->HelperGraphs);
 	
 	// Step 2: Rebuild using the standard BuildAnimGraph logic
 	// Note: Variables already exist in the blueprint — we may need to add new ones
-	// but we don't remove existing ones to avoid breaking EventGraph references
+	// but we don't remove existing user variables to avoid breaking EventGraph references
 	
 	// Add any new variables that don't already exist
 	for (const FVariableDef& Var : NewAST->Variables)
@@ -2667,6 +2879,7 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 	}
 	BuildGeneratedVars(Blueprint, NewAST->HelperGraphs);
 	BuildHelperGraphs(Blueprint, NewAST->HelperGraphs);
+	RemoveStaleManagedGeneratedVars(Blueprint, NewAST->HelperGraphs);
 
 	TMap<FString, FHelperGraphDef> HelperGraphLookup;
 	for (const FHelperGraphDef& Helper : NewAST->HelperGraphs)
@@ -2830,6 +3043,8 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 		Result.Warnings.Add(TEXT("Failed to parse new DSL code"));
 		return Result;
 	}
+
+	const bool bHelperGraphsChanged = !AreEquivalentHelperSets(OldAST->HelperGraphs, NewAST->HelperGraphs);
 	
 	// Step 3: Compute diff
 	FAnimLangDiffResult Diff = FAnimLangDiffer::Diff(OldAST, NewAST);
@@ -2838,8 +3053,17 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 	Result.NumPropertyChanges = Diff.NumPropertyChanges();
 	Result.NumStructuralChanges = Diff.NumStructuralChanges();
 	Result.DiffSummary = Diff.ToSummary();
+
+	if (bHelperGraphsChanged)
+	{
+		Result.NumChanges += 1;
+		Result.NumStructuralChanges += 1;
+		Result.DiffSummary = Diff.HasChanges()
+			? Result.DiffSummary + TEXT("; helper graphs changed")
+			: TEXT("helper graphs changed");
+	}
 	
-	if (!Diff.HasChanges())
+	if (!Diff.HasChanges() && !bHelperGraphsChanged)
 	{
 		Result.bSuccess = true;
 		Result.Warnings.Add(TEXT("No changes detected between current blueprint and new DSL"));
