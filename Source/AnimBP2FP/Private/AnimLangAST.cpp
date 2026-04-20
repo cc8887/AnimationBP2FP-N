@@ -3,6 +3,52 @@
 
 #include "AnimLangAST.h"
 
+namespace
+{
+	static FString EscapeQuotedStringForDSL(const FString& Value)
+	{
+		FString Escaped = Value;
+		Escaped.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+		Escaped.ReplaceInline(TEXT("\""), TEXT("\\\""));
+		Escaped.ReplaceInline(TEXT("\n"), TEXT("\\n"));
+		Escaped.ReplaceInline(TEXT("\r"), TEXT("\\r"));
+		return FString::Printf(TEXT("\"%s\""), *Escaped);
+	}
+
+	static FString PinTypeToAnimLangString(EPinType Type)
+	{
+		switch (Type)
+		{
+		case EPinType::Pose:      return TEXT("pose");
+		case EPinType::Float:     return TEXT("float");
+		case EPinType::Int:       return TEXT("int");
+		case EPinType::Bool:      return TEXT("bool");
+		case EPinType::Vector:    return TEXT("vector");
+		case EPinType::Rotator:   return TEXT("rotator");
+		case EPinType::Transform: return TEXT("transform");
+		case EPinType::Name:      return TEXT("name");
+		case EPinType::Object:    return TEXT("object");
+		default:                  return TEXT("unknown");
+		}
+	}
+
+	static FString FormatHelperDSLValue(const FString& Value)
+	{
+		const FString Trimmed = Value.TrimStartAndEnd();
+		if (Trimmed.IsEmpty())
+		{
+			return TEXT("\"\"");
+		}
+
+		if (Trimmed.StartsWith(TEXT("(")) || Trimmed.StartsWith(TEXT("[")))
+		{
+			return Trimmed;
+		}
+
+		return EscapeQuotedStringForDSL(Trimmed);
+	}
+}
+
 // ========== FAnimNodeAST ==========
 
 FString FAnimNodeAST::ToString(int32 Indent) const
@@ -210,6 +256,42 @@ FString FCachedPoseDef::GetIdentifier() const
 	return Id;
 }
 
+// ========== FHelperGraphDef ==========
+
+FString FHelperGraphDef::ToString(int32 Indent) const
+{
+	FString IndentStr = FString::ChrN(Indent, ' ');
+	FString ChildIndent = FString::ChrN(Indent + 2, ' ');
+	FString Result = FString::Printf(TEXT("%s(helper-graph"), *IndentStr);
+
+	if (!Id.IsEmpty())
+	{
+		Result += FString::Printf(TEXT("\n%s:id %s"), *ChildIndent, *EscapeQuotedStringForDSL(Id));
+	}
+	if (!GraphName.IsEmpty())
+	{
+		Result += FString::Printf(TEXT("\n%s:graph-name %s"), *ChildIndent, *EscapeQuotedStringForDSL(GraphName));
+	}
+	if (!GeneratedVar.IsEmpty())
+	{
+		Result += FString::Printf(TEXT("\n%s:generated-var %s"), *ChildIndent, *EscapeQuotedStringForDSL(GeneratedVar));
+	}
+
+	Result += FString::Printf(TEXT("\n%s:generated-type %s"), *ChildIndent, *PinTypeToAnimLangString(GeneratedType));
+
+	if (!UpdateGroup.IsEmpty())
+	{
+		Result += FString::Printf(TEXT("\n%s:update-group %s"), *ChildIndent, *EscapeQuotedStringForDSL(UpdateGroup));
+	}
+	if (!DSL.IsEmpty())
+	{
+		Result += FString::Printf(TEXT("\n%s:dsl %s"), *ChildIndent, *FormatHelperDSLValue(DSL));
+	}
+
+	Result += FString::Printf(TEXT("\n%s)"), *IndentStr);
+	return Result;
+}
+
 // ========== FAnimGraphAST ==========
 
 FString FAnimGraphAST::ToString() const
@@ -242,6 +324,27 @@ FString FAnimGraphAST::ToString() const
 			Result += TEXT("    ") + Var.ToString() + TEXT("\n");
 		}
 		Result += TEXT("  ]\n");
+	}
+
+	// Helper graphs for complex value bindings
+	if (HelperGraphs.Num() > 0)
+	{
+		TArray<FHelperGraphDef> SortedHelpers = HelperGraphs;
+		SortedHelpers.Sort([](const FHelperGraphDef& A, const FHelperGraphDef& B)
+		{
+			if (A.Id == B.Id)
+			{
+				return A.GraphName < B.GraphName;
+			}
+			return A.Id < B.Id;
+		});
+
+		Result += TEXT("  (helpers\n");
+		for (const FHelperGraphDef& Helper : SortedHelpers)
+		{
+			Result += Helper.ToString(4) + TEXT("\n");
+		}
+		Result += TEXT("  )\n");
 	}
 	
 	// Defines (SaveCachedPose -> (define name body))

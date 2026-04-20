@@ -29,14 +29,24 @@ struct ANIMBP2FP_API FAnimLangParseError
  *   Program     ::= '(' 'anim-blueprint' STRING TopLevel* ')'
  *   TopLevel    ::= ':skeleton' STRING
  *                 | ':variables' '[' VarDef* ']'
+ *                 | '(' 'helpers' HelperGraph* ')'
  *                 | '(' 'define' IDENT NodeExpr ')'
  *                 | ':anim-graph' NodeExpr
+ *   HelperGraph ::= '(' 'helper-graph' HelperField* ')'
+ *   HelperField ::= ':id' STRING
+ *                 | ':graph-name' STRING
+ *                 | ':generated-var' STRING
+ *                 | ':generated-type' IDENT
+ *                 | ':update-group' STRING
+ *                 | ':dsl' RawExpr
  *   VarDef      ::= '(' TypeName ':' IDENT Value? ')'
  *   NodeExpr    ::= '(' NodeType Property* PoseInput* ')'
  *                 | IDENT                                    -- variable reference (UseCachedPose)
  *   Property    ::= ':' KEY Value
  *   PoseInput   ::= ':' KEY NodeExpr
  *   Value       ::= STRING | NUMBER | BOOL | '(' 'ref' STRING ')' | '(' 'asset' STRING ')' | '[' Value* ']' | IDENT
+ *   RawExpr     ::= any balanced S-expression / array / scalar, reconstructed canonically as text
+
  * 
  * The parser auto-detects whether a :key is followed by a node expression (→ named child)
  * or a literal value (→ property).
@@ -87,11 +97,15 @@ private:
 	void ParseTopLevel(TSharedPtr<FAnimGraphAST> AST);
 	void ParseVariables(TSharedPtr<FAnimGraphAST> AST);
 	FVariableDef ParseVarDef();
+	void ParseHelpers(TSharedPtr<FAnimGraphAST> AST);
+	FHelperGraphDef ParseHelperGraphDef();
 	void ParseDefine(TSharedPtr<FAnimGraphAST> AST);
 	TSharedPtr<FAnimNodeAST> ParseNodeExpr();
 	TSharedPtr<FAnimNodeAST> ParseNodeBody();  // Inside parentheses, after node type
 	FString ParseValue();  // Parse a property value (literal, ref, asset, etc.)
 	FString ParseTransitionList();  // Parse [...] transition syntax
+	FString ParseRawExpressionText();  // Parse any balanced raw expression and reconstruct it canonically
+
 	
 	// Helpers
 	bool IsValueStart() const;

@@ -17,6 +17,22 @@ static FString EscapeStringForDSL(const FString& Value)
 	return FString::Printf(TEXT("\"%s\""), *Esc);
 }
 
+static EPinType ParsePinTypeFromText(const FString& TypeText)
+{
+	const FString Lower = TypeText.ToLower();
+	if (Lower == TEXT("pose"))      return EPinType::Pose;
+	if (Lower == TEXT("float") || Lower == TEXT("real") || Lower == TEXT("double")) return EPinType::Float;
+	if (Lower == TEXT("int"))       return EPinType::Int;
+	if (Lower == TEXT("bool"))      return EPinType::Bool;
+	if (Lower == TEXT("vector"))    return EPinType::Vector;
+	if (Lower == TEXT("rotator"))   return EPinType::Rotator;
+	if (Lower == TEXT("transform")) return EPinType::Transform;
+	if (Lower == TEXT("name"))      return EPinType::Name;
+	if (Lower == TEXT("object"))    return EPinType::Object;
+	return EPinType::Float;
+}
+
+
 // ========== Construction & Token Access ==========
 
 FAnimLangParser::FAnimLangParser(const TArray<FAnimLangToken>& InTokens, TArray<FAnimLangParseError>& InErrors)
@@ -204,10 +220,12 @@ TSharedPtr<FAnimGraphAST> FAnimLangParser::ParseProgram()
 
 // TopLevel ::= ':skeleton' STRING
 //            | ':variables' '[' VarDef* ']'
+//            | '(' 'helpers' HelperGraph* ')'
 //            | '(' 'define' IDENT NodeExpr ')'
 //            | ':anim-graph' NodeExpr
 void FAnimLangParser::ParseTopLevel(TSharedPtr<FAnimGraphAST> AST)
 {
+
 	// :keyword form
 	if (Check(EAnimLangTokenType::Keyword))
 	{
@@ -286,6 +304,13 @@ void FAnimLangParser::ParseTopLevel(TSharedPtr<FAnimGraphAST> AST)
 	// (define ...) form
 	if (Check(EAnimLangTokenType::LParen))
 	{
+		// Peek ahead to see if it's (helpers ...)
+		if (Peek(1).Type == EAnimLangTokenType::Identifier && Peek(1).Value == TEXT("helpers"))
+		{
+			ParseHelpers(AST);
+			return;
+		}
+
 		// Peek ahead to see if it's (define ...)
 		if (Peek(1).Type == EAnimLangTokenType::Identifier && Peek(1).Value == TEXT("define"))
 		{
@@ -300,6 +325,7 @@ void FAnimLangParser::ParseTopLevel(TSharedPtr<FAnimGraphAST> AST)
 			return;
 		}
 	}
+
 	
 	// Unexpected token
 	Error(FString::Printf(TEXT("Unexpected token at top level: %s(%s)"),
@@ -381,9 +407,171 @@ FVariableDef FAnimLangParser::ParseVarDef()
 	return Var;
 }
 
+void FAnimLangParser::ParseHelpers(TSharedPtr<FAnimGraphAST> AST)
+{
+	Expect(EAnimLangTokenType::LParen, TEXT("helpers"));
+
+	if (CheckValue(EAnimLangTokenType::Identifier, TEXT("helpers")))
+	{
+		Advance();
+	}
+	else
+	{
+		Error(TEXT("Expected 'helpers'"));
+		return;
+	}
+
+	while (!IsAtEnd() && !Check(EAnimLangTokenType::RParen))
+	{
+		if (Check(EAnimLangTokenType::LParen)
+			&& Peek(1).Type == EAnimLangTokenType::Identifier
+			&& Peek(1).Value == TEXT("helper-graph"))
+		{
+			AST->HelperGraphs.Add(ParseHelperGraphDef());
+			continue;
+		}
+
+		Error(FString::Printf(TEXT("Unexpected token in helpers block: %s(%s)"),
+			*FAnimLangToken::TypeToString(Current().Type), *Current().Value));
+
+		if (Check(EAnimLangTokenType::Keyword) || IsValueStart())
+		{
+			ParseRawExpressionText();
+		}
+		else
+		{
+			Advance();
+		}
+	}
+
+	Expect(EAnimLangTokenType::RParen, TEXT("helpers"));
+}
+
+FHelperGraphDef FAnimLangParser::ParseHelperGraphDef()
+{
+	FHelperGraphDef Helper;
+
+	Expect(EAnimLangTokenType::LParen, TEXT("helper-graph"));
+	if (CheckValue(EAnimLangTokenType::Identifier, TEXT("helper-graph")))
+	{
+		Advance();
+	}
+	else
+	{
+		Error(TEXT("Expected 'helper-graph'"));
+		return Helper;
+	}
+
+	while (!IsAtEnd() && !Check(EAnimLangTokenType::RParen))
+	{
+		if (!Check(EAnimLangTokenType::Keyword))
+		{
+			Error(FString::Printf(TEXT("Expected helper field keyword, got %s(%s)"),
+				*FAnimLangToken::TypeToString(Current().Type), *Current().Value));
+			if (Check(EAnimLangTokenType::Keyword) || IsValueStart())
+			{
+				ParseRawExpressionText();
+			}
+			else
+			{
+				Advance();
+			}
+			continue;
+		}
+
+		const FString Key = Advance().Value;
+		if (Key == TEXT("id"))
+		{
+			if (Check(EAnimLangTokenType::String) || Check(EAnimLangTokenType::Identifier))
+			{
+				Helper.Id = Advance().Value;
+			}
+			else
+			{
+				Error(TEXT("Expected string or identifier after :id"));
+				Helper.Id = ParseRawExpressionText();
+			}
+		}
+		else if (Key == TEXT("graph-name"))
+		{
+			if (Check(EAnimLangTokenType::String) || Check(EAnimLangTokenType::Identifier))
+			{
+				Helper.GraphName = Advance().Value;
+			}
+			else
+			{
+				Error(TEXT("Expected string or identifier after :graph-name"));
+				Helper.GraphName = ParseRawExpressionText();
+			}
+		}
+		else if (Key == TEXT("generated-var"))
+		{
+			if (Check(EAnimLangTokenType::String) || Check(EAnimLangTokenType::Identifier))
+			{
+				Helper.GeneratedVar = Advance().Value;
+			}
+			else
+			{
+				Error(TEXT("Expected string or identifier after :generated-var"));
+				Helper.GeneratedVar = ParseRawExpressionText();
+			}
+		}
+		else if (Key == TEXT("generated-type"))
+		{
+			if (Check(EAnimLangTokenType::String) || Check(EAnimLangTokenType::Identifier))
+			{
+				Helper.GeneratedType = ParsePinTypeFromText(Advance().Value);
+			}
+			else
+			{
+				Error(TEXT("Expected type name after :generated-type"));
+				if (Check(EAnimLangTokenType::Keyword) || IsValueStart())
+				{
+					ParseRawExpressionText();
+				}
+			}
+		}
+		else if (Key == TEXT("update-group"))
+		{
+			if (Check(EAnimLangTokenType::String) || Check(EAnimLangTokenType::Identifier))
+			{
+				Helper.UpdateGroup = Advance().Value;
+			}
+			else
+			{
+				Error(TEXT("Expected string or identifier after :update-group"));
+				Helper.UpdateGroup = ParseRawExpressionText();
+			}
+		}
+		else if (Key == TEXT("dsl"))
+		{
+			if (Check(EAnimLangTokenType::String))
+			{
+				Helper.DSL = Advance().Value;
+			}
+			else
+			{
+				Helper.DSL = ParseRawExpressionText();
+			}
+		}
+		else
+		{
+			Error(FString::Printf(TEXT("Unknown helper field :%s"), *Key));
+			if (Check(EAnimLangTokenType::Keyword) || IsValueStart())
+			{
+				ParseRawExpressionText();
+			}
+		}
+	}
+
+	Expect(EAnimLangTokenType::RParen, TEXT("helper-graph"));
+	return Helper;
+}
+
 // ParseDefine: '(' 'define' IDENT NodeExpr ')'
 void FAnimLangParser::ParseDefine(TSharedPtr<FAnimGraphAST> AST)
 {
+
 	Expect(EAnimLangTokenType::LParen, TEXT("define"));
 	
 	// consume 'define'
@@ -794,10 +982,62 @@ FString FAnimLangParser::ParseTransitionList()
 	return Result;
 }
 
+FString FAnimLangParser::ParseRawExpressionText()
+{
+	if (Check(EAnimLangTokenType::String))
+	{
+		const FString Result = EscapeStringForDSL(Current().Value);
+		Advance();
+		return Result;
+	}
+
+	if (Check(EAnimLangTokenType::Integer)
+		|| Check(EAnimLangTokenType::Float)
+		|| Check(EAnimLangTokenType::Bool)
+		|| Check(EAnimLangTokenType::Identifier)
+		|| Check(EAnimLangTokenType::Arrow))
+	{
+		const FString Result = Current().Value;
+		Advance();
+		return Result;
+	}
+
+	if (Check(EAnimLangTokenType::Keyword))
+	{
+		const FString Result = FString::Printf(TEXT(":%s"), *Current().Value);
+		Advance();
+		return Result;
+	}
+
+	if (Check(EAnimLangTokenType::LParen) || Check(EAnimLangTokenType::LBracket))
+	{
+		const bool bIsList = Check(EAnimLangTokenType::LParen);
+		const EAnimLangTokenType ClosingType = bIsList ? EAnimLangTokenType::RParen : EAnimLangTokenType::RBracket;
+		const FString OpenText = bIsList ? TEXT("(") : TEXT("[");
+		const FString CloseText = bIsList ? TEXT(")") : TEXT("]");
+
+		Advance();
+
+		TArray<FString> Parts;
+		while (!IsAtEnd() && !Check(ClosingType))
+		{
+			Parts.Add(ParseRawExpressionText());
+		}
+
+		Expect(ClosingType, TEXT("raw expression"));
+		return OpenText + FString::Join(Parts, TEXT(" ")) + CloseText;
+	}
+
+	Error(FString::Printf(TEXT("Expected raw expression, got %s(%s)"),
+		*FAnimLangToken::TypeToString(Current().Type), *Current().Value));
+	return TEXT("");
+}
+
 // ========== Helpers ==========
 
 bool FAnimLangParser::IsValueStart() const
 {
+
 	switch (Current().Type)
 	{
 	case EAnimLangTokenType::String:

@@ -168,6 +168,21 @@ struct ANIMBP2FP_API FCachedPoseDef
 };
 
 /**
+ * Helper graph 定义 — 承载复杂值绑定的 BlueprintLisp 子图
+ */
+struct ANIMBP2FP_API FHelperGraphDef
+{
+	FString Id;            // Stable helper id referenced by (subgraph-ref ...)
+	FString GraphName;     // Actual generated Blueprint graph/function name
+	FString GeneratedVar;  // Generated member variable used as the PoseGraph bridge
+	EPinType GeneratedType = EPinType::Float;
+	FString UpdateGroup;   // Managed update entry/group name
+	FString DSL;           // BlueprintLisp helper graph DSL body
+
+	FString ToString(int32 Indent = 0) const;
+};
+
+/**
  * 完整的动画蓝图 AST
  */
 struct ANIMBP2FP_API FAnimGraphAST
@@ -176,8 +191,10 @@ struct ANIMBP2FP_API FAnimGraphAST
 	FString SkeletonPath;       // Target skeleton asset path (e.g. "/Game/Mannequin/Skeleton")
 	TArray<FString> ImplementedInterfaces;  // Asset paths of AnimLayerInterfaces implemented by the BP
 	TArray<FVariableDef> Variables;
+	TArray<FHelperGraphDef> HelperGraphs;  // (helpers ...) 块 — BlueprintLisp helper subgraphs for complex value bindings
 	TArray<FCachedPoseDef> Defines;  // (define ...) 块 — SaveCachedPose 节点
 	TSharedPtr<FAnimNodeAST> RootNode;
+
 	
 	// Optional: Anim Notifies
 	struct FAnimNotify
