@@ -169,9 +169,10 @@ private:
 	/** Set a non-pose property on a created node */
 	static bool SetNodeProperty(UAnimGraphNode_Base* Node, const FString& KebabKey, const FString& Value);
 
-	/** Restore a non-pose binding such as bind-var / subgraph-ref onto an input pin */
+	/** Restore a non-pose binding such as bind-var / bind-path / subgraph-ref onto a pin or property binding */
 	static bool ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph* Graph, UAnimGraphNode_Base* Node,
 		const FString& KebabKey, const FString& Value, const TMap<FString, FHelperGraphDef>* HelperGraphs = nullptr);
+
 
 	
 	// ========== Update Helpers ==========

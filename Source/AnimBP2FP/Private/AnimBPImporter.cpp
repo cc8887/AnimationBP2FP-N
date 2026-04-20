@@ -348,7 +348,7 @@ namespace
 		}
 	}
 
-	static FString NormalizeBindingToken(const FString& In)
+	static FString IMP_NormalizeBindingToken(const FString& In)
 	{
 		FString Out = In.ToLower();
 		Out.ReplaceInline(TEXT(" "), TEXT(""));
@@ -387,7 +387,7 @@ namespace
 		if (!Node) return nullptr;
 
 		const FString CamelKey = KebabToCamelBindingName(KebabKey);
-		const FString NormalizedKey = NormalizeBindingToken(KebabKey);
+		const FString NormalizedKey = IMP_NormalizeBindingToken(KebabKey);
 		UEdGraphPin* BestMatch = nullptr;
 
 		for (UEdGraphPin* Pin : Node->Pins)
@@ -402,7 +402,7 @@ namespace
 			{
 				return Pin;
 			}
-			if (NormalizeBindingToken(PinNameStr) == NormalizedKey)
+			if (IMP_NormalizeBindingToken(PinNameStr) == NormalizedKey)
 			{
 				BestMatch = Pin;
 			}
@@ -484,6 +484,147 @@ namespace
 		Graph->AddNode(VarNode, false, false);
 		VarNode->AllocateDefaultPins();
 		return VarNode;
+	}
+
+	static TMap<FName, FAnimGraphNodePropertyBinding>* GetMutablePropertyBindingMap(UAnimGraphNode_Base* Node)
+	{
+		if (!Node || !Node->GetMutableBinding())
+		{
+			return nullptr;
+		}
+
+		UObject* BindingObject = reinterpret_cast<UObject*>(Node->GetMutableBinding());
+		if (FMapProperty* MapProperty = FindFProperty<FMapProperty>(BindingObject->GetClass(), TEXT("PropertyBindings")))
+		{
+			void* MapPtr = MapProperty->ContainerPtrToValuePtr<void>(BindingObject);
+			return reinterpret_cast<TMap<FName, FAnimGraphNodePropertyBinding>*>(MapPtr);
+		}
+
+		return nullptr;
+	}
+
+	static FString JoinBindingPath(const TArray<FString>& PropertyPath)
+	{
+		return FString::Join(PropertyPath, TEXT("."));
+	}
+
+	static bool ParseBindPathArgument(const FString& Argument, TArray<FString>& OutPropertyPath)
+	{
+		OutPropertyPath.Reset();
+		FString Trimmed = Argument.TrimStartAndEnd();
+		if (Trimmed.IsEmpty())
+		{
+			return false;
+		}
+
+		if (Trimmed.StartsWith(TEXT("[")) && Trimmed.EndsWith(TEXT("]")))
+		{
+			const FString Inner = Trimmed.Mid(1, Trimmed.Len() - 2);
+			int32 Index = 0;
+			while (Index < Inner.Len())
+			{
+				while (Index < Inner.Len() && FChar::IsWhitespace(Inner[Index]))
+				{
+					++Index;
+				}
+				if (Index >= Inner.Len())
+				{
+					break;
+				}
+
+				FString Token;
+				if (Inner[Index] == TEXT('"'))
+				{
+					++Index;
+					while (Index < Inner.Len())
+					{
+						if (Inner[Index] == TEXT('"') && (Index == 0 || Inner[Index - 1] != TEXT('\\')))
+						{
+							++Index;
+							break;
+						}
+						Token.AppendChar(Inner[Index]);
+						++Index;
+					}
+				}
+				else
+				{
+					const int32 Start = Index;
+					while (Index < Inner.Len() && !FChar::IsWhitespace(Inner[Index]))
+					{
+						++Index;
+					}
+					Token = Inner.Mid(Start, Index - Start);
+				}
+
+				Token = StripQuotes(Token).TrimStartAndEnd();
+				if (!Token.IsEmpty())
+				{
+					OutPropertyPath.Add(Token);
+				}
+			}
+		}
+		else
+		{
+			const FString CleanPath = StripQuotes(Trimmed);
+			CleanPath.ParseIntoArray(OutPropertyPath, TEXT("."), true);
+			for (FString& Segment : OutPropertyPath)
+			{
+				Segment = Segment.TrimStartAndEnd();
+			}
+		}
+
+		OutPropertyPath.RemoveAll([](const FString& Segment)
+		{
+			return Segment.TrimStartAndEnd().IsEmpty();
+		});
+		return OutPropertyPath.Num() > 0;
+	}
+
+	static FString ResolveBindingPropertyName(UAnimGraphNode_Base* Node, const FString& KebabKey)
+	{
+		if (!Node)
+		{
+			return FString();
+		}
+
+		const FString CamelKey = KebabToCamelBindingName(KebabKey);
+		const FString NormalizedKey = IMP_NormalizeBindingToken(KebabKey);
+		for (UEdGraphPin* Pin : Node->Pins)
+		{
+			if (!Pin || Pin->Direction != EGPD_Input)
+			{
+				continue;
+			}
+
+			const FString PinNameStr = Pin->PinName.ToString();
+			if (PinNameStr == CamelKey || PinNameStr.Equals(CamelKey, ESearchCase::IgnoreCase) || IMP_NormalizeBindingToken(PinNameStr) == NormalizedKey)
+			{
+				return PinNameStr;
+			}
+		}
+
+		for (TFieldIterator<FStructProperty> PropIt(Node->GetClass()); PropIt; ++PropIt)
+		{
+			FStructProperty* StructProp = *PropIt;
+			if (!StructProp->Struct || !StructProp->Struct->IsChildOf(FAnimNode_Base::StaticStruct()))
+			{
+				continue;
+			}
+
+			for (TFieldIterator<FProperty> InnerIt(StructProp->Struct); InnerIt; ++InnerIt)
+			{
+				FProperty* InnerProp = *InnerIt;
+				const FString PropName = InnerProp->GetName();
+				if (PropName == CamelKey || PropName.Equals(CamelKey, ESearchCase::IgnoreCase) || IMP_NormalizeBindingToken(PropName) == NormalizedKey)
+				{
+					return PropName;
+				}
+			}
+			break;
+		}
+
+		return FString();
 	}
 }
 
@@ -1057,8 +1198,48 @@ bool FAnimBPImporter::ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph
 	}
 	else if (FormName == TEXT("bind-path"))
 	{
-		UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:BindPath] Node '%s' property ':%s' = %s — bind-path is not restored yet in phase 2"),
-			*Node->GetName(), *KebabKey, *Value);
+		TArray<FString> PropertyPath;
+		if (!ParseBindPathArgument(Argument, PropertyPath))
+		{
+			UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:BindPath] Node '%s' property ':%s' = %s — could not parse bind-path argument"),
+				*Node->GetName(), *KebabKey, *Value);
+			return true;
+		}
+
+		const FString PropertyName = ResolveBindingPropertyName(Node, KebabKey);
+		if (PropertyName.IsEmpty())
+		{
+			UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:BindPath] Node '%s' property ':%s' = %s — could not resolve target property name"),
+				*Node->GetName(), *KebabKey, *Value);
+			return true;
+		}
+
+		Node->Modify();
+		if (UObject* BindingObject = reinterpret_cast<UObject*>(Node->GetMutableBinding()))
+		{
+			BindingObject->Modify();
+		}
+
+		TMap<FName, FAnimGraphNodePropertyBinding>* PropertyBindings = GetMutablePropertyBindingMap(Node);
+		if (!PropertyBindings)
+		{
+			UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:BindPath] Node '%s' property ':%s' = %s — property binding storage is unavailable"),
+				*Node->GetName(), *KebabKey, *Value);
+			return true;
+		}
+
+		FAnimGraphNodePropertyBinding PropertyBinding;
+		PropertyBinding.PropertyName = FName(*PropertyName);
+		PropertyBinding.PropertyPath = PropertyPath;
+		PropertyBinding.PathAsText = FText::FromString(JoinBindingPath(PropertyPath));
+		PropertyBinding.Type = EAnimGraphNodePropertyBindingType::Property;
+		PropertyBinding.bIsBound = true;
+		PropertyBinding.ArrayIndex = INDEX_NONE;
+		PropertyBinding.ContextId = NAME_None;
+		PropertyBindings->Add(FName(*PropertyName), PropertyBinding);
+
+		Node->ReconstructNode();
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 		return true;
 	}
 	else

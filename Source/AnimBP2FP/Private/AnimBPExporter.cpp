@@ -94,6 +94,70 @@ namespace
 		return FString::Printf(TEXT("\"%s\""), *Escaped);
 	}
 
+	static FString NormalizeBindingToken(const FString& In)
+	{
+		FString Out = In.ToLower();
+		Out.ReplaceInline(TEXT(" "), TEXT(""));
+		Out.ReplaceInline(TEXT("-"), TEXT(""));
+		Out.ReplaceInline(TEXT("_"), TEXT(""));
+		return Out;
+	}
+
+	static const TMap<FName, FAnimGraphNodePropertyBinding>* GetPropertyBindingMap(const UAnimGraphNode_Base* Node)
+	{
+		if (!Node || !Node->GetBinding())
+		{
+			return nullptr;
+		}
+
+		const UObject* BindingObject = reinterpret_cast<const UObject*>(Node->GetBinding());
+		if (FMapProperty* MapProperty = FindFProperty<FMapProperty>(BindingObject->GetClass(), TEXT("PropertyBindings")))
+		{
+			const void* MapPtr = MapProperty->ContainerPtrToValuePtr<void>(BindingObject);
+			return reinterpret_cast<const TMap<FName, FAnimGraphNodePropertyBinding>*>(MapPtr);
+		}
+
+		return nullptr;
+	}
+
+	static bool TryGetPropertyBinding(const UAnimGraphNode_Base* Node, const FName& BindingName, FAnimGraphNodePropertyBinding& OutBinding)
+	{
+		const TMap<FName, FAnimGraphNodePropertyBinding>* PropertyBindings = GetPropertyBindingMap(Node);
+		if (!PropertyBindings)
+		{
+			return false;
+		}
+
+		if (const FAnimGraphNodePropertyBinding* Exact = PropertyBindings->Find(BindingName))
+		{
+			OutBinding = *Exact;
+			return Exact->bIsBound && Exact->PropertyPath.Num() > 0;
+		}
+
+		const FName ComparisonName(BindingName, 0);
+		for (const TPair<FName, FAnimGraphNodePropertyBinding>& Pair : *PropertyBindings)
+		{
+			if (FName(Pair.Key, 0) == ComparisonName)
+			{
+				OutBinding = Pair.Value;
+				return Pair.Value.bIsBound && Pair.Value.PropertyPath.Num() > 0;
+			}
+		}
+
+		return false;
+	}
+
+	static FString FormatBindPathValue(const TArray<FString>& PropertyPath)
+	{
+		if (PropertyPath.Num() == 0)
+		{
+			return FString();
+		}
+
+		const FString JoinedPath = FString::Join(PropertyPath, TEXT("."));
+		return FString::Printf(TEXT("(bind-path %s)"), *QuoteDSLString(JoinedPath));
+	}
+
 	static bool IsManagedHelperGraphName(const FString& GraphName)
 	{
 		return GraphName.StartsWith(TEXT("__ABP2FP_HG_"));
@@ -333,6 +397,16 @@ static FString GetPinValueOrDefault(UAnimGraphNode_Base* Node, const FName& PinN
 	{
 		if (Pin->PinName == PinName && Pin->Direction == EGPD_Input)
 		{
+			FAnimGraphNodePropertyBinding PropertyBinding;
+			if (TryGetPropertyBinding(Node, Pin->GetFName(), PropertyBinding))
+			{
+				const FString BindingValue = FormatBindPathValue(PropertyBinding.PropertyPath);
+				if (!BindingValue.IsEmpty())
+				{
+					return BindingValue;
+				}
+			}
+
 			// If the pin has a linked node, prefer structured binding forms before falling back to (var ...)
 			if (Pin->LinkedTo.Num() > 0)
 			{
@@ -365,12 +439,23 @@ static void CollectNonPoseParams(UAnimGraphNode_Base* Node, TMap<FString, FStrin
 		// Skip hidden or orphaned pins
 		if (Pin->bHidden || Pin->bOrphanedPin) continue;
 		
+		FString ParamName = CamelToKebab(Pin->PinName.ToString());
+		FAnimGraphNodePropertyBinding PropertyBinding;
+		if (TryGetPropertyBinding(Node, Pin->GetFName(), PropertyBinding))
+		{
+			FString BindingValue = FormatBindPathValue(PropertyBinding.PropertyPath);
+			if (!BindingValue.IsEmpty())
+			{
+				OutProperties.Add(ParamName, BindingValue);
+			}
+			continue;
+		}
+
 		// Struct pins connected to another node: first try structured binding export, then fall back to (var ...)
 		if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
 		{
 			if (Pin->LinkedTo.Num() > 0)
 			{
-				FString ParamName = CamelToKebab(Pin->PinName.ToString());
 				FString Value = ExportLinkedPinValue(Pin);
 				if (!Value.IsEmpty())
 				{
@@ -379,9 +464,6 @@ static void CollectNonPoseParams(UAnimGraphNode_Base* Node, TMap<FString, FStrin
 			}
 			continue;
 		}
-		
-		// Convert pin name to kebab-case for DSL
-		FString ParamName = CamelToKebab(Pin->PinName.ToString());
 		
 		FString Value;
 		
@@ -551,6 +633,18 @@ static void CollectInternalProperties(UAnimGraphNode_Base* Node, TMap<FString, F
 				}
 			}
 
+			const FString KebabName = CamelToKebab(PropName);
+			FAnimGraphNodePropertyBinding PropertyBinding;
+			if (TryGetPropertyBinding(Node, FName(*PropName), PropertyBinding))
+			{
+				FString BindingValue = FormatBindPathValue(PropertyBinding.PropertyPath);
+				if (!BindingValue.IsEmpty())
+				{
+					OutProperties.Add(KebabName, BindingValue);
+				}
+				continue;
+			}
+
 			void* ValuePtr = InnerProp->ContainerPtrToValuePtr<void>(StructPtr);
 
 			// Skip if value equals CDO default
@@ -570,7 +664,6 @@ static void CollectInternalProperties(UAnimGraphNode_Base* Node, TMap<FString, F
 		if (ExportedValue.IsEmpty()) continue;
 
 			// Format the value for DSL output
-			FString KebabName = CamelToKebab(PropName);
 			FString FormattedValue;
 
 			// Simple numeric/bool types → raw value
