@@ -49,6 +49,7 @@
 #include "EdGraphSchema_K2.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "K2Node_VariableGet.h"
 #include "Engine/MemberReference.h"
 #include "UObject/UObjectIterator.h"
 
@@ -63,6 +64,216 @@ static FString StripQuotes(const FString& Input)
 		Result = Result.Mid(1, Result.Len() - 2);
 	}
 	return Result;
+}
+
+namespace
+{
+	static FString SanitizeHelperIdentifier(const FString& Input)
+	{
+		FString Result = Input;
+		for (int32 Index = 0; Index < Result.Len(); ++Index)
+		{
+			const TCHAR Ch = Result[Index];
+			if (!(FChar::IsAlnum(Ch) || Ch == TEXT('_')))
+			{
+				Result[Index] = TEXT('_');
+			}
+		}
+		return Result;
+	}
+
+	static FString GetResolvedHelperGraphName(const FHelperGraphDef& Helper)
+	{
+		if (!Helper.GraphName.TrimStartAndEnd().IsEmpty())
+		{
+			return Helper.GraphName.TrimStartAndEnd();
+		}
+		return FString::Printf(TEXT("__ABP2FP_HG_%s"), *SanitizeHelperIdentifier(Helper.Id));
+	}
+
+	static FString GetResolvedGeneratedVarName(const FHelperGraphDef& Helper)
+	{
+		if (!Helper.GeneratedVar.TrimStartAndEnd().IsEmpty())
+		{
+			return Helper.GeneratedVar.TrimStartAndEnd();
+		}
+		return FString::Printf(TEXT("__abp2fp_gv_%s"), *SanitizeHelperIdentifier(Helper.Id));
+	}
+
+	static bool TryBuildEdGraphPinType(EPinType Type, FEdGraphPinType& OutPinType)
+	{
+		switch (Type)
+		{
+		case EPinType::Float:
+			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Real;
+			OutPinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
+			return true;
+		case EPinType::Int:
+			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Int;
+			return true;
+		case EPinType::Bool:
+			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
+			return true;
+		case EPinType::Vector:
+			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
+			OutPinType.PinSubCategoryObject = TBaseStructure<FVector>::Get();
+			return true;
+		case EPinType::Rotator:
+			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
+			OutPinType.PinSubCategoryObject = TBaseStructure<FRotator>::Get();
+			return true;
+		case EPinType::Transform:
+			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
+			OutPinType.PinSubCategoryObject = TBaseStructure<FTransform>::Get();
+			return true;
+		case EPinType::Name:
+			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Name;
+			return true;
+		case EPinType::Object:
+			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Object;
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	static FString NormalizeBindingToken(const FString& In)
+	{
+		FString Out = In.ToLower();
+		Out.ReplaceInline(TEXT(" "), TEXT(""));
+		Out.ReplaceInline(TEXT("-"), TEXT(""));
+		Out.ReplaceInline(TEXT("_"), TEXT(""));
+		return Out;
+	}
+
+	static FString KebabToCamelBindingName(const FString& Input)
+	{
+		FString Result;
+		bool bCapNext = true;
+		for (int32 i = 0; i < Input.Len(); i++)
+		{
+			const TCHAR Ch = Input[i];
+			if (Ch == '-' || Ch == '_')
+			{
+				bCapNext = true;
+				continue;
+			}
+			if (bCapNext)
+			{
+				Result += FChar::ToUpper(Ch);
+				bCapNext = false;
+			}
+			else
+			{
+				Result += Ch;
+			}
+		}
+		return Result;
+	}
+
+	static UEdGraphPin* FindInputValuePin(UAnimGraphNode_Base* Node, const FString& KebabKey)
+	{
+		if (!Node) return nullptr;
+
+		const FString CamelKey = KebabToCamelBindingName(KebabKey);
+		const FString NormalizedKey = NormalizeBindingToken(KebabKey);
+		UEdGraphPin* BestMatch = nullptr;
+
+		for (UEdGraphPin* Pin : Node->Pins)
+		{
+			if (!Pin || Pin->Direction != EGPD_Input || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
+			{
+				continue;
+			}
+
+			const FString PinNameStr = Pin->PinName.ToString();
+			if (PinNameStr == CamelKey || PinNameStr.Equals(CamelKey, ESearchCase::IgnoreCase))
+			{
+				return Pin;
+			}
+			if (NormalizeBindingToken(PinNameStr) == NormalizedKey)
+			{
+				BestMatch = Pin;
+			}
+		}
+
+		return BestMatch;
+	}
+
+	static bool TryParseBindingForm(const FString& Value, FString& OutFormName, FString& OutArgument)
+	{
+		const FString Trimmed = Value.TrimStartAndEnd();
+		if (!Trimmed.StartsWith(TEXT("(")) || !Trimmed.EndsWith(TEXT(")")))
+		{
+			return false;
+		}
+
+		const FString Inner = Trimmed.Mid(1, Trimmed.Len() - 2).TrimStartAndEnd();
+		if (Inner.IsEmpty())
+		{
+			return false;
+		}
+
+		int32 SplitIndex = INDEX_NONE;
+		for (int32 Index = 0; Index < Inner.Len(); ++Index)
+		{
+			if (FChar::IsWhitespace(Inner[Index]))
+			{
+				SplitIndex = Index;
+				break;
+			}
+		}
+
+		if (SplitIndex == INDEX_NONE)
+		{
+			OutFormName = Inner;
+			OutArgument.Reset();
+			return true;
+		}
+
+		OutFormName = Inner.Left(SplitIndex);
+		OutArgument = Inner.Mid(SplitIndex + 1).TrimStartAndEnd();
+		return true;
+	}
+
+	static UEdGraphPin* FindFirstDataOutputPin(UEdGraphNode* Node)
+	{
+		if (!Node) return nullptr;
+		for (UEdGraphPin* Pin : Node->Pins)
+		{
+			if (Pin && Pin->Direction == EGPD_Output && Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec)
+			{
+				return Pin;
+			}
+		}
+		return nullptr;
+	}
+
+	static UK2Node_VariableGet* CreateMemberVariableGetNode(UAnimBlueprint* Blueprint, UEdGraph* Graph, const FString& VariableName, UEdGraphNode* TargetNode)
+	{
+		if (!Blueprint || !Graph || VariableName.IsEmpty())
+		{
+			return nullptr;
+		}
+
+		UK2Node_VariableGet* VarNode = NewObject<UK2Node_VariableGet>(Graph);
+		if (!VarNode)
+		{
+			return nullptr;
+		}
+
+		VarNode->VariableReference.SetSelfMember(FName(*VariableName));
+		if (TargetNode)
+		{
+			VarNode->NodePosX = TargetNode->NodePosX - 240;
+			VarNode->NodePosY = TargetNode->NodePosY;
+		}
+		VarNode->CreateNewGuid();
+		VarNode->PostPlacedNewNode();
+		Graph->AddNode(VarNode, false, false);
+		VarNode->AllocateDefaultPins();
+		return VarNode;
+	}
 }
 
 // ========== Name Conversion Helpers ==========
@@ -468,50 +679,237 @@ bool FAnimBPImporter::BuildVariables(UAnimBlueprint* Blueprint, const TArray<FVa
 	
 	for (const FVariableDef& Var : Variables)
 	{
-		FEdGraphPinType PinType;
-		
-		switch (Var.Type)
+		bool bExists = false;
+		for (const FBPVariableDescription& ExistingVar : Blueprint->NewVariables)
 		{
-		case EPinType::Float:
+			if (ExistingVar.VarName == FName(*Var.Name))
+			{
+				bExists = true;
+				break;
+			}
+		}
+		if (bExists)
+		{
+			continue;
+		}
+
+		FEdGraphPinType PinType;
+		if (!TryBuildEdGraphPinType(Var.Type, PinType))
+		{
 			PinType.PinCategory = UEdGraphSchema_K2::PC_Real;
 			PinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
-			break;
-		case EPinType::Int:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Int;
-			break;
-		case EPinType::Bool:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
-			break;
-		case EPinType::Vector:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
-			PinType.PinSubCategoryObject = TBaseStructure<FVector>::Get();
-			break;
-		case EPinType::Rotator:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
-			PinType.PinSubCategoryObject = TBaseStructure<FRotator>::Get();
-			break;
-		case EPinType::Name:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Name;
-			break;
-		default:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Real;
-			PinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
-			break;
 		}
 		
-		// Add the variable to the blueprint
 		FBlueprintEditorUtils::AddMemberVariable(Blueprint, FName(*Var.Name), PinType);
-		
 		UE_LOG(LogAnimBPImporter, Verbose, TEXT("Added variable: %s"), *Var.Name);
 	}
 	
 	return true;
 }
 
+bool FAnimBPImporter::BuildGeneratedVars(UAnimBlueprint* Blueprint, const TArray<FHelperGraphDef>& Helpers)
+{
+	if (!Blueprint || Helpers.Num() == 0) return true;
+
+	for (const FHelperGraphDef& Helper : Helpers)
+	{
+		const FString GeneratedVarName = GetResolvedGeneratedVarName(Helper);
+		if (GeneratedVarName.IsEmpty())
+		{
+			UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:GeneratedVar] Helper '%s' has no resolvable generated variable name"), *Helper.Id);
+			continue;
+		}
+
+		bool bExists = false;
+		for (const FBPVariableDescription& ExistingVar : Blueprint->NewVariables)
+		{
+			if (ExistingVar.VarName == FName(*GeneratedVarName))
+			{
+				bExists = true;
+				break;
+			}
+		}
+		if (bExists)
+		{
+			continue;
+		}
+
+		FVariableDef GeneratedVar;
+		GeneratedVar.Name = GeneratedVarName;
+		GeneratedVar.Type = Helper.GeneratedType;
+		GeneratedVar.DefaultValue = (Helper.GeneratedType == EPinType::Bool) ? TEXT("false") : TEXT("0.0");
+		TArray<FVariableDef> SingleVar;
+		SingleVar.Add(GeneratedVar);
+		BuildVariables(Blueprint, SingleVar);
+	}
+
+	return true;
+}
+
+bool FAnimBPImporter::BuildHelperGraphs(UAnimBlueprint* Blueprint, const TArray<FHelperGraphDef>& Helpers)
+{
+	if (!Blueprint || Helpers.Num() == 0) return true;
+
+	bool bAllSucceeded = true;
+	for (const FHelperGraphDef& Helper : Helpers)
+	{
+		const FString GraphName = GetResolvedHelperGraphName(Helper);
+		const FString HelperDSL = Helper.DSL.TrimStartAndEnd();
+		if (GraphName.IsEmpty() || HelperDSL.IsEmpty())
+		{
+			UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:HelperGraph] Helper '%s' is missing graph-name or dsl; graph creation skipped"), *Helper.Id);
+			continue;
+		}
+
+		UEdGraph* FunctionGraph = nullptr;
+		for (UEdGraph* Graph : Blueprint->FunctionGraphs)
+		{
+			if (Graph && Graph->GetFName() == FName(*GraphName))
+			{
+				FunctionGraph = Graph;
+				break;
+			}
+		}
+
+		if (!FunctionGraph)
+		{
+			FunctionGraph = FBlueprintEditorUtils::CreateNewGraph(
+				Blueprint,
+				FName(*GraphName),
+				UEdGraph::StaticClass(),
+				UEdGraphSchema_K2::StaticClass());
+			if (!FunctionGraph)
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:HelperGraphCreate] Failed to create helper graph '%s'"), *GraphName);
+				bAllSucceeded = false;
+				continue;
+			}
+			FBlueprintEditorUtils::AddFunctionGraph<UFunction>(Blueprint, FunctionGraph, true, nullptr);
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		}
+
+		FBlueprintLispConverter::FImportOptions LispOpts;
+		LispOpts.ImportMode = FBlueprintLispConverter::EImportMode::ReplaceGraph;
+		LispOpts.bAutoLayout = false;
+		LispOpts.bCompile = false;
+		FBlueprintLispResult LispResult = FBlueprintLispConverter::ImportGraph(FunctionGraph, HelperDSL, LispOpts);
+		if (!LispResult.bSuccess)
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:HelperGraphImport] Helper '%s' graph '%s' import failed: %s"),
+				*Helper.Id, *GraphName, *LispResult.Error);
+			bAllSucceeded = false;
+		}
+	}
+
+	return bAllSucceeded;
+}
+
+bool FAnimBPImporter::ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph* Graph, UAnimGraphNode_Base* Node,
+	const FString& KebabKey, const FString& Value, const TMap<FString, FHelperGraphDef>* HelperGraphs)
+{
+	if (!Blueprint || !Graph || !Node)
+	{
+		return false;
+	}
+
+	FString FormName;
+	FString Argument;
+	if (!TryParseBindingForm(Value, FormName, Argument))
+	{
+		return false;
+	}
+
+	const FString CleanArgument = StripQuotes(Argument);
+	FString BoundVariableName;
+	if (FormName == TEXT("bind-var"))
+	{
+		BoundVariableName = CleanArgument;
+	}
+	else if (FormName == TEXT("subgraph-ref"))
+	{
+		if (!HelperGraphs)
+		{
+			UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:HelperLookup] Node '%s' property ':%s' references helper '%s' but no helper lookup map is available"),
+				*Node->GetName(), *KebabKey, *CleanArgument);
+			return true;
+		}
+
+		const FHelperGraphDef* Helper = HelperGraphs->Find(CleanArgument);
+		if (!Helper)
+		{
+			UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:HelperLookup] Node '%s' property ':%s' references unknown helper '%s'"),
+				*Node->GetName(), *KebabKey, *CleanArgument);
+			return true;
+		}
+
+		BoundVariableName = GetResolvedGeneratedVarName(*Helper);
+	}
+	else if (FormName == TEXT("bind-path"))
+	{
+		UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:BindPath] Node '%s' property ':%s' = %s — bind-path is not restored yet in phase 2"),
+			*Node->GetName(), *KebabKey, *Value);
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+
+	if (BoundVariableName.IsEmpty())
+	{
+		UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:PropertyBinding] Node '%s' property ':%s' = %s — resolved variable name is empty"),
+			*Node->GetName(), *KebabKey, *Value);
+		return true;
+	}
+
+	bool bVariableExists = false;
+	for (const FBPVariableDescription& ExistingVar : Blueprint->NewVariables)
+	{
+		if (ExistingVar.VarName == FName(*BoundVariableName))
+		{
+			bVariableExists = true;
+			break;
+		}
+	}
+	if (!bVariableExists)
+	{
+		UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:PropertyBinding] Node '%s' property ':%s' = %s — blueprint variable '%s' does not exist"),
+			*Node->GetName(), *KebabKey, *Value, *BoundVariableName);
+		return true;
+	}
+
+	UEdGraphPin* TargetPin = FindInputValuePin(Node, KebabKey);
+	if (!TargetPin)
+	{
+		UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:PropertyBinding] Node '%s' property ':%s' = %s — input pin not found for binding restore"),
+			*Node->GetName(), *KebabKey, *Value);
+		return true;
+	}
+
+	UK2Node_VariableGet* VarGetNode = CreateMemberVariableGetNode(Blueprint, Graph, BoundVariableName, Node);
+	if (!VarGetNode)
+	{
+		UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:PropertyBinding] Node '%s' property ':%s' = %s — failed to create VariableGet node for '%s'"),
+			*Node->GetName(), *KebabKey, *Value, *BoundVariableName);
+		return true;
+	}
+
+	UEdGraphPin* OutputPin = FindFirstDataOutputPin(VarGetNode);
+	if (!OutputPin)
+	{
+		UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:PropertyBinding] VariableGet '%s' has no data output pin"), *BoundVariableName);
+		return true;
+	}
+
+	ConnectPins(OutputPin, TargetPin);
+	return true;
+}
+
 // ========== Node Building ==========
 
 UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAST>& NodeAST, UEdGraph* Graph,
-	const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes)
+	const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes,
+	const TMap<FString, FHelperGraphDef>* HelperGraphs)
 {
 	if (!NodeAST.IsValid() || !Graph)
 	{
@@ -1192,6 +1590,11 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		// (var "...") and legacy (ref "...") values mark EventGraph-driven connections.
 		// These require K2Node_VariableGet/Function nodes in the EventGraph which cannot be auto-reconstructed.
 		// The pin will retain its default value (no connection restored).
+		if (ConnectPropertyBinding(Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForGraph(Graph)), Graph, NewNode, Pair.Key, Pair.Value, HelperGraphs))
+		{
+			continue;
+		}
+
 		if (Pair.Value.StartsWith(TEXT("(var ")) || Pair.Value.StartsWith(TEXT("(ref ")))
 		{
 			UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:EventGraphConnection] Node '%s' property ':%s' = %s — this pin is driven by an EventGraph node, connection cannot be auto-restored; pin will use default value"),
@@ -1230,7 +1633,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		UAnimGraphNode_StateMachine* SMNode = Cast<UAnimGraphNode_StateMachine>(NewNode);
 		if (SMNode)
 		{
-			BuildStateMachine(SMNode, NodeAST, DefineNodes);
+			BuildStateMachine(SMNode, NodeAST, DefineNodes, HelperGraphs);
 		}
 		// State machine children are managed internally by BuildStateMachine (as UAnimStateNode),
 		// not via pose input pins on the state machine node itself. Skip the generic child-connect loop.
@@ -1248,7 +1651,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 			continue;
 		}
 		
-		UAnimGraphNode_Base* ChildNode = BuildAnimNode(Child.Node, Graph, DefineNodes);
+		UAnimGraphNode_Base* ChildNode = BuildAnimNode(Child.Node, Graph, DefineNodes, HelperGraphs);
 		if (!ChildNode)
 		{
 			// identity-pose is intentionally null (no node created); others should log
@@ -1299,7 +1702,8 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 // ========== State Machine Building ==========
 
 bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, const TSharedPtr<FAnimNodeAST>& NodeAST,
-	const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes)
+	const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes,
+	const TMap<FString, FHelperGraphDef>* HelperGraphs)
 {
 	if (!SMNode || !NodeAST.IsValid()) return false;
 	
@@ -1392,7 +1796,7 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 				}
 				
 				// Build the animation subtree for this state
-				UAnimGraphNode_Base* AnimTree = BuildAnimNode(Child.Node, StateNode->BoundGraph, DefineNodes);
+				UAnimGraphNode_Base* AnimTree = BuildAnimNode(Child.Node, StateNode->BoundGraph, DefineNodes, HelperGraphs);
 				if (AnimTree && ResultNode)
 				{
 					UEdGraphPin* AnimOutput = FindOutputPosePin(AnimTree);
@@ -1914,8 +2318,19 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 		FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::SkipGarbageCollection);
 	}
 	
-	// Build variables
+	// Build variables and helper bridges
 	BuildVariables(Blueprint, AST->Variables);
+	BuildGeneratedVars(Blueprint, AST->HelperGraphs);
+	BuildHelperGraphs(Blueprint, AST->HelperGraphs);
+
+	TMap<FString, FHelperGraphDef> HelperGraphLookup;
+	for (const FHelperGraphDef& Helper : AST->HelperGraphs)
+	{
+		if (!Helper.Id.IsEmpty())
+		{
+			HelperGraphLookup.Add(Helper.Id, Helper);
+		}
+	}
 	
 	// Build defines (SaveCachedPose nodes)
 	TMap<FString, UAnimGraphNode_SaveCachedPose*> DefineNodesRaw;
@@ -1955,7 +2370,7 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 			continue;
 		}
 
-		UAnimGraphNode_Base* BodyNode = BuildAnimNode(Def.Body, AnimGraph, &DefineNodesRaw);
+		UAnimGraphNode_Base* BodyNode = BuildAnimNode(Def.Body, AnimGraph, &DefineNodesRaw, &HelperGraphLookup);
 		if (BodyNode)
 		{
 			UEdGraphPin* BodyOutput = FindOutputPosePin(BodyNode);
@@ -1980,7 +2395,7 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 	// Build the root animation tree
 	if (AST->RootNode.IsValid())
 	{
-		UAnimGraphNode_Base* RootTree = BuildAnimNode(AST->RootNode, AnimGraph, &DefineNodesRaw);
+		UAnimGraphNode_Base* RootTree = BuildAnimNode(AST->RootNode, AnimGraph, &DefineNodesRaw, &HelperGraphLookup);
 		
 		if (RootTree)
 		{
@@ -2250,6 +2665,17 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 			BuildVariables(Blueprint, SingleVar);
 		}
 	}
+	BuildGeneratedVars(Blueprint, NewAST->HelperGraphs);
+	BuildHelperGraphs(Blueprint, NewAST->HelperGraphs);
+
+	TMap<FString, FHelperGraphDef> HelperGraphLookup;
+	for (const FHelperGraphDef& Helper : NewAST->HelperGraphs)
+	{
+		if (!Helper.Id.IsEmpty())
+		{
+			HelperGraphLookup.Add(Helper.Id, Helper);
+		}
+	}
 	
 	// Step 3: Build defines (SaveCachedPose nodes)
 	TMap<FString, UAnimGraphNode_SaveCachedPose*> DefineNodesRaw;
@@ -2287,7 +2713,7 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 			continue;
 		}
 
-		UAnimGraphNode_Base* BodyNode = BuildAnimNode(Def.Body, AnimGraph, &DefineNodesRaw);
+		UAnimGraphNode_Base* BodyNode = BuildAnimNode(Def.Body, AnimGraph, &DefineNodesRaw, &HelperGraphLookup);
 		if (BodyNode)
 		{
 			UEdGraphPin* BodyOutput = FindOutputPosePin(BodyNode);
@@ -2311,7 +2737,7 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 	// Step 4: Build the root animation tree
 	if (NewAST->RootNode.IsValid())
 	{
-		UAnimGraphNode_Base* RootTree = BuildAnimNode(NewAST->RootNode, AnimGraph, &DefineNodesRaw);
+		UAnimGraphNode_Base* RootTree = BuildAnimNode(NewAST->RootNode, AnimGraph, &DefineNodesRaw, &HelperGraphLookup);
 		
 		if (RootTree)
 		{

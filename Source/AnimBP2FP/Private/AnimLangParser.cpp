@@ -32,6 +32,18 @@ static EPinType ParsePinTypeFromText(const FString& TypeText)
 	return EPinType::Float;
 }
 
+static bool IsAnimPropertyValueForm(const FString& FormName)
+{
+	return FormName == TEXT("ref")
+		|| FormName == TEXT("asset")
+		|| FormName == TEXT("var")
+		|| FormName == TEXT("bind-var")
+		|| FormName == TEXT("bind-path")
+		|| FormName == TEXT("subgraph-ref")
+		|| FormName == TEXT("unsupported-ref");
+}
+
+
 
 // ========== Construction & Token Access ==========
 
@@ -693,12 +705,13 @@ TSharedPtr<FAnimNodeAST> FAnimLangParser::ParseNodeBody()
 				if (Peek(1).Type == EAnimLangTokenType::Identifier)
 				{
 					FString NextIdent = Peek(1).Value;
-					if (NextIdent == TEXT("ref") || NextIdent == TEXT("asset") || NextIdent == TEXT("var"))
+					if (IsAnimPropertyValueForm(NextIdent))
 					{
-						// It's a special value form: (ref "..."), (asset "..."), or (var "...")
+						// It's a special value form such as (ref ...), (asset ...), (bind-var ...), or (subgraph-ref ...)
 						FString Value = ParseValue();
 						Node->Properties.Add(Key, Value);
 					}
+
 					else
 					{
 						// It's a child node expression
@@ -788,35 +801,16 @@ FString FAnimLangParser::ParseValue()
 		return Advance().Value;
 	}
 	
-	// (ref "...") or (asset "...")
-	if (Check(EAnimLangTokenType::LParen))
+	// Special property value forms such as (ref ...), (asset ...), (bind-var ...), or (subgraph-ref ...)
+	if (Check(EAnimLangTokenType::LParen) && Peek(1).Type == EAnimLangTokenType::Identifier)
 	{
-		if (Peek(1).Type == EAnimLangTokenType::Identifier)
+		const FString Form = Peek(1).Value;
+		if (IsAnimPropertyValueForm(Form))
 		{
-		FString Form = Peek(1).Value;
-		if (Form == TEXT("ref") || Form == TEXT("asset") || Form == TEXT("var"))
-			{
-				Advance();  // (
-				FString Keyword = Advance().Value;  // ref or asset
-				
-				FString Arg;
-				if (Check(EAnimLangTokenType::String))
-				{
-					Arg = FString::Printf(TEXT("\"%s\""), *Current().Value);
-					Advance();
-				}
-				else
-				{
-					Error(FString::Printf(TEXT("Expected string argument for (%s ...)"), *Keyword));
-					Arg = TEXT("\"\"");
-				}
-				
-				Expect(EAnimLangTokenType::RParen, FString::Printf(TEXT("(%s ...)"), *Keyword));
-				
-				return FString::Printf(TEXT("(%s %s)"), *Keyword, *Arg);
-			}
+			return ParseRawExpressionText();
 		}
 	}
+
 	
 	// [...] array
 	if (Check(EAnimLangTokenType::LBracket))

@@ -122,13 +122,22 @@ private:
 	/** Build variables from AST definitions */
 	static bool BuildVariables(UAnimBlueprint* Blueprint, const TArray<FVariableDef>& Variables);
 
+	/** Build generated bridge variables for helper graphs */
+	static bool BuildGeneratedVars(UAnimBlueprint* Blueprint, const TArray<FHelperGraphDef>& Helpers);
+
+	/** Build helper function graphs via BlueprintLisp import */
+	static bool BuildHelperGraphs(UAnimBlueprint* Blueprint, const TArray<FHelperGraphDef>& Helpers);
+
 	/** Build a single animation node from AST, placing it in the given graph */
 	static UAnimGraphNode_Base* BuildAnimNode(const TSharedPtr<FAnimNodeAST>& NodeAST, UEdGraph* Graph,
-		const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes = nullptr);
+		const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes = nullptr,
+		const TMap<FString, FHelperGraphDef>* HelperGraphs = nullptr);
 
 	/** Build a state machine node */
 	static bool BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, const TSharedPtr<FAnimNodeAST>& NodeAST,
-		const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes = nullptr);
+		const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes = nullptr,
+		const TMap<FString, FHelperGraphDef>* HelperGraphs = nullptr);
+
 
 	// ========== Pin Utilities ==========
 
@@ -159,6 +168,11 @@ private:
 	
 	/** Set a non-pose property on a created node */
 	static bool SetNodeProperty(UAnimGraphNode_Base* Node, const FString& KebabKey, const FString& Value);
+
+	/** Restore a non-pose binding such as bind-var / subgraph-ref onto an input pin */
+	static bool ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph* Graph, UAnimGraphNode_Base* Node,
+		const FString& KebabKey, const FString& Value, const TMap<FString, FHelperGraphDef>* HelperGraphs = nullptr);
+
 	
 	// ========== Update Helpers ==========
 	
