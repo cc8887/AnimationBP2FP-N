@@ -173,6 +173,8 @@ namespace AnimBP2FPPythonBridge
 		const FString& ResolvedPath,
 		const FString& GraphName,
 		const FString& DSLText,
+		FBlueprintLispConverter::EImportMode ImportMode,
+		bool bAutoLayout,
 		bool bCompile,
 		bool bSavePackage,
 		const FString& SuccessMessage)
@@ -183,10 +185,11 @@ namespace AnimBP2FPPythonBridge
 		}
 
 		FBlueprintLispConverter::FImportOptions Options;
-		Options.ImportMode = FBlueprintLispConverter::EImportMode::ReplaceGraph;
+		Options.ImportMode = ImportMode;
 		Options.bCompile = bCompile;
-		Options.bAutoLayout = true;
+		Options.bAutoLayout = bAutoLayout;
 		Options.bFailOnUnsupportedForm = true;
+
 
 		FBlueprintLispResult LispResult = FBlueprintLispConverter::Import(AnimBlueprint, GraphName, DSLText, Options);
 		FAnimBP2FPPythonResult Result = FromBlueprintLispResult(LispResult, ResolvedPath, SuccessMessage);
@@ -445,9 +448,12 @@ FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::ImportEventGraphFromText(
 		ResolvedPath,
 		GraphName,
 		DSLText,
+		FBlueprintLispConverter::EImportMode::ReplaceGraph,
+		true,
 		bCompile,
 		bSavePackage,
 		FString::Printf(TEXT("Imported graph '%s' into %s"), *GraphName, *ResolvedPath));
+
 }
 
 FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::ImportEventGraphFromFile(
@@ -481,22 +487,35 @@ FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::UpdateEventGraphFromText(
 	bool bCompile,
 	bool bSavePackage)
 {
-	FAnimBP2FPPythonResult Result = ImportEventGraphFromText(
-		AnimBlueprintPath,
+	FString ResolvedPath;
+	FString Error;
+	UAnimBlueprint* AnimBlueprint = AnimBP2FPPythonBridge::LoadAnimBlueprintByPath(AnimBlueprintPath, ResolvedPath, Error);
+	if (!AnimBlueprint)
+	{
+		return AnimBP2FPPythonBridge::MakeFailure(Error);
+	}
+
+	FAnimBP2FPPythonResult Result = AnimBP2FPPythonBridge::ImportEventGraphInternal(
+
+		AnimBlueprint,
+		ResolvedPath,
 		GraphName,
 		DSLText,
+		FBlueprintLispConverter::EImportMode::MergeAppend,
+		false,
 		bCompile,
-		bSavePackage);
+		bSavePackage,
+		FString::Printf(TEXT("Updated graph '%s' in %s (MergeAppend incremental event reuse)"), *GraphName, *ResolvedPath));
 
 	if (Result.bSuccess)
 	{
 		Result.Warnings.Insert(
-			TEXT("BlueprintLisp semantic Update is not implemented yet; UpdateEventGraph currently uses ReplaceGraph import semantics."),
+			TEXT("BlueprintLisp UpdateEventGraph now prefers MergeAppend with root-event reuse for supported event paths; unsupported cases still fall back to node recreation inside the affected event body."),
 			0);
-		Result.Message = FString::Printf(TEXT("Updated graph '%s' in %s (ReplaceGraph fallback)"), *GraphName, *Result.AssetPath);
 	}
 
 	return Result;
+
 }
 
 FAnimBP2FPPythonResult UAnimBP2FPPythonBridge::UpdateEventGraphFromFile(
