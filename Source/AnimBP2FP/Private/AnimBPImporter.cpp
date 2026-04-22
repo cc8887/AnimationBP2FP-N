@@ -1046,7 +1046,22 @@ bool FAnimBPImporter::BuildVariables(UAnimBlueprint* Blueprint, const TArray<FVa
 		}
 
 		FEdGraphPinType PinType;
-		if (!TryBuildEdGraphPinType(Var.Type, PinType))
+		if (Var.Type == EPinType::Enum)
+		{
+			UEnum* EnumObject = Var.TypeObjectPath.IsEmpty() ? nullptr : LoadObject<UEnum>(nullptr, *Var.TypeObjectPath);
+			if (EnumObject)
+			{
+				PinType.PinCategory = UEdGraphSchema_K2::PC_Byte;
+				PinType.PinSubCategoryObject = EnumObject;
+			}
+			else
+			{
+				UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:VariableType] Enum variable '%s' could not load enum '%s' — falling back to name"),
+					*Var.Name, *Var.TypeObjectPath);
+				PinType.PinCategory = UEdGraphSchema_K2::PC_Name;
+			}
+		}
+		else if (!TryBuildEdGraphPinType(Var.Type, PinType))
 		{
 			PinType.PinCategory = UEdGraphSchema_K2::PC_Real;
 			PinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
@@ -1273,6 +1288,33 @@ bool FAnimBPImporter::ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph
 	UEdGraphPin* TargetPin = FindInputValuePin(Node, KebabKey);
 	if (!TargetPin)
 	{
+		const FString PropertyName = ResolveBindingPropertyName(Node, KebabKey);
+		TMap<FName, FAnimGraphNodePropertyBinding>* PropertyBindings = GetMutablePropertyBindingMap(Node);
+		if (!PropertyName.IsEmpty() && PropertyBindings)
+		{
+			Node->Modify();
+			if (UObject* BindingObject = reinterpret_cast<UObject*>(Node->GetMutableBinding()))
+			{
+				BindingObject->Modify();
+			}
+
+			FAnimGraphNodePropertyBinding PropertyBinding;
+			PropertyBinding.PropertyName = FName(*PropertyName);
+			PropertyBinding.PropertyPath.Reset();
+			PropertyBinding.PropertyPath.Add(BoundVariableName);
+			PropertyBinding.PathAsText = FText::FromString(BoundVariableName);
+			PropertyBinding.Type = EAnimGraphNodePropertyBindingType::Property;
+			PropertyBinding.bIsBound = true;
+			PropertyBinding.ArrayIndex = INDEX_NONE;
+			PropertyBinding.ContextId = NAME_None;
+			PropertyBindings->Add(FName(*PropertyName), PropertyBinding);
+			Node->ReconstructNode();
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+			UE_LOG(LogAnimBPImporter, Log, TEXT("Restored property binding via binding map: %s.%s <- %s"),
+				*Node->GetName(), *PropertyName, *BoundVariableName);
+			return true;
+		}
+
 		UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:PropertyBinding] Node '%s' property ':%s' = %s — input pin not found for binding restore"),
 			*Node->GetName(), *KebabKey, *Value);
 		return true;
@@ -1455,13 +1497,37 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 			}
 
 			// Validate: check whether this layer exists in the blueprint's SkeletonGeneratedClass.
-			// If the layer is a "self" layer (no interface) and not found in SkeletonGeneratedClass,
-			// creating the node will cause a compiler error "invalid layer". Skip in that case.
+			// If a fresh import has not produced SkeletonGeneratedClass entries yet, first try to infer
+			// the implemented AnimLayerInterface that owns the requested layer name.
 			bool bLayerValid = true;
+			UAnimBlueprint* BP = Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForGraph(Graph));
+			if (!LayerNode->Node.Interface && BP)
+			{
+				for (const FBPInterfaceDescription& Desc : BP->ImplementedInterfaces)
+				{
+					UClass* CandidateInterface = Desc.Interface;
+					if (!CandidateInterface)
+					{
+						continue;
+					}
+					if (CandidateInterface->FindFunctionByName(LayerFName))
+					{
+						LayerNode->Node.Interface = CandidateInterface;
+						UE_LOG(LogAnimBPImporter, Log, TEXT("LinkedAnimLayer: inferred interface '%s' for layer '%s'"),
+							*CandidateInterface->GetPathName(), *LayerFName.ToString());
+						break;
+					}
+				}
+				if (!LayerNode->Node.Interface && BP->ImplementedInterfaces.Num() == 1 && BP->ImplementedInterfaces[0].Interface)
+				{
+					LayerNode->Node.Interface = BP->ImplementedInterfaces[0].Interface;
+					UE_LOG(LogAnimBPImporter, Log, TEXT("LinkedAnimLayer: fallback-bound single implemented interface '%s' for layer '%s'"),
+						*BP->ImplementedInterfaces[0].Interface->GetPathName(), *LayerFName.ToString());
+				}
+			}
 			if (!LayerNode->Node.Interface)
 			{
 				// Self-layer: look it up in SkeletonGeneratedClass
-				UAnimBlueprint* BP = Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForGraph(Graph));
 				if (BP && BP->SkeletonGeneratedClass)
 				{
 					IAnimClassInterface* AnimClass = IAnimClassInterface::GetFromClass(BP->SkeletonGeneratedClass);
@@ -1478,9 +1544,8 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 						}
 						if (!bFound)
 						{
-							UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:LinkedAnimLayer] Layer '%s' not found in SkeletonGeneratedClass — skipping node to avoid compile error"),
+							UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:LinkedAnimLayer] Layer '%s' not found in SkeletonGeneratedClass at import time — keep node and fall back to manual pin reconstruction"),
 								*LayerFName.ToString());
-							bLayerValid = false;
 						}
 					}
 				}
@@ -2016,6 +2081,15 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		{
 			UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:PropertySet] Node '%s' property ':%s' = %s — could not find matching pin or FProperty"),
 				*NodeType, *Pair.Key, *Pair.Value);
+		}
+	}
+
+	if (UAnimGraphNode_TwoWayBlend* BlendNode = Cast<UAnimGraphNode_TwoWayBlend>(NewNode))
+	{
+		if (NodeAST->Properties.Contains(TEXT("alpha-curve-name")))
+		{
+			BlendNode->BlendNode.AlphaInputType = EAnimAlphaInputType::Curve;
+			BlendNode->ReconstructNode();
 		}
 	}
 	

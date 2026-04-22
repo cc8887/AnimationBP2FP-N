@@ -19,6 +19,7 @@ enum class EPinType : uint8
 	Rotator,
 	Transform,
 	Name,
+	Enum,
 	Object
 };
 
@@ -146,6 +147,7 @@ struct ANIMBP2FP_API FVariableDef
 	EPinType Type;
 	FString DefaultValue;
 	FString Description;
+	FString TypeObjectPath;  // For enum/object-like variables that need a concrete asset/class path
 	
 	// For float/int: range
 	float RangeMin = 0.0f;

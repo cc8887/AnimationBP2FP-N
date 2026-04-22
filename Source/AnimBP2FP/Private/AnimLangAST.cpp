@@ -27,6 +27,7 @@ namespace
 		case EPinType::Rotator:   return TEXT("rotator");
 		case EPinType::Transform: return TEXT("transform");
 		case EPinType::Name:      return TEXT("name");
+		case EPinType::Enum:      return TEXT("enum");
 		case EPinType::Object:    return TEXT("object");
 		default:                  return TEXT("unknown");
 		}
@@ -236,14 +237,29 @@ FString FVariableDef::ToString() const
 	FString TypeStr;
 	switch (Type)
 	{
-		case EPinType::Float:  TypeStr = TEXT("float"); break;
-		case EPinType::Int:    TypeStr = TEXT("int"); break;
-		case EPinType::Bool:   TypeStr = TEXT("bool"); break;
-		case EPinType::Vector: TypeStr = TEXT("vector"); break;
-		default:               TypeStr = TEXT("unknown"); break;
+		case EPinType::Float:     TypeStr = TEXT("float"); break;
+		case EPinType::Int:       TypeStr = TEXT("int"); break;
+		case EPinType::Bool:      TypeStr = TEXT("bool"); break;
+		case EPinType::Vector:    TypeStr = TEXT("vector"); break;
+		case EPinType::Rotator:   TypeStr = TEXT("rotator"); break;
+		case EPinType::Transform: TypeStr = TEXT("transform"); break;
+		case EPinType::Name:      TypeStr = TEXT("name"); break;
+		case EPinType::Enum:      TypeStr = TEXT("enum"); break;
+		case EPinType::Object:    TypeStr = TEXT("object"); break;
+		default:                  TypeStr = TEXT("unknown"); break;
 	}
 	
-	return FString::Printf(TEXT("(%s :%s %s)"), *TypeStr, *Name, *DefaultValue);
+	FString Result = FString::Printf(TEXT("(%s :%s"), *TypeStr, *Name);
+	if (!TypeObjectPath.IsEmpty())
+	{
+		Result += FString::Printf(TEXT(" :type-object (asset \"%s\")"), *TypeObjectPath);
+	}
+	if (!DefaultValue.IsEmpty())
+	{
+		Result += FString::Printf(TEXT(" %s"), *DefaultValue);
+	}
+	Result += TEXT(")");
+	return Result;
 }
 
 // ========== FCachedPoseDef ==========

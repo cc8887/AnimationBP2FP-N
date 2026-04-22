@@ -7,6 +7,7 @@
 
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
+#include "Animation/AnimNodeBase.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -175,6 +176,68 @@ namespace
 		return Result;
 	}
 
+	static FLispNodePtr EXP_CloneBlueprintLispNodeWithoutStableIds(const FLispNodePtr& Node)
+	{
+		if (!Node.IsValid())
+		{
+			return Node;
+		}
+
+		FLispNodePtr Copy = MakeShared<FLispNode>();
+		Copy->Type = Node->Type;
+		Copy->StringValue = Node->StringValue;
+		Copy->NumberValue = Node->NumberValue;
+		Copy->Line = Node->Line;
+		Copy->Column = Node->Column;
+
+		if (Node->IsList())
+		{
+			for (int32 Index = 0; Index < Node->Children.Num(); ++Index)
+			{
+				const FLispNodePtr& Child = Node->Children[Index];
+				if (Child.IsValid() && Child->IsKeyword()
+					&& (Child->StringValue == TEXT(":id") || Child->StringValue == TEXT(":event-id")))
+				{
+					++Index;
+					continue;
+				}
+
+				Copy->Children.Add(EXP_CloneBlueprintLispNodeWithoutStableIds(Child));
+			}
+		}
+
+		return Copy;
+	}
+
+	static FString EXP_CanonicalizeHelperGraphDSLForExport(const FString& LispCode)
+	{
+		const FString Trimmed = LispCode.TrimStartAndEnd();
+		if (Trimmed.IsEmpty())
+		{
+			return FString();
+		}
+
+		const FLispParseResult ParseResult = FLispParser::Parse(Trimmed);
+		if (!ParseResult.bSuccess)
+		{
+			FString Fallback = Trimmed;
+			Fallback.ReplaceInline(TEXT("\r\n"), TEXT("\n"));
+			return Fallback;
+		}
+
+		TArray<FString> CanonicalNodes;
+		for (const FLispNodePtr& Node : ParseResult.Nodes)
+		{
+			const FLispNodePtr CanonNode = EXP_CloneBlueprintLispNodeWithoutStableIds(Node);
+			if (CanonNode.IsValid())
+			{
+				CanonicalNodes.Add(CanonNode->ToString(false, 0));
+			}
+		}
+
+		return FString::Join(CanonicalNodes, TEXT("\n"));
+	}
+
 	static EPinType PinTypeToAnimLangType(const FEdGraphPinType& PinType)
 	{
 		const FString Category = PinType.PinCategory.ToString();
@@ -193,6 +256,10 @@ namespace
 		if (Category == TEXT("name"))
 		{
 			return EPinType::Name;
+		}
+		if ((Category == TEXT("byte") || Category == UEdGraphSchema_K2::PC_Byte.ToString()) && Cast<UEnum>(PinType.PinSubCategoryObject.Get()))
+		{
+			return EPinType::Enum;
 		}
 		if (Category == TEXT("object") || Category == TEXT("softobject"))
 		{
@@ -228,6 +295,17 @@ namespace
 		}
 
 		return false;
+	}
+
+	static bool IsPoseLinkPin(const UEdGraphPin* Pin)
+	{
+		if (!Pin || Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Struct)
+		{
+			return false;
+		}
+
+		const UObject* TypeObject = Pin->PinType.PinSubCategoryObject.Get();
+		return TypeObject == FPoseLink::StaticStruct() || TypeObject == FComponentSpacePoseLink::StaticStruct();
 	}
 
 	static FString GetLinkedNodeFallbackValue(UEdGraphPin* Pin)
@@ -329,7 +407,7 @@ namespace
 			Helper.Id = DecodeManagedHelperId(HelperSuffix);
 			Helper.GraphName = GraphName;
 			Helper.GeneratedVar = GeneratedVarName;
-			Helper.DSL = LispResult.LispCode;
+			Helper.DSL = EXP_CanonicalizeHelperGraphDSLForExport(LispResult.LispCode);
 			Helper.UpdateGroup = TEXT("__ABP2FP_UpdateBindings");
 			Helper.GeneratedType = EPinType::Float;
 
@@ -451,7 +529,13 @@ static void CollectNonPoseParams(UAnimGraphNode_Base* Node, TMap<FString, FStrin
 			continue;
 		}
 
-		// Struct pins connected to another node: first try structured binding export, then fall back to (var ...)
+		// Pose-link pins are restored via child pose connections, not scalar property forms.
+		if (IsPoseLinkPin(Pin))
+		{
+			continue;
+		}
+
+		// Non-pose struct pins connected to another node: first try structured binding export, then fall back to (var ...)
 		if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
 		{
 			if (Pin->LinkedTo.Num() > 0)
@@ -879,8 +963,20 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBluep
 			VarDef.Type = EPinType::Int;
 		else if (CategoryStr == TEXT("bool"))
 			VarDef.Type = EPinType::Bool;
+		else if (CategoryStr == TEXT("name"))
+			VarDef.Type = EPinType::Name;
+		else if (CategoryStr == TEXT("byte") && Cast<UEnum>(Var.VarType.PinSubCategoryObject.Get()))
+			VarDef.Type = EPinType::Enum;
 		else
 			VarDef.Type = EPinType::Float; // default
+		
+		if (VarDef.Type == EPinType::Enum)
+		{
+			if (const UEnum* EnumObj = Cast<UEnum>(Var.VarType.PinSubCategoryObject.Get()))
+			{
+				VarDef.TypeObjectPath = EnumObj->GetPathName();
+			}
+		}
 		
 		VarDef.DefaultValue = Var.DefaultValue;
 		ResultAST->Variables.Add(VarDef);

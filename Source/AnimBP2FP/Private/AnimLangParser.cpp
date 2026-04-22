@@ -28,6 +28,7 @@ static EPinType ParsePinTypeFromText(const FString& TypeText)
 	if (Lower == TEXT("rotator"))   return EPinType::Rotator;
 	if (Lower == TEXT("transform")) return EPinType::Transform;
 	if (Lower == TEXT("name"))      return EPinType::Name;
+	if (Lower == TEXT("enum"))      return EPinType::Enum;
 	if (Lower == TEXT("object"))    return EPinType::Object;
 	return EPinType::Float;
 }
@@ -376,23 +377,7 @@ FVariableDef FAnimLangParser::ParseVarDef()
 	// Type name (identifier)
 	if (Check(EAnimLangTokenType::Identifier))
 	{
-		FString TypeStr = Advance().Value;
-		if (TypeStr == TEXT("float") || TypeStr == TEXT("real") || TypeStr == TEXT("double"))
-			Var.Type = EPinType::Float;
-		else if (TypeStr == TEXT("int"))
-			Var.Type = EPinType::Int;
-		else if (TypeStr == TEXT("bool"))
-			Var.Type = EPinType::Bool;
-		else if (TypeStr == TEXT("vector"))
-			Var.Type = EPinType::Vector;
-		else if (TypeStr == TEXT("rotator"))
-			Var.Type = EPinType::Rotator;
-		else if (TypeStr == TEXT("transform"))
-			Var.Type = EPinType::Transform;
-		else if (TypeStr == TEXT("name"))
-			Var.Type = EPinType::Name;
-		else
-			Var.Type = EPinType::Float;  // default fallback
+		Var.Type = ParsePinTypeFromText(Advance().Value);
 	}
 	else
 	{
@@ -409,10 +394,30 @@ FVariableDef FAnimLangParser::ParseVarDef()
 		Error(TEXT("Expected :name in variable definition"));
 	}
 	
-	// Optional default value
-	if (!Check(EAnimLangTokenType::RParen))
+	while (!Check(EAnimLangTokenType::RParen))
 	{
+		if (Check(EAnimLangTokenType::Keyword))
+		{
+			const FString FieldName = Advance().Value;
+			if (FieldName == TEXT("type-object"))
+			{
+				FString TypeObjectValue = ParseValue();
+				if (TypeObjectValue.StartsWith(TEXT("(asset ")))
+				{
+					TypeObjectValue.RemoveFromStart(TEXT("(asset "));
+					TypeObjectValue.RemoveFromEnd(TEXT(")"));
+				}
+				if (TypeObjectValue.StartsWith(TEXT("\"")) && TypeObjectValue.EndsWith(TEXT("\"")) && TypeObjectValue.Len() >= 2)
+				{
+					TypeObjectValue = TypeObjectValue.Mid(1, TypeObjectValue.Len() - 2);
+				}
+				Var.TypeObjectPath = TypeObjectValue;
+				continue;
+			}
+		}
+		
 		Var.DefaultValue = ParseValue();
+		break;
 	}
 	
 	Expect(EAnimLangTokenType::RParen, TEXT("variable definition"));
