@@ -1,0 +1,146 @@
+;; Third Person Character - Full Example
+;; 完整的第三人称角色动画蓝图
+
+(anim-blueprint "ThirdPersonCharacter"
+  
+  ;; ========== 变量定义 ==========
+  :variables
+    [;; 移动相关
+     (float :speed 0.0 :range [0.0 600.0]
+       :description "角色移动速度")
+     (float :direction 0.0 :range [-180.0 180.0]
+       :description "移动方向（相对于角色朝向）")
+     (bool :is-in-air false
+       :description "角色是否在空中")
+     (bool :is-crouching false
+       :description "角色是否蹲伏")
+     
+     ;; 武器相关
+     (bool :is-aiming false
+       :description "是否瞄准")
+     (float :aim-yaw 0.0 :range [-180.0 180.0])
+     (float :aim-pitch 0.0 :range [-90.0 90.0])
+     
+     ;; 其他
+     (float :lean 0.0 :range [-1.0 1.0]
+       :description "身体倾斜（翻滚时）")]
+  
+  ;; ========== 主动画图 ==========
+  :anim-graph
+    (layered-blend-per-bone
+      
+      ;; 基础层：全身移动
+      :base
+        (state-machine :full-body-locomotion
+          :initial :idle
+          
+          :states
+            [;; 站立状态
+             (state :idle
+               (blendspace-1d "Idle_Lean_LR"
+                 :axis :lean
+                 :loop true))
+             
+             ;; 行走/奔跑
+             (state :walk-run
+               (blendspace-2d "Locomotion_BlendSpace"
+                 :x :speed
+                 :y :direction
+                 :loop true
+                 :play-rate (/ :speed 375.0)))  ;; 动态播放速率
+             
+             ;; 蹲伏移动
+             (state :crouch-walk
+               (blendspace-2d "Crouch_BlendSpace"
+                 :x :speed
+                 :y :direction
+                 :loop true))
+             
+             ;; 跳跃
+             (state :jump-start
+               (sequence-player "Jump_Start" :loop false)
+               :transition-to :jump-loop
+                 :on-finish true)
+             
+             (state :jump-loop
+               (sequence-player "Jump_Loop" :loop true))
+             
+             (state :jump-land
+               (sequence-player "Jump_Land" :loop false)
+               :transition-to :idle
+                 :on-finish true)]
+          
+          :transitions
+            [;; 站立 <-> 移动
+             (transition :idle :walk-run
+               :condition (and (not :is-crouching)
+                               (not :is-in-air)
+                               (> :speed 10.0))
+               :duration 0.2)
+             
+             (transition :walk-run :idle
+               :condition (and (not :is-crouching)
+                               (< :speed 10.0))
+               :duration 0.25)
+             
+             ;; 蹲伏
+             (transition :idle :crouch-walk
+               :condition (and :is-crouching (> :speed 5.0))
+               :duration 0.3)
+             
+             (transition :crouch-walk :idle
+               :condition (or (not :is-crouching) (< :speed 5.0))
+               :duration 0.3)
+             
+             ;; 跳跃（从任意地面状态）
+             (transition :any :jump-start
+               :condition :is-in-air
+               :from-states [:idle :walk-run :crouch-walk]
+               :duration 0.1
+               :priority :high)
+             
+             ;; 落地（只能从跳跃循环）
+             (transition :jump-loop :jump-land
+               :condition (not :is-in-air)
+               :duration 0.1)])
+      
+      ;; ========== 上半身层：瞄准和射击 ==========
+      :layers
+        [(blend-layer
+           :name "UpperBody"
+           :weight (if :is-aiming 1.0 0.0)  ;; 瞄准时显示
+           :blend-mode :blend
+           :bone-filter "spine_01"
+           :blend-depth -1  ;; 所有子骨骼
+           
+           :source
+             (layered-blend
+               ;; 基础瞄准姿势
+               :base
+                 (aimoffset-2d "AimOffset"
+                   :x :aim-yaw
+                   :y :aim-pitch)
+               
+               ;; 叠加：射击动画槽
+               :additive
+                 (slot "UpperBodyShoot"
+                   :default (reference-pose))))
+         
+         ;; ========== 左手IK层 ==========
+         (blend-layer
+           :name "LeftHandIK"
+           :weight 1.0
+           :blend-mode :replace
+           :bone-filter "hand_l"
+           :blend-depth 0  ;; 只有手
+           
+           :source
+             (two-bone-ik
+               :effector-location (get-socket-location "Weapon" "LeftHandSocket")
+               :joint-target (get-socket-location "Character" "LeftElbowTarget")))])
+  
+  ;; ========== 动画通知回调 ==========
+  :anim-notifies
+    [(notify "Footstep_L" :callback on-left-footstep)
+     (notify "Footstep_R" :callback on-right-footstep)
+     (notify "Jump_Apex" :callback on-jump-apex)])
