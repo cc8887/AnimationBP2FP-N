@@ -1496,12 +1496,11 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 				}
 			}
 
-			// Validate: check whether this layer exists in the blueprint's SkeletonGeneratedClass.
-			// If a fresh import has not produced SkeletonGeneratedClass entries yet, first try to infer
-			// the implemented AnimLayerInterface that owns the requested layer name.
+			// Validate: resolve the authored layer against the blueprint's implemented interface graphs first.
+			// For linked anim layers, matching UEdGraph names / InterfaceGuid is more reliable than probing UFunction names.
 			bool bLayerValid = true;
 			UAnimBlueprint* BP = Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForGraph(Graph));
-			if (!LayerNode->Node.Interface && BP)
+			if (BP)
 			{
 				for (const FBPInterfaceDescription& Desc : BP->ImplementedInterfaces)
 				{
@@ -1510,19 +1509,25 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 					{
 						continue;
 					}
-					if (CandidateInterface->FindFunctionByName(LayerFName))
+					if (LayerNode->Node.Interface && LayerNode->Node.Interface != CandidateInterface)
 					{
-						LayerNode->Node.Interface = CandidateInterface;
-						UE_LOG(LogAnimBPImporter, Log, TEXT("LinkedAnimLayer: inferred interface '%s' for layer '%s'"),
-							*CandidateInterface->GetPathName(), *LayerFName.ToString());
+						continue;
+					}
+					for (UEdGraph* InterfaceGraph : Desc.Graphs)
+					{
+						if (InterfaceGraph && InterfaceGraph->GetFName() == LayerFName)
+						{
+							LayerNode->Node.Interface = CandidateInterface;
+							LayerNode->InterfaceGuid = InterfaceGraph->InterfaceGuid;
+							UE_LOG(LogAnimBPImporter, Log, TEXT("LinkedAnimLayer: resolved interface '%s' (guid=%s) for layer '%s'"),
+								*CandidateInterface->GetPathName(), *LayerNode->InterfaceGuid.ToString(), *LayerFName.ToString());
+							break;
+						}
+					}
+					if (LayerNode->Node.Interface == CandidateInterface && LayerNode->InterfaceGuid.IsValid())
+					{
 						break;
 					}
-				}
-				if (!LayerNode->Node.Interface && BP->ImplementedInterfaces.Num() == 1 && BP->ImplementedInterfaces[0].Interface)
-				{
-					LayerNode->Node.Interface = BP->ImplementedInterfaces[0].Interface;
-					UE_LOG(LogAnimBPImporter, Log, TEXT("LinkedAnimLayer: fallback-bound single implemented interface '%s' for layer '%s'"),
-						*BP->ImplementedInterfaces[0].Interface->GetPathName(), *LayerFName.ToString());
 				}
 			}
 			if (!LayerNode->Node.Interface)
@@ -1546,6 +1551,10 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 						{
 							UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:LinkedAnimLayer] Layer '%s' not found in SkeletonGeneratedClass at import time — keep node and fall back to manual pin reconstruction"),
 								*LayerFName.ToString());
+						}
+						else if (!LayerNode->InterfaceGuid.IsValid())
+						{
+							LayerNode->InterfaceGuid.Invalidate();
 						}
 					}
 				}

@@ -1,271 +1,148 @@
 # AnimBP2FP - Animation Blueprint to Functional Programming
 
-**UE5.6 Plugin for converting Animation Blueprints to/from functional DSL**
+**UE5.6 插件：动画蓝图（AnimBlueprint）⇄ S-expression DSL（AnimLang）双向转换**
 
 ---
 
-## 🎯 What is this?
+## 功能
 
-AnimBP2FP is a Unreal Engine 5.6 plugin that enables bidirectional conversion between Animation Blueprints and a functional programming DSL (AnimLang).
-
-**Key Features**:
-- ✅ Export Animation Blueprints to text-based DSL
-- ✅ Import DSL back to Animation Blueprints
-- ✅ Version control friendly (text vs binary)
-- ✅ Type-safe with Haskell-inspired type system
-- ✅ S-expression syntax (Lisp-like)
-
-**Functional Purity**: ~70% (state machines have side effects)
+- **导出**：将动画蓝图导出为文本 DSL（AnimLang），支持版本管理（Git diff/merge）
+- **导入**：从 DSL 文本重建 / 更新动画蓝图
+- **往返验证**：导出 → 解析 → 导出，验证 Exporter ↔ Parser 的无损往返
+- **EventGraph 导出**：通过 BlueprintLisp 将 EventGraph 导出为 BlueprintLisp DSL
+- **Commandlet 无头模式**：支持 `-run=AnimBP2FPExport/Import/RoundTrip` 批量处理
 
 ---
 
-## 📦 Installation
+## 安装
 
-### Method 1: Copy to Project Plugins
-```bash
-# Copy this folder to your UE5.6 project
+将插件复制到 UE5.6 项目的 `Plugins/` 目录或引擎的 `Engine/Plugins/` 目录：
+
+```
 YourProject/
 └── Plugins/
-    └── AnimBP2FP/        # This plugin
+    └── AnimBP2FP/
 ```
 
-### Method 2: Copy to Engine Plugins
-```bash
-# Copy to engine-wide plugins
-UE_5.6/
-└── Engine/
-    └── Plugins/
-        └── AnimBP2FP/    # This plugin
-```
-
-Then:
-1. Regenerate project files (right-click .uproject → Generate Visual Studio project files)
-2. Rebuild project
-3. Enable plugin in UE Editor: Edit → Plugins → Search "AnimBP2FP"
+然后重新生成项目文件并编译。
 
 ---
 
-## 🚀 Quick Start
+## 使用方式
 
-### Export Animation Blueprint to DSL
+### 方式一：编辑器菜单
 
-```cpp
-// C++ API
-#include "AnimBPExporter.h"
+`Tools → AnimBP2FP →` 下有导出/导入/往返验证等菜单项。
 
-UAnimBlueprint* AnimBP = LoadObject<UAnimBlueprint>(...);
-FAnimBPExporter Exporter;
-FString DSLCode = Exporter.ExportToAnimLang(AnimBP);
-
-// Save to file
-FFileHelper::SaveStringToFile(DSLCode, TEXT("MyAnimBP.animlang"));
-```
-
-### Import DSL to Animation Blueprint
-
-```cpp
-// C++ API
-#include "AnimBPImporter.h"
-
-FString DSLCode;
-FFileHelper::LoadFileToString(DSLCode, TEXT("MyAnimBP.animlang"));
-
-FAnimBPImporter Importer;
-UAnimBlueprint* AnimBP = Importer.ImportFromAnimLang(DSLCode);
-```
-
-### Editor Integration
-
-1. Right-click Animation Blueprint → **Export to AnimLang**
-2. Edit `.animlang` file in text editor
-3. Right-click `.animlang` file → **Import to Animation Blueprint**
-
----
-
-## 📐 DSL Example
-
-```lisp
-;; Simple blend example
-(anim-blueprint "ThirdPersonCharacter"
-  :inputs [(float :speed 0.0 :range [0.0 600.0])]
-  
-  :output
-    (blend (/ :speed 600.0)
-      (sequence-player "Idle_Rifle" :loop true)
-      (sequence-player "Run_Fwd_Rifle" :loop true)))
-```
-
-```lisp
-;; State machine example
-(anim-blueprint "Character"
-  :state-machine :locomotion
-    :states
-      [(state :idle (sequence-player "Idle"))
-       (state :walk (sequence-player "Walk"))]
-    :transitions
-      [(idle -> walk :condition (> :speed 10.0) :blend-time 0.2)
-       (walk -> idle :condition (< :speed 10.0) :blend-time 0.3)])
-```
-
-See `Extras/DSL/Examples/` for more examples.
-
----
-
-## 🏗️ Project Structure
-
-```
-AnimBP2FP/                       # Plugin root (THIS IS A STANDARD UE PLUGIN)
-├── AnimBP2FP.uplugin            # Plugin descriptor (in root!)
-├── Source/                      # Plugin source code
-│   ├── AnimBP2FP/               # Runtime module
-│   │   ├── Public/
-│   │   │   ├── AnimBPExporter.h
-│   │   │   ├── AnimBPImporter.h
-│   │   │   ├── AnimLangAST.h
-│   │   │   └── AnimNodeExporter.h
-│   │   └── Private/
-│   │       └── AnimNodeExporter.cpp
-│   └── AnimBP2FPEditor/         # Editor module
-│       ├── Public/
-│       │   ├── AnimBP2FPEditorModule.h
-│       │   └── AnimBP2FPSettings.h
-│       └── Private/
-│           ├── AnimBP2FPEditorModule.cpp
-│           └── AnimBP2FPSettings.cpp
-├── Content/                     # Plugin content
-│   └── Icons/
-├── Resources/                   # Plugin resources
-├── Docs/                        # Documentation (part of plugin repo)
-│   ├── README.md                # Full documentation
-│   ├── PROGRESS.md              # Development progress
-│   ├── PROJECT_SUMMARY.md       # Project summary
-│   ├── PROJECT_INDEPENDENCE_DECISION.md
-│   └── Research/                # Research documents
-│       └── AnimBlueprintAnalysis.md
-└── Extras/                      # Extra tools (not loaded by UE)
-    ├── Tools/                   # Racket tooling (linter, formatter)
-    │   ├── animlang-types.rkt
-    │   ├── animlang-nodes.rkt
-    │   ├── animlang-lint.rkt
-    │   └── animlang-format.rkt
-    ├── Tests/                   # Test cases
-    │   ├── TestStrategy.md
-    │   ├── UnitTests/
-    │   ├── IntegrationTests/
-    │   └── TestAssets/
-    └── DSL/                     # DSL examples and specs
-        └── Examples/
-            ├── simple_blend.animlang
-            ├── state_machine.animlang
-            └── third_person_char.animlang
-```
-
-**Note**: `Extras/` is part of the repo but NOT part of the UE plugin. Use for development/testing only.
-
----
-
-## 🔧 Configuration
-
-### Project Settings
-
-Edit → Project Settings → Plugins → AnimBP2FP:
-
-- **Auto Export on Save**: Automatically export AnimBP to DSL when saved
-- **Auto Generate Stubs**: Generate type definitions on editor startup (like `unreal.py`)
-- **Export Path**: Where to save exported DSL files (default: `Intermediate/AnimLangStub/`)
-
-### Editor Settings
-
-Tools → AnimBP2FP:
-- **Export Animation Blueprint**: Export selected AnimBP
-- **Import DSL File**: Import `.animlang` file
-- **Regenerate Type Stubs**: Manually trigger stub generation
-
----
-
-## 🛠️ Dependencies
-
-### Required
-- Unreal Engine 5.6+
-- C++20 compiler (MSVC 2022, Clang)
-
-### Optional (for Extras tools)
-- Racket 8.0+ (for linting/formatting)
-- sexpp library (for S-expression parsing, included)
-
----
-
-## 📚 Documentation
-
-- **Full Documentation**: `Docs/README.md`
-- **Development Progress**: `Docs/PROGRESS.md`
-- **Project Summary**: `Docs/PROJECT_SUMMARY.md`
-- **Research Papers**: `Docs/Research/`
-- **DSL Specification**: `Extras/DSL/`
-- **Test Strategy**: `Extras/Tests/TestStrategy.md`
-
----
-
-## 🤝 Related Projects
-
-- **MaterialBP2FP**: Sister project for Material Blueprints (coming soon)
-  - Higher functional purity (~95% vs ~70%)
-  - HLSL type system vs UE types
-  - Independent tooling
-
-See `Docs/PROJECT_INDEPENDENCE_DECISION.md` for why projects are separate.
-
----
-
-## 🧪 Testing
+### 方式二：Commandlet（无头模式）
 
 ```bash
-# Run unit tests (requires UE Editor)
-cd Extras/Tests
-./RunTests.bat
+# 导出所有动画蓝图
+UnrealEditor-Cmd.exe "Project.uproject" -run=AnimBP2FPExport -stdout -nullrhi
 
-# Run integration tests
-./RunIntegrationTests.bat
+# 往返验证
+UnrealEditor-Cmd.exe "Project.uproject" -run=AnimBP2FPRoundTrip -stdout -nullrhi
+
+# 批量导入
+UnrealEditor-Cmd.exe "Project.uproject" -run=AnimBP2FPImport -test -stdout -nullrhi
+```
+
+### 方式三：Python Bridge（编辑器进程内直调）
+
+通过 MCP 连接 UE 编辑器，在编辑器 Python 环境中调用：
+
+```python
+import unreal
+
+# 导出
+result = unreal.AnimBP2FPPythonBridge.export_anim_blueprint_to_text(
+    "/Game/Path/To/Your_AnimBP.Your_AnimBP"
+)
+print(result.dsl_text)
+
+# 导入/更新
+result = unreal.AnimBP2FPPythonBridge.update_anim_blueprint_from_text(
+    "/Game/Path/To/Your_AnimBP.Your_AnimBP",
+    dsl_text
+)
+
+# EventGraph 导出
+result = unreal.AnimBP2FPPythonBridge.export_event_graph_to_text(
+    "/Game/Path/To/Your_AnimBP.Your_AnimBP"
+)
 ```
 
 ---
 
-## 🐛 Known Issues
+## AI Skill 库
 
-See `Docs/PROGRESS.md` for current status and known issues.
+AnimBP2FP 提供以下 AI Skill，位于 `UE-Editor-MCPServer-Skills` 仓库的 `plugins/` 目录下：
 
-**Current Status**: Phase 2 - DSL Parser (30% complete)
+| Skill | 用途 |
+|-------|------|
+| **animbp2fp-mcp** | 通过 MCP 触发 AnimBP2FP 全套转换（导出/导入/更新/往返验证/EventGraph DSL），适合批量任务和 Commandlet 链路 |
+| **alsv-blueprint-rw** | 在 ALSV 编辑器中交互式读写 AnimBlueprint（单资产），适合 AI 打开编辑器时直接读/改蓝图 |
+| **blueprint-lisp** | BlueprintLisp 通用转换（EventGraph 导入/导出/更新），适用于任何项目的任意蓝图 |
 
----
-
-## 📖 License
-
-MIT License (see LICENSE file)
-
----
-
-## 🙋 Support
-
-- **Issues**: GitHub/Gongfeng Issues
-- **Discussions**: GitHub Discussions
-- **Gongfeng**: http://git.woa.com/yuchencui/AnimBP2FP
+安装后，AI 代理可通过这些 Skill 自动调用 AnimBP2FP 和 BlueprintLisp 的功能。
 
 ---
 
-## 🎯 Roadmap
+## DSL 示例
 
-| Phase | Status | ETA |
-|-------|--------|-----|
-| Phase 1: Research & Design | ✅ Done | 2026-03-23 |
-| Phase 2: DSL Parser | 🔄 10% | 2026-03-30 |
-| Phase 3: Blueprint → DSL | ⏳ 0% | 2026-04-06 |
-| Phase 4: DSL → Blueprint | ⏳ 0% | 2026-04-13 |
-| Phase 5: Testing | ⏳ 0% | 2026-04-27 |
-| Phase 6: Release | ⏳ 0% | 2026-05-11 |
+```lisp
+(anim-blueprint "ALS_AnimBP"
+  :skeleton "/Game/AdvancedLocomotionSystemV/CharacterAssets/MannequinSkeleton"
+  :variables [(var :name "Speed" :type Float :default 0.0)]
+
+  :anim-graph
+    (output-pose
+      (blend-poses-by-bool
+        :active-value (ref "Get IsMoving")
+        :true-pose (sequence-player :name "Run_F" :loop true)
+        :false-pose (sequence-player :name "Idle" :loop true))))
+```
 
 ---
 
-**Version**: 0.1.0-alpha  
-**Last Updated**: 2026-03-24  
-**UE Version**: 5.6+  
-**Functional Purity**: ~70% (state machines have effects)
+## 项目结构
+
+```
+AnimBP2FP/
+├── AnimBP2FP.uplugin
+├── Source/
+│   ├── AnimBP2FP/               # Runtime 模块（Parser/Exporter/Importer/Differ/Patcher）
+│   └── AnimBP2FPEditor/         # Editor 模块（菜单/Commandlet/Python Bridge）
+├── Content/
+├── Resources/
+└── Extras/                      # 非 UE 插件部分（DSL 示例/测试）
+    ├── DSL/Examples/
+    └── Tests/
+```
+
+---
+
+## 输出目录
+
+- AnimGraph DSL：`<ProjectDir>/AnimLang/Exported/`
+- EventGraph DSL：`<ProjectDir>/AnimLang/EventGraph/`
+
+---
+
+## 验证状态
+
+**Export 往返测试**：ALS_AnimBP / CameraBehavior / Bow_AnimBP / Editor / TutorialAnimBP / TutorialTPP 全部 **100% PASS**。
+
+**Import 往返测试**：保真度 74.9%~100%，剩余 diff 主要集中在 EventGraph 变量连接（ref 连接，需 K2Node_VariableGet 支持）。
+
+---
+
+## 相关项目
+
+- **MaterialBP2FP**：材质蓝图 ⇄ DSL 转换
+- **BlueprintLisp**：EventGraph ⇄ BlueprintLisp DSL 转换
+
+---
+
+**版本**: 0.1.0-alpha  
+**UE 版本**: 5.6+
