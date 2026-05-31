@@ -141,6 +141,7 @@ AnimBP2FP/
 
 - **MaterialBP2FP**：材质蓝图 ⇄ DSL 转换
 - **BlueprintLisp**：EventGraph ⇄ BlueprintLisp DSL 转换
+- **BlueprintAutoLayout**：图节点自动排版。AnimBP2FP 通过导入生命周期钩子（`PostNodeChanges` 阶段）与之集成——当导入上下文请求 `AutoLayout` 行为时，DSL 导入完成后会自动整理新增/变更节点的布局。集成为可选：BlueprintAutoLayout 未启用时不影响导入，只是不自动排版。
 
 ---
 
