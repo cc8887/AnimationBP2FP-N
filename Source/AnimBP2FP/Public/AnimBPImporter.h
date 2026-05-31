@@ -5,6 +5,7 @@
 
 #include "CoreMinimal.h"
 #include "AnimLangAST.h"
+#include "AnimBP2FPModule.h"
 
 // 注意：FAnimBPImporter 是编辑器专用功能，仅用于编辑器构建
 // 非编辑器构建时，此类不可用
@@ -190,6 +191,20 @@ private:
 	
 	/** Compile the blueprint and check for errors */
 	static bool CompileBlueprint(UAnimBlueprint* Blueprint, FString* OutError);
+
+	static void BroadcastNodeLifecycle(
+		AnimBP2FPImportLifecycle::EImportLifecyclePhase Phase,
+		const AnimBP2FPImportLifecycle::FImportLifecycleContext& Context,
+		const TArray<AnimBP2FPImportLifecycle::FImportNodeChange>& Changes);
+
+	static void BroadcastPropertyLifecycle(
+		AnimBP2FPImportLifecycle::EImportLifecyclePhase Phase,
+		const AnimBP2FPImportLifecycle::FImportLifecycleContext& Context,
+		const TArray<AnimBP2FPImportLifecycle::FImportPropertyChange>& Changes);
+
+	static void BroadcastFinalizeLifecycle(
+		AnimBP2FPImportLifecycle::EImportLifecyclePhase Phase,
+		const AnimBP2FPImportLifecycle::FImportLifecycleContext& Context);
 };
 
 #endif // WITH_EDITOR

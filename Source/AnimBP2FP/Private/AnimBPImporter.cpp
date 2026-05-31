@@ -9,6 +9,7 @@
 #include "AnimBPExporter.h"
 #include "AnimLangDiffer.h"
 #include "AnimLangPatcher.h"
+#include "AnimBP2FPModule.h"
 
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
@@ -54,6 +55,7 @@
 #include "K2Node_VariableSet.h"
 #include "Engine/MemberReference.h"
 #include "UObject/UObjectIterator.h"
+#include "Framework/Application/SlateApplication.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogAnimBPImporter, Log, All);
 
@@ -70,6 +72,54 @@ static FString StripQuotes(const FString& Input)
 
 namespace
 {
+	const FName AutoLayoutBehaviorName(TEXT("AutoLayout"));
+
+	static AnimBP2FPImportLifecycle::FImportLifecycleContext MakeAnimLifecycleContext(
+		UAnimBlueprint* Blueprint,
+		UEdGraph* Graph,
+		bool bIsFullRebuild,
+		bool bIsIncremental,
+		bool bWillCompile,
+		bool bAutoLayout)
+	{
+		AnimBP2FPImportLifecycle::FImportLifecycleContext Context;
+		Context.ImportSessionId = FGuid::NewGuid();
+		Context.TargetAsset = Blueprint;
+		Context.TargetGraph = Graph;
+		Context.ScopeName = Graph ? FName(*Graph->GetName()) : NAME_None;
+		Context.bIsFullRebuild = bIsFullRebuild;
+		Context.bIsIncremental = bIsIncremental;
+		Context.bIsHeadless = IsRunningCommandlet() || !FSlateApplication::IsInitialized();
+		Context.bWillCompile = bWillCompile;
+		if (bAutoLayout)
+		{
+			Context.RequestedBehaviors.Add(AutoLayoutBehaviorName);
+		}
+		return Context;
+	}
+
+	static void CollectAnimNodeChanges(
+		const TSet<UEdGraphNode*>& PreExistingNodes,
+		UEdGraph* Graph,
+		TArray<AnimBP2FPImportLifecycle::FImportNodeChange>& OutChanges)
+	{
+		if (!Graph)
+		{
+			return;
+		}
+
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (Node && !PreExistingNodes.Contains(Node))
+			{
+				AnimBP2FPImportLifecycle::FImportNodeChange Change;
+				Change.Node = Node;
+				Change.ChangeType = AnimBP2FPImportLifecycle::EImportNodeChangeType::Added;
+				OutChanges.Add(Change);
+			}
+		}
+	}
+
 	static FString SanitizeHelperIdentifier(const FString& Input)
 	{
 		FString Result = Input;
@@ -2728,6 +2778,22 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 	if (!Blueprint || !AST.IsValid()) return false;
 	
 	UEdGraph* AnimGraph = FindAnimGraph(Blueprint);
+	const AnimBP2FPImportLifecycle::FImportLifecycleContext LifecycleContext =
+		MakeAnimLifecycleContext(Blueprint, AnimGraph, true, false, false, true);
+	TArray<AnimBP2FPImportLifecycle::FImportPropertyChange> PropertyChanges;
+	TSet<UEdGraphNode*> PreExistingNodes;
+	if (AnimGraph)
+	{
+		for (UEdGraphNode* ExistingNode : AnimGraph->Nodes)
+		{
+			if (ExistingNode)
+			{
+				PreExistingNodes.Add(ExistingNode);
+			}
+		}
+	}
+	BroadcastNodeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PreNodeChanges, LifecycleContext, {});
+	BroadcastPropertyLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PrePropertyChanges, LifecycleContext, PropertyChanges);
 	if (!AnimGraph)
 	{
 		UE_LOG(LogAnimBPImporter, Error, TEXT("Could not find AnimGraph"));
@@ -2903,10 +2969,63 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 		}
 	}
 	
+	TArray<AnimBP2FPImportLifecycle::FImportNodeChange> NodeChanges;
+	CollectAnimNodeChanges(PreExistingNodes, AnimGraph, NodeChanges);
+	BroadcastNodeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PostNodeChanges, LifecycleContext, NodeChanges);
+	BroadcastPropertyLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PostPropertyChanges, LifecycleContext, PropertyChanges);
 	return true;
 }
 
 // ========== Compilation ==========
+
+void FAnimBPImporter::BroadcastNodeLifecycle(
+	AnimBP2FPImportLifecycle::EImportLifecyclePhase Phase,
+	const AnimBP2FPImportLifecycle::FImportLifecycleContext& Context,
+	const TArray<AnimBP2FPImportLifecycle::FImportNodeChange>& Changes)
+{
+	if (!FAnimBP2FPModule::IsAvailable())
+	{
+		return;
+	}
+
+	AnimBP2FPImportLifecycle::FImportNodePhaseEvent Event;
+	Event.Phase = Phase;
+	Event.Context = Context;
+	Event.Changes = Changes;
+	FAnimBP2FPModule::Get().BroadcastNodePhase(Event);
+}
+
+void FAnimBPImporter::BroadcastPropertyLifecycle(
+	AnimBP2FPImportLifecycle::EImportLifecyclePhase Phase,
+	const AnimBP2FPImportLifecycle::FImportLifecycleContext& Context,
+	const TArray<AnimBP2FPImportLifecycle::FImportPropertyChange>& Changes)
+{
+	if (!FAnimBP2FPModule::IsAvailable())
+	{
+		return;
+	}
+
+	AnimBP2FPImportLifecycle::FImportPropertyPhaseEvent Event;
+	Event.Phase = Phase;
+	Event.Context = Context;
+	Event.Changes = Changes;
+	FAnimBP2FPModule::Get().BroadcastPropertyPhase(Event);
+}
+
+void FAnimBPImporter::BroadcastFinalizeLifecycle(
+	AnimBP2FPImportLifecycle::EImportLifecyclePhase Phase,
+	const AnimBP2FPImportLifecycle::FImportLifecycleContext& Context)
+{
+	if (!FAnimBP2FPModule::IsAvailable())
+	{
+		return;
+	}
+
+	AnimBP2FPImportLifecycle::FImportFinalizePhaseEvent Event;
+	Event.Phase = Phase;
+	Event.Context = Context;
+	FAnimBP2FPModule::Get().BroadcastFinalizePhase(Event);
+}
 
 bool FAnimBPImporter::CompileBlueprint(UAnimBlueprint* Blueprint, FString* OutError)
 {
@@ -2992,14 +3111,20 @@ UAnimBlueprint* FAnimBPImporter::ImportFromAST(const TSharedPtr<FAnimGraphAST>& 
 		if (OutError) *OutError = TEXT("Failed to build animation graph");
 		return nullptr;
 	}
+
+	UEdGraph* AnimGraph = FindAnimGraph(Blueprint);
+	const AnimBP2FPImportLifecycle::FImportLifecycleContext LifecycleContext =
+		MakeAnimLifecycleContext(Blueprint, AnimGraph, true, false, true, true);
 	
 	// Compile
 	FString CompileError;
+	BroadcastFinalizeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PreFinalize, LifecycleContext);
 	if (!CompileBlueprint(Blueprint, &CompileError))
 	{
 		UE_LOG(LogAnimBPImporter, Warning, TEXT("Compilation warning: %s"), *CompileError);
 		// Don't fail — the blueprint is still usable
 	}
+	BroadcastFinalizeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PostFinalize, LifecycleContext);
 	
 	UE_LOG(LogAnimBPImporter, Log, TEXT("Successfully imported '%s' from DSL (%d variables, %d defines)"),
 		*AST->Name, AST->Variables.Num(), AST->Defines.Num());
@@ -3066,6 +3191,22 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 	if (!Blueprint || !NewAST.IsValid()) return false;
 	
 	UEdGraph* AnimGraph = FindAnimGraph(Blueprint);
+	const AnimBP2FPImportLifecycle::FImportLifecycleContext LifecycleContext =
+		MakeAnimLifecycleContext(Blueprint, AnimGraph, true, false, false, true);
+	TArray<AnimBP2FPImportLifecycle::FImportPropertyChange> PropertyChanges;
+	TSet<UEdGraphNode*> PreExistingNodes;
+	if (AnimGraph)
+	{
+		for (UEdGraphNode* ExistingNode : AnimGraph->Nodes)
+		{
+			if (ExistingNode)
+			{
+				PreExistingNodes.Add(ExistingNode);
+			}
+		}
+	}
+	BroadcastNodeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PreNodeChanges, LifecycleContext, {});
+	BroadcastPropertyLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PrePropertyChanges, LifecycleContext, PropertyChanges);
 	if (!AnimGraph)
 	{
 		UE_LOG(LogAnimBPImporter, Error, TEXT("RebuildAnimGraph: Could not find AnimGraph"));
@@ -3246,6 +3387,10 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 		}
 	}
 	
+	TArray<AnimBP2FPImportLifecycle::FImportNodeChange> NodeChanges;
+	CollectAnimNodeChanges(PreExistingNodes, AnimGraph, NodeChanges);
+	BroadcastNodeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PostNodeChanges, LifecycleContext, NodeChanges);
+	BroadcastPropertyLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PostPropertyChanges, LifecycleContext, PropertyChanges);
 	return true;
 }
 
@@ -3283,7 +3428,11 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 		if (Result.bSuccess)
 		{
 			FString CompileError;
+			const AnimBP2FPImportLifecycle::FImportLifecycleContext LifecycleContext =
+				MakeAnimLifecycleContext(ExistingBlueprint, FindAnimGraph(ExistingBlueprint), true, false, true, true);
+			BroadcastFinalizeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PreFinalize, LifecycleContext);
 			CompileBlueprint(ExistingBlueprint, &CompileError);
+			BroadcastFinalizeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PostFinalize, LifecycleContext);
 			if (!CompileError.IsEmpty())
 			{
 				Result.Warnings.Add(TEXT("Compile: ") + CompileError);
@@ -3400,6 +3549,9 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 	if (Result.bSuccess)
 	{
 		FString CompileError;
+		const AnimBP2FPImportLifecycle::FImportLifecycleContext LifecycleContext =
+			MakeAnimLifecycleContext(ExistingBlueprint, FindAnimGraph(ExistingBlueprint), !Result.bUsedIncrementalPatch, Result.bUsedIncrementalPatch, true, true);
+		BroadcastFinalizeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PreFinalize, LifecycleContext);
 		if (!CompileBlueprint(ExistingBlueprint, &CompileError))
 		{
 			Result.Warnings.Add(TEXT("Compile: ") + CompileError);
@@ -3409,6 +3561,7 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 		{
 			Result.AppliedOps.Add(TEXT("Blueprint compiled successfully"));
 		}
+		BroadcastFinalizeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PostFinalize, LifecycleContext);
 	}
 	
 	UE_LOG(LogAnimBPImporter, Log, TEXT("UpdateBlueprint %s: %s"),
