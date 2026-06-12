@@ -177,4 +177,142 @@ bool FIntegration_RequiresEditorContext::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ============================================================================
+// Import-Lifecycle Hook Integration Tests
+//
+// These guard the producer-side contract that the BlueprintAutoLayout plugin
+// relies on: after an import that touches nodes, AnimBP2FP broadcasts a
+// PostNodeChanges event carrying (a) the changed UEdGraphNodes and (b) the
+// "AutoLayout" behavior token in RequestedBehaviors. BlueprintAutoLayout's
+// FAnimBP2FPAutoLayoutHook consumes exactly this to run LayoutSelection over
+// the changed nodes (and FBALAnimBP2FPHighlightHook to highlight them).
+// ============================================================================
+
+#include "AnimBP2FPModule.h"
+
+namespace AnimBP2FPLifecycleTest
+{
+	using namespace AnimBP2FPImportLifecycle;
+
+	/** Records every node-phase event it receives, with a configurable priority. */
+	class FRecordingHook : public IImportLifecycleHook
+	{
+	public:
+		explicit FRecordingHook(int32 InPriority = 0) : Priority(InPriority) {}
+
+		virtual int32 GetPriority(EImportLifecyclePhase Phase) const override
+		{
+			return Phase == EImportLifecyclePhase::PostNodeChanges ? Priority : 0;
+		}
+
+		virtual void OnNodePhase(const FImportNodePhaseEvent& Event) override
+		{
+			NodePhaseCount++;
+			LastPhase = Event.Phase;
+			LastBehaviors = Event.Context.RequestedBehaviors;
+			LastChangeCount = Event.Changes.Num();
+			OrderToken = NextGlobalOrder++;
+		}
+
+		int32 Priority = 0;
+		int32 NodePhaseCount = 0;
+		EImportLifecyclePhase LastPhase = EImportLifecyclePhase::PreNodeChanges;
+		TSet<FName> LastBehaviors;
+		int32 LastChangeCount = 0;
+		int32 OrderToken = -1;
+
+		static int32 NextGlobalOrder;
+	};
+
+	int32 FRecordingHook::NextGlobalOrder = 0;
+}
+
+ABP_TEST(Lifecycle_AnimPostNodeChanges_DeliveredWithAutoLayoutBehavior)
+bool FLifecycle_AnimPostNodeChanges_DeliveredWithAutoLayoutBehavior::RunTest(const FString& Parameters)
+{
+	using namespace AnimBP2FPImportLifecycle;
+	using namespace AnimBP2FPLifecycleTest;
+
+	if (!FAnimBP2FPModule::IsAvailable())
+	{
+		AddWarning(TEXT("AnimBP2FP module not loaded; skipping lifecycle test."));
+		return true;
+	}
+
+	FAnimBP2FPModule& Module = FAnimBP2FPModule::Get();
+
+	TSharedRef<FRecordingHook> Hook = MakeShared<FRecordingHook>();
+	FImportLifecycleHookHandle Handle = Module.RegisterImportLifecycleHook(Hook);
+	TestTrue(TEXT("hook handle valid"), Handle.IsValid());
+
+	// Build a PostNodeChanges event that mirrors what AnimBPImporter emits:
+	// AutoLayout behavior requested + one changed node.
+	UEdGraph* Graph = NewObject<UEdGraph>(GetTransientPackage());
+	UEdGraphNode* ChangedNode = NewObject<UEdGraphNode>(Graph);
+	Graph->Nodes.Add(ChangedNode);
+
+	FImportNodePhaseEvent Event;
+	Event.Phase = EImportLifecyclePhase::PostNodeChanges;
+	Event.Context.TargetGraph = Graph;
+	Event.Context.bIsIncremental = true;
+	Event.Context.RequestedBehaviors.Add(FName(TEXT("AutoLayout")));
+	FImportNodeChange Change;
+	Change.Node = ChangedNode;
+	Change.ChangeType = EImportNodeChangeType::Modified;
+	Event.Changes.Add(Change);
+
+	Module.BroadcastNodePhase(Event);
+
+	TestEqual(TEXT("hook received exactly one node phase"), Hook->NodePhaseCount, 1);
+	TestEqual(TEXT("phase is PostNodeChanges"),
+		(int32)Hook->LastPhase, (int32)EImportLifecyclePhase::PostNodeChanges);
+	TestTrue(TEXT("AutoLayout behavior propagated"),
+		Hook->LastBehaviors.Contains(FName(TEXT("AutoLayout"))));
+	TestEqual(TEXT("changed-node count propagated"), Hook->LastChangeCount, 1);
+
+	Module.UnregisterImportLifecycleHook(Handle);
+
+	// After unregister, further broadcasts must not reach the hook.
+	Module.BroadcastNodePhase(Event);
+	TestEqual(TEXT("no delivery after unregister"), Hook->NodePhaseCount, 1);
+
+	return true;
+}
+
+ABP_TEST(Lifecycle_AnimHookPriorityOrdering)
+bool FLifecycle_AnimHookPriorityOrdering::RunTest(const FString& Parameters)
+{
+	using namespace AnimBP2FPImportLifecycle;
+	using namespace AnimBP2FPLifecycleTest;
+
+	if (!FAnimBP2FPModule::IsAvailable())
+	{
+		AddWarning(TEXT("AnimBP2FP module not loaded; skipping priority test."));
+		return true;
+	}
+
+	FAnimBP2FPModule& Module = FAnimBP2FPModule::Get();
+
+	// AutoLayout uses priority 100 (runs early); Highlight uses -10 (runs late).
+	// Verify higher priority is invoked first.
+	FRecordingHook::NextGlobalOrder = 0;
+	TSharedRef<FRecordingHook> EarlyHook = MakeShared<FRecordingHook>(/*Priority*/ 100);
+	TSharedRef<FRecordingHook> LateHook  = MakeShared<FRecordingHook>(/*Priority*/ -10);
+
+	// Register late first to prove ordering is by priority, not registration order.
+	FImportLifecycleHookHandle LateHandle  = Module.RegisterImportLifecycleHook(LateHook);
+	FImportLifecycleHookHandle EarlyHandle = Module.RegisterImportLifecycleHook(EarlyHook);
+
+	FImportNodePhaseEvent Event;
+	Event.Phase = EImportLifecyclePhase::PostNodeChanges;
+	Module.BroadcastNodePhase(Event);
+
+	TestTrue(TEXT("high-priority hook ran before low-priority hook"),
+		EarlyHook->OrderToken < LateHook->OrderToken);
+
+	Module.UnregisterImportLifecycleHook(LateHandle);
+	Module.UnregisterImportLifecycleHook(EarlyHandle);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

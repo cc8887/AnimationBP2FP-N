@@ -11,6 +11,11 @@
             "Name": "AnimBP2FP",
             "Type": "Runtime",
             "LoadingPhase": "Default"
+        },
+        {
+            "Name": "AnimBP2FPEditor",
+            "Type": "Editor",
+            "LoadingPhase": "Default"
         }
     ],
     "Plugins": [
