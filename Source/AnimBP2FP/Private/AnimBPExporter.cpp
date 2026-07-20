@@ -7,7 +7,18 @@
 
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
+#include "Animation/AnimInstance.h"
 #include "Animation/AnimNodeBase.h"
+#include "Animation/AnimSequence.h"
+#include "Animation/AnimSequenceBase.h"
+#include "Animation/AnimMontage.h"
+#include "Animation/BlendSpace.h"
+#include "Animation/AnimTypes.h"
+#include "Animation/AnimNotifies/AnimNotify.h"
+#include "Animation/AnimNotifies/AnimNotifyState.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "Modules/ModuleManager.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -40,6 +51,7 @@
 #include "AnimStateTransitionNode.h"
 #include "AnimStateConduitNode.h"
 #include "AnimGraphNode_StateResult.h"
+#include "AnimationGraphSchema.h"
 
 // Logging
 DEFINE_LOG_CATEGORY_STATIC(LogAnimBP2FP, Log, All);
@@ -86,6 +98,142 @@ namespace
 	};
 
 	static const FHelperExportContext* GActiveHelperExportContext = nullptr;
+
+	static FString GetDependencyRole(const UObject* Object)
+	{
+		if (!Object) return FString();
+		if (Object->IsA<UAnimMontage>()) return TEXT("montage");
+		if (Object->IsA<UAnimSequence>()) return TEXT("anim-sequence");
+		if (Object->IsA<UBlendSpace>()) return TEXT("blend-space");
+		const FString ClassPath = Object->GetClass()->GetPathName();
+		if (ClassPath.Contains(TEXT("PoseSearchDatabase"))) return TEXT("pose-search-database");
+		if (ClassPath.Contains(TEXT("PoseSearchSchema"))) return TEXT("pose-search-schema");
+		if (ClassPath.Contains(TEXT("Chooser"))) return TEXT("chooser");
+		if (ClassPath.Contains(TEXT("ControlRig"))) return TEXT("control-rig");
+		if (ClassPath.Contains(TEXT("MirrorDataTable"))) return TEXT("mirror-data-table");
+		if (ClassPath.Contains(TEXT("BlendProfile"))) return TEXT("blend-profile");
+		return FString();
+	}
+
+	static bool IsDependencyCandidateClassPath(const FString& ClassPath)
+	{
+		return ClassPath.Contains(TEXT("AnimSequence"))
+			|| ClassPath.Contains(TEXT("AnimMontage"))
+			|| ClassPath.Contains(TEXT("BlendSpace"))
+			|| ClassPath.Contains(TEXT("PoseSearchDatabase"))
+			|| ClassPath.Contains(TEXT("PoseSearchSchema"))
+			|| ClassPath.Contains(TEXT("Chooser"))
+			|| ClassPath.Contains(TEXT("ControlRig"))
+			|| ClassPath.Contains(TEXT("MirrorDataTable"))
+			|| ClassPath.Contains(TEXT("BlendProfile"));
+	}
+
+	static FAnimationAssetMetadataSnapshot SnapshotAnimationAsset(const UAnimSequenceBase* Asset)
+	{
+		FAnimationAssetMetadataSnapshot Snapshot;
+		if (!Asset) return Snapshot;
+		Snapshot.bHasSnapshot = true;
+		Snapshot.bHasRootMotion = Asset->HasRootMotion();
+		for (const FAnimNotifyEvent& Event : Asset->Notifies)
+		{
+			FAnimNotifySnapshot& Notify = Snapshot.Notifies.AddDefaulted_GetRef();
+			Notify.Name = Event.NotifyName.ToString();
+			Notify.Time = Event.GetTriggerTime();
+			Notify.Duration = Event.GetDuration();
+			Notify.bIsState = Event.NotifyStateClass != nullptr;
+			const UObject* NotifyObject = Event.NotifyStateClass ? static_cast<const UObject*>(Event.NotifyStateClass.Get()) : static_cast<const UObject*>(Event.Notify.Get());
+			Notify.ClassPath = NotifyObject ? NotifyObject->GetClass()->GetPathName() : TEXT("name-only");
+		}
+		Snapshot.Notifies.Sort([](const FAnimNotifySnapshot& A, const FAnimNotifySnapshot& B)
+		{
+			if (A.Time != B.Time) return A.Time < B.Time;
+			if (A.Name != B.Name) return A.Name < B.Name;
+			return A.ClassPath < B.ClassPath;
+		});
+
+		if (const UAnimSequence* Sequence = Cast<UAnimSequence>(Asset))
+		{
+			Snapshot.bEnableRootMotion = Sequence->bEnableRootMotion;
+			Snapshot.bForceRootLock = Sequence->bForceRootLock;
+			if (const UEnum* RootLockEnum = StaticEnum<ERootMotionRootLock::Type>())
+			{
+				Snapshot.RootMotionRootLock = RootLockEnum->GetNameStringByValue(Sequence->RootMotionRootLock.GetValue());
+			}
+			for (const FAnimSyncMarker& Marker : Sequence->AuthoredSyncMarkers)
+			{
+				Snapshot.SyncMarkers.Add({Marker.MarkerName.ToString(), Marker.Time});
+			}
+			Snapshot.SyncMarkers.Sort([](const FAnimSyncMarkerSnapshot& A, const FAnimSyncMarkerSnapshot& B)
+			{
+				return A.Time == B.Time ? A.Name < B.Name : A.Time < B.Time;
+			});
+		}
+		else
+		{
+			Snapshot.UnsupportedFields.Add(TEXT("sequence-root-motion-flags"));
+			Snapshot.UnsupportedFields.Add(TEXT("sync-markers"));
+		}
+
+		if (const UAnimMontage* Montage = Cast<UAnimMontage>(Asset))
+		{
+			for (const FCompositeSection& Source : Montage->CompositeSections)
+			{
+				Snapshot.MontageSections.Add({Source.SectionName.ToString(), Source.GetTime(), Source.NextSectionName.ToString()});
+			}
+			for (const FSlotAnimationTrack& Slot : Montage->SlotAnimTracks)
+			{
+				Snapshot.SlotTrackNames.AddUnique(Slot.SlotName.ToString());
+			}
+			Snapshot.SlotTrackNames.Sort();
+		}
+		return Snapshot;
+	}
+
+	static void AddExternalDependency(UObject* Object, TSharedPtr<FAnimGraphAST> AST, TSet<FString>& SeenPaths)
+	{
+		if (!Object || !AST.IsValid()) return;
+		const FString Role = GetDependencyRole(Object);
+		const FString ObjectPath = Object->GetPathName();
+		if (Role.IsEmpty() || SeenPaths.Contains(ObjectPath)) return;
+		SeenPaths.Add(ObjectPath);
+		FAnimDependency& Dependency = AST->Dependencies.AddDefaulted_GetRef();
+		Dependency.ObjectPath = ObjectPath;
+		Dependency.ClassPath = Object->GetClass()->GetPathName();
+		Dependency.Role = Role;
+		Dependency.Mode = TEXT("external");
+		if (const UAnimSequenceBase* Animation = Cast<UAnimSequenceBase>(Object))
+		{
+			Dependency.AssetMetadata = SnapshotAnimationAsset(Animation);
+		}
+		if (const UAnimMontage* Montage = Cast<UAnimMontage>(Object))
+		{
+			AddExternalDependency(Montage->BlendProfileIn, AST, SeenPaths);
+			AddExternalDependency(Montage->BlendProfileOut, AST, SeenPaths);
+		}
+	}
+
+	static void CollectExternalDependencies(UAnimBlueprint* Blueprint, TSharedPtr<FAnimGraphAST> AST)
+	{
+		if (!Blueprint || !AST.IsValid() || Blueprint->GetOutermost() == GetTransientPackage()) return;
+		FAssetRegistryModule& Module = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		TArray<FName> PackageNames;
+		Module.Get().GetDependencies(Blueprint->GetOutermost()->GetFName(), PackageNames,
+			UE::AssetRegistry::EDependencyCategory::Package);
+		PackageNames.Sort(FNameLexicalLess());
+		TSet<FString> SeenPaths;
+		for (const FName PackageName : PackageNames)
+		{
+			TArray<FAssetData> Assets;
+			Module.Get().GetAssetsByPackageName(PackageName, Assets, true);
+			for (const FAssetData& AssetData : Assets)
+			{
+				if (IsDependencyCandidateClassPath(AssetData.AssetClassPath.ToString()))
+				{
+					AddExternalDependency(AssetData.GetAsset(), AST, SeenPaths);
+				}
+			}
+		}
+	}
 
 	static FString QuoteDSLString(const FString& Value)
 	{
@@ -277,7 +425,11 @@ namespace
 		{
 			return EPinType::Transform;
 		}
-		return EPinType::Float;
+		if (Category == UEdGraphSchema_K2::PC_Struct.ToString())
+		{
+			return EPinType::Struct;
+		}
+		return EPinType::Unknown;
 	}
 
 	static bool TryGetVariableNameFromLinkedPin(UEdGraphPin* Pin, FString& OutVariableName)
@@ -535,7 +687,8 @@ static void CollectNonPoseParams(UAnimGraphNode_Base* Node, TMap<FString, FStrin
 			continue;
 		}
 
-		// Non-pose struct pins connected to another node: first try structured binding export, then fall back to (var ...)
+		// Non-pose struct pins connected to another node use a structured binding.
+		// Unconnected struct pins continue through the default-value path below.
 		if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
 		{
 			if (Pin->LinkedTo.Num() > 0)
@@ -546,7 +699,10 @@ static void CollectNonPoseParams(UAnimGraphNode_Base* Node, TMap<FString, FStrin
 					OutProperties.Add(ParamName, Value);
 				}
 			}
-			continue;
+			if (Pin->LinkedTo.Num() > 0)
+			{
+				continue;
+			}
 		}
 		
 		FString Value;
@@ -844,76 +1000,6 @@ static TArray<FPoseInput> CollectPoseInputs(UAnimGraphNode_Base* Node)
 	return Result;
 }
 
-// ========== NodeId Utilities ==========
-
-// Collect all NodeIds from an AST subtree into an array
-static void CollectNodeIds(const TSharedPtr<FAnimNodeAST>& Node, TArray<FString>& OutIds)
-{
-	if (!Node.IsValid()) return;
-	if (!Node->NodeId.IsEmpty())
-		OutIds.Add(Node->NodeId);
-	for (const FNamedChild& Child : Node->Children)
-		CollectNodeIds(Child.Node, OutIds);
-}
-
-// FGuid segment cutpoints (cumulative lengths in the full guid string)
-// Full format: "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" (36 chars)
-// Segments at:  8       13   18   23   36
-static const int32 GGuidPrefixLengths[] = { 8, 13, 18, 23, 36 };
-
-// Compute shortest unique prefix for each full GUID among all GUIDs.
-// Returns a map from full GUID string -> short prefix string.
-static TMap<FString, FString> ComputeShortNodeIds(const TArray<FString>& AllFullIds)
-{
-	TMap<FString, FString> Result;
-	if (AllFullIds.Num() == 0) return Result;
-
-	for (const FString& FullId : AllFullIds)
-	{
-		// Try each prefix length until we find one that's unique
-		for (int32 PrefixLen : GGuidPrefixLengths)
-		{
-			if (PrefixLen > FullId.Len()) break;
-			FString Prefix = FullId.Left(PrefixLen);
-
-			// Count how many IDs share this prefix
-			int32 Collisions = 0;
-			for (const FString& OtherId : AllFullIds)
-			{
-				if (OtherId.StartsWith(Prefix))
-					Collisions++;
-			}
-
-			if (Collisions == 1)
-			{
-				Result.Add(FullId, Prefix);
-				break;
-			}
-		}
-
-		// Ensure every ID has an entry (should always be resolved by 36 chars)
-		if (!Result.Contains(FullId))
-		{
-			Result.Add(FullId, FullId);
-		}
-	}
-
-	return Result;
-}
-
-// Apply computed short IDs back to the AST (in-place)
-static void ApplyShortNodeIds(const TSharedPtr<FAnimNodeAST>& Node, const TMap<FString, FString>& ShortIds)
-{
-	if (!Node.IsValid()) return;
-	if (!Node->NodeId.IsEmpty())
-	{
-		const FString* Short = ShortIds.Find(Node->NodeId);
-		if (Short) Node->NodeId = *Short;
-	}
-	for (const FNamedChild& Child : Node->Children)
-		ApplyShortNodeIds(Child.Node, ShortIds);
-}
-
 // ========== Main Export Functions ==========
 
 FString FAnimBPExporter::Export(UAnimBlueprint* AnimBlueprint)
@@ -948,34 +1034,47 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBluep
 	{
 		ResultAST->SkeletonPath = AnimBlueprint->TargetSkeleton->GetPathName();
 	}
+	if (AnimBlueprint->GeneratedClass)
+	{
+		if (UObject* ClassDefaults = AnimBlueprint->GeneratedClass->GetDefaultObject(false))
+		{
+			if (const FProperty* RootMotionMode = FindFProperty<FProperty>(ClassDefaults->GetClass(), TEXT("RootMotionMode")))
+			{
+				const void* ValuePtr = RootMotionMode->ContainerPtrToValuePtr<void>(ClassDefaults);
+				RootMotionMode->ExportText_Direct(ResultAST->Metadata.RootMotionMode, ValuePtr, nullptr, ClassDefaults, PPF_None);
+			}
+		}
+	}
 
 	// Extract variables from AnimBlueprint
 	for (const FBPVariableDescription& Var : AnimBlueprint->NewVariables)
 	{
+		if (Var.VarType.ContainerType == EPinContainerType::Map)
+		{
+			UE_LOG(LogAnimBP2FP, Error, TEXT("[UNSUPPORTED:VariableType] Variable '%s' is a map; map value terminal types are not represented by this DSL version"),
+				*Var.VarName.ToString());
+			return nullptr;
+		}
 		FVariableDef VarDef;
 		VarDef.Name = Var.VarName.ToString();
-		
-		// Map UE pin category to our type
-		FString CategoryStr = Var.VarType.PinCategory.ToString();
-		if (CategoryStr == TEXT("float") || CategoryStr == TEXT("real") || CategoryStr == TEXT("double"))
-			VarDef.Type = EPinType::Float;
-		else if (CategoryStr == TEXT("int"))
-			VarDef.Type = EPinType::Int;
-		else if (CategoryStr == TEXT("bool"))
-			VarDef.Type = EPinType::Bool;
-		else if (CategoryStr == TEXT("name"))
-			VarDef.Type = EPinType::Name;
-		else if (CategoryStr == TEXT("byte") && Cast<UEnum>(Var.VarType.PinSubCategoryObject.Get()))
-			VarDef.Type = EPinType::Enum;
-		else
-			VarDef.Type = EPinType::Float; // default
-		
-		if (VarDef.Type == EPinType::Enum)
+		VarDef.Type = PinTypeToAnimLangType(Var.VarType);
+		VarDef.PinCategory = Var.VarType.PinCategory.ToString();
+		VarDef.PinSubCategory = Var.VarType.PinSubCategory.ToString();
+		switch (Var.VarType.ContainerType)
 		{
-			if (const UEnum* EnumObj = Cast<UEnum>(Var.VarType.PinSubCategoryObject.Get()))
-			{
-				VarDef.TypeObjectPath = EnumObj->GetPathName();
-			}
+		case EPinContainerType::Array: VarDef.ContainerType = TEXT("array"); break;
+		case EPinContainerType::Set: VarDef.ContainerType = TEXT("set"); break;
+		case EPinContainerType::Map: VarDef.ContainerType = TEXT("map"); break;
+		default: VarDef.ContainerType.Reset(); break;
+		}
+		VarDef.bIsReference = Var.VarType.bIsReference;
+		VarDef.bIsConst = Var.VarType.bIsConst;
+		VarDef.bIsWeakPointer = Var.VarType.bIsWeakPointer;
+		VarDef.bIsUObjectWrapper = Var.VarType.bIsUObjectWrapper;
+
+		if (const UObject* TypeObject = Var.VarType.PinSubCategoryObject.Get())
+		{
+			VarDef.TypeObjectPath = TypeObject->GetPathName();
 		}
 		
 		VarDef.DefaultValue = Var.DefaultValue;
@@ -1003,6 +1102,63 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBluep
 	FHelperExportContext HelperExportContext;
 	CollectHelperGraphs(AnimBlueprint, ResultAST, HelperExportContext);
 
+	auto ExportLogicGraph = [AnimBlueprint, &ResultAST](UEdGraph* Graph, const TCHAR* Role, const TCHAR* Kind) -> bool
+	{
+		if (!Graph || Graph->Nodes.IsEmpty())
+		{
+			return true;
+		}
+
+		FBlueprintLispConverter::FExportOptions LispOptions;
+		LispOptions.bPrettyPrint = false;
+		LispOptions.bStableIds = true;
+		const FBlueprintLispResult LispResult = FBlueprintLispConverter::ExportGraph(Graph, LispOptions);
+		const FString LispCode = LispResult.LispCode.TrimStartAndEnd();
+		if (!LispResult.bSuccess || LispCode.IsEmpty() || LispCode.StartsWith(TEXT("; skip:"), ESearchCase::IgnoreCase))
+		{
+			UE_LOG(LogAnimBP2FP, Error, TEXT("[UNSUPPORTED:LogicGraph] Graph '%s' contains %d nodes but BlueprintLisp did not export it: %s"),
+				*Graph->GetName(), Graph->Nodes.Num(), LispResult.Error.IsEmpty() ? *LispCode : *LispResult.Error);
+			return false;
+		}
+
+		FLogicGraphDef& LogicGraph = ResultAST->LogicGraphs.AddDefaulted_GetRef();
+		LogicGraph.Role = Role;
+		LogicGraph.Kind = Kind;
+		LogicGraph.GraphName = Graph->GetName();
+		LogicGraph.DSL = LispCode;
+		if (const UEdGraphSchema* Schema = Graph->GetSchema())
+		{
+			LogicGraph.SchemaClassPath = Schema->GetClass()->GetPathName();
+		}
+		return true;
+	};
+
+	ResultAST->bHasLogicGraphsBlock = true;
+	for (UEdGraph* Graph : AnimBlueprint->UbergraphPages)
+	{
+		if (!ExportLogicGraph(Graph, TEXT("event"), TEXT("ubergraph")))
+		{
+			return nullptr;
+		}
+	}
+	for (UEdGraph* Graph : AnimBlueprint->FunctionGraphs)
+	{
+		if (!Graph)
+		{
+			continue;
+		}
+		const FString GraphName = Graph->GetName();
+		if ((Graph->GetSchema() && Graph->GetSchema()->IsA<UAnimationGraphSchema>())
+			|| GraphName.Contains(TEXT("AnimGraph")) || GraphName.StartsWith(TEXT("__ABP2FP_HG_")))
+		{
+			continue;
+		}
+		if (!ExportLogicGraph(Graph, TEXT("function"), TEXT("function")))
+		{
+			return nullptr;
+		}
+	}
+
 	const FHelperExportContext* PreviousHelperContext = GActiveHelperExportContext;
 	GActiveHelperExportContext = &HelperExportContext;
 
@@ -1010,7 +1166,11 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBluep
 	UEdGraph* AnimGraph = nullptr;
 	for (UEdGraph* Graph : AnimBlueprint->FunctionGraphs)
 	{
-		if (Graph->GetFName().ToString().Contains(TEXT("AnimGraph")))
+		if (!Graph || !(Graph->GetSchema() && Graph->GetSchema()->IsA<UAnimationGraphSchema>()))
+		{
+			continue;
+		}
+		if (Graph->Nodes.ContainsByPredicate([](const UEdGraphNode* Node) { return IsValid(Node) && Node->IsA<UAnimGraphNode_Root>(); }))
 		{
 			AnimGraph = Graph;
 			break;
@@ -1022,7 +1182,7 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBluep
 	{
 		for (UEdGraph* Graph : AnimBlueprint->UbergraphPages)
 		{
-			if (Graph->GetFName().ToString().Contains(TEXT("AnimGraph")))
+			if (Graph && Graph->Nodes.ContainsByPredicate([](const UEdGraphNode* Node) { return IsValid(Node) && Node->IsA<UAnimGraphNode_Root>(); }))
 			{
 				AnimGraph = Graph;
 				break;
@@ -1039,23 +1199,8 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBluep
 		UE_LOG(LogAnimBP2FP, Warning, TEXT("No AnimGraph found in blueprint: %s"), *AnimBlueprint->GetName());
 	}
 
-	// Compute shortest unique NodeId prefixes across the entire AST
-	{
-		TArray<FString> AllIds;
-		CollectNodeIds(ResultAST->RootNode, AllIds);
-		for (const FCachedPoseDef& Def : ResultAST->Defines)
-			CollectNodeIds(Def.Body, AllIds);
-
-		if (AllIds.Num() > 0)
-		{
-			TMap<FString, FString> ShortIds = ComputeShortNodeIds(AllIds);
-			ApplyShortNodeIds(ResultAST->RootNode, ShortIds);
-			for (FCachedPoseDef& Def : ResultAST->Defines)
-				ApplyShortNodeIds(Def.Body, ShortIds);
-		}
-	}
-
 	GActiveHelperExportContext = PreviousHelperContext;
+	CollectExternalDependencies(AnimBlueprint, ResultAST);
 	return ResultAST;
 }
 
@@ -1287,7 +1432,7 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 	TSharedPtr<FAnimNodeAST> Result = MakeShared<FAnimNodeAST>();
 	FString ClassName = Node->GetClass()->GetName();
 
-	// Store full NodeGuid as initial NodeId; it will be shortened after full AST is built
+	// Preserve the complete GUID so import can restore the real editor-node identity.
 	Result->NodeId = Node->NodeGuid.ToString();
 
 	// ---- Root node (should be handled by TraverseAnimGraph, but just in case) ----
@@ -1448,10 +1593,9 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 		return Result;
 	}
 
-	// ---- UseCachedPose → variable reference ----
+	// ---- UseCachedPose -> explicit cached-pose reference ----
 	if (UAnimGraphNode_UseCachedPose* UseNode = Cast<UAnimGraphNode_UseCachedPose>(Node))
 	{
-		// Output as a bare variable reference — matches the (define name ...) binding
 		FString CacheName;
 		if (UseNode->SaveCachedPoseNode.IsValid())
 		{
@@ -1462,11 +1606,8 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 			CacheName = TEXT("Unknown");
 		}
 		
-		// Convert to identifier: "Post Layering" → "Post-Layering"
-		CacheName.ReplaceInline(TEXT(" "), TEXT("-"));
-		
-		Result->NodeType = CacheName;  // bare variable name, no parentheses needed
-		// No properties, no children — this is a leaf reference
+		Result->NodeType = TEXT("cached-pose-ref");
+		Result->Properties.Add(TEXT("name"), FString::Printf(TEXT("\"%s\""), *CacheName));
 		return Result;
 	}
 
@@ -1645,11 +1786,97 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 	}
 
 	// ---- Generic fallback: auto-extract all pins ----
+	for (const UClass* TestClass = Node->GetClass(); TestClass; TestClass = TestClass->GetSuperClass())
+	{
+		if (TestClass->GetName() != TEXT("AnimGraphNode_BlendStack_Base"))
+		{
+			continue;
+		}
+
+		FString TypeName = ClassName;
+		TypeName.RemoveFromStart(TEXT("AnimGraphNode_"));
+		Result->NodeType = CamelToKebab(TypeName);
+		Result->NodeClassPath = Node->GetClass()->GetPathName();
+		Result->Coverage = EAnimNodeCoverage::Lossy;
+		CollectNonPoseParams(Node, Result->Properties);
+		CollectInternalProperties(Node, Result->Properties);
+
+		bool bExportedBoundGraph = false;
+		TArray<FString> UnsupportedGraphClasses;
+		TArray<FString> UnsupportedGraphSchemas;
+		TArray<FString> UnsupportedGraphNodeClasses;
+		for (UEdGraph* BoundGraph : Node->GetSubGraphs())
+		{
+			if (!BoundGraph)
+			{
+				continue;
+			}
+			FBlueprintLispConverter::FExportOptions LispOptions;
+			LispOptions.bPrettyPrint = false;
+			LispOptions.bStableIds = true;
+			const FBlueprintLispResult LispResult = FBlueprintLispConverter::ExportGraph(BoundGraph, LispOptions);
+			const FString LispCode = LispResult.LispCode.TrimStartAndEnd();
+			if (LispResult.bSuccess && !LispCode.IsEmpty()
+				&& !LispCode.StartsWith(TEXT("; skip:"), ESearchCase::IgnoreCase))
+			{
+				Result->Properties.Add(TEXT("bound-graph"), QuoteDSLString(LispCode));
+				bExportedBoundGraph = true;
+				break;
+			}
+			UE_LOG(LogAnimBP2FP, Warning, TEXT("[UNSUPPORTED:BlendStackBoundGraph] Node '%s' bound graph '%s' did not export: %s"),
+				*Node->GetName(), *BoundGraph->GetName(), LispResult.Error.IsEmpty() ? *LispCode : *LispResult.Error);
+			UnsupportedGraphClasses.AddUnique(BoundGraph->GetClass()->GetPathName());
+			if (const UEdGraphSchema* Schema = BoundGraph->GetSchema())
+			{
+				UnsupportedGraphSchemas.AddUnique(Schema->GetClass()->GetPathName());
+			}
+			for (const UEdGraphNode* BoundNode : BoundGraph->Nodes)
+			{
+				if (BoundNode)
+				{
+					UnsupportedGraphNodeClasses.AddUnique(BoundNode->GetClass()->GetPathName());
+				}
+			}
+		}
+		if (!bExportedBoundGraph)
+		{
+			Result->Coverage = EAnimNodeCoverage::Unsupported;
+			UnsupportedGraphClasses.Sort();
+			UnsupportedGraphSchemas.Sort();
+			UnsupportedGraphNodeClasses.Sort();
+			Result->Properties.Add(TEXT("unsupported-bound-graph-class"), QuoteDSLString(FString::Join(UnsupportedGraphClasses, TEXT(","))));
+			Result->Properties.Add(TEXT("unsupported-bound-graph-schema"), QuoteDSLString(FString::Join(UnsupportedGraphSchemas, TEXT(","))));
+			Result->Properties.Add(TEXT("unsupported-bound-graph-node-classes"), QuoteDSLString(FString::Join(UnsupportedGraphNodeClasses, TEXT(","))));
+		}
+
+		if (FProperty* FunctionReference = Node->GetClass()->FindPropertyByName(TEXT("OnMotionMatchingStateUpdatedFunction")))
+		{
+			void* ValuePtr = FunctionReference->ContainerPtrToValuePtr<void>(Node);
+			FString ExportedReference;
+			FunctionReference->ExportText_Direct(ExportedReference, ValuePtr, nullptr, Node, PPF_None);
+			if (!ExportedReference.IsEmpty())
+			{
+				Result->Properties.Add(TEXT("on-motion-matching-state-updated-function-ref"), QuoteDSLString(ExportedReference));
+			}
+		}
+
+		for (const FPoseInput& Input : CollectPoseInputs(Node))
+		{
+			if (TSharedPtr<FAnimNodeAST> ChildAST = ConvertAnimNode(Input.Node))
+			{
+				Result->AddChild(Input.PinName, ChildAST);
+			}
+		}
+		return Result;
+	}
+
 	{
 		// Convert "AnimGraphNode_XYZ" to "xyz" in kebab-case
 		FString TypeName = ClassName;
 		TypeName.RemoveFromStart(TEXT("AnimGraphNode_"));
 		Result->NodeType = CamelToKebab(TypeName);
+		Result->NodeClassPath = Node->GetClass()->GetPathName();
+		Result->Coverage = EAnimNodeCoverage::Reflected;
 		
 		// Collect ALL non-pose parameters from pins
 		CollectNonPoseParams(Node, Result->Properties);
@@ -1881,6 +2108,7 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 					ReverseTrans.Priority = Trans.Priority;
 					ReverseTrans.bInterruptible = true;
 					ReverseTrans.Condition = Trans.Condition;
+					ReverseTrans.RuleGraph = Trans.RuleGraph;
 					Result->Transitions.Add(ReverseTrans);
 				}
 			}

@@ -207,7 +207,16 @@ void FAnimLangDiffer::DiffVariables(
 			const FVariableDef& OldVar = OldVars[*OldIdx];
 			const FVariableDef& NewVar = NewVars[Pair.Value];
 			
-			if (OldVar.Type != NewVar.Type || OldVar.DefaultValue != NewVar.DefaultValue)
+			if (OldVar.Type != NewVar.Type
+				|| OldVar.DefaultValue != NewVar.DefaultValue
+				|| OldVar.PinCategory != NewVar.PinCategory
+				|| OldVar.PinSubCategory != NewVar.PinSubCategory
+				|| OldVar.TypeObjectPath != NewVar.TypeObjectPath
+				|| OldVar.ContainerType != NewVar.ContainerType
+				|| OldVar.bIsReference != NewVar.bIsReference
+				|| OldVar.bIsConst != NewVar.bIsConst
+				|| OldVar.bIsWeakPointer != NewVar.bIsWeakPointer
+				|| OldVar.bIsUObjectWrapper != NewVar.bIsUObjectWrapper)
 			{
 				FAnimLangDiffEntry E;
 				E.Op = EAnimLangDiffOp::VariableChanged;

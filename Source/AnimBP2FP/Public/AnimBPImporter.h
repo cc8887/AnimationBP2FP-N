@@ -129,6 +129,9 @@ private:
 	/** Build helper function graphs via BlueprintLisp import */
 	static bool BuildHelperGraphs(UAnimBlueprint* Blueprint, const TArray<FHelperGraphDef>& Helpers);
 
+	/** Restore ordinary EventGraph/function graphs via strict BlueprintLisp import. */
+	static bool BuildLogicGraphs(UAnimBlueprint* Blueprint, const TArray<FLogicGraphDef>& LogicGraphs, bool bReplaceExistingSet);
+
 	/** Build a single animation node from AST, placing it in the given graph */
 	static UAnimGraphNode_Base* BuildAnimNode(const TSharedPtr<FAnimNodeAST>& NodeAST, UEdGraph* Graph,
 		const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes = nullptr,

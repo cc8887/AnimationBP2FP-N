@@ -5,9 +5,11 @@
 #include "AnimBPExporter.h"
 #include "FBP2FPMappingRegistry.h"
 #include "Animation/AnimBlueprint.h"
+#include "AssetRegistry/ARFilter.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/Parse.h"
 #include "HAL/FileManager.h"
 
 UAnimBP2FPExportCommandlet::UAnimBP2FPExportCommandlet()
@@ -36,8 +38,31 @@ int32 UAnimBP2FPExportCommandlet::Main(const FString& Params)
 	// Ensure asset registry is fully loaded
 	AssetRegistry.SearchAllAssets(true);
 	
+	FString AssetRoot = TEXT("/Game");
+	FString ExactAssetPath;
+	FParse::Value(*Params, TEXT("AssetRoot="), AssetRoot);
+	FParse::Value(*Params, TEXT("AssetPath="), ExactAssetPath);
+	const bool bAllowUnsupported = FParse::Param(*Params, TEXT("AllowUnsupported"));
+	if (!AssetRoot.StartsWith(TEXT("/Game")) || AssetRoot.Contains(TEXT("..")))
+	{
+		UE_LOG(LogTemp, Error, TEXT("Invalid -AssetRoot='%s'; AnimBP2FP commandlet only exports /Game content"), *AssetRoot);
+		return 1;
+	}
+
 	TArray<FAssetData> AnimBPAssets;
-	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetClassPathName(), AnimBPAssets);
+	FARFilter Filter;
+	Filter.ClassPaths.Add(UAnimBlueprint::StaticClass()->GetClassPathName());
+	Filter.PackagePaths.Add(FName(*AssetRoot));
+	Filter.bRecursivePaths = true;
+	AssetRegistry.GetAssets(Filter, AnimBPAssets);
+	if (!ExactAssetPath.IsEmpty())
+	{
+		AnimBPAssets.RemoveAll([&ExactAssetPath](const FAssetData& AssetData)
+		{
+			return AssetData.PackageName.ToString() != ExactAssetPath
+				&& AssetData.GetObjectPathString() != ExactAssetPath;
+		});
+	}
 	
 	UE_LOG(LogTemp, Log, TEXT("Found %d Animation Blueprints"), AnimBPAssets.Num());
 	
@@ -74,6 +99,15 @@ int32 UAnimBP2FPExportCommandlet::Main(const FString& Params)
 		Options.IndentSize = 2;
 		
 		FString DSLOutput = FAnimBPExporter::ExportWithOptions(AnimBP, Options);
+		const bool bExportError = DSLOutput.TrimStart().StartsWith(TEXT("; Error:"));
+		const bool bUnsupported = DSLOutput.Contains(TEXT(":coverage unsupported"));
+		if (bExportError || (bUnsupported && !bAllowUnsupported))
+		{
+			UE_LOG(LogTemp, Error, TEXT("  FAILED semantic export: %s%s"), *AssetName,
+				bUnsupported ? TEXT(" (contains unsupported animation-node semantics; use -AllowUnsupported only for diagnostics)") : TEXT(""));
+			FailCount++;
+			continue;
+		}
 		
 		// File header
 		FString FileContent = FString::Printf(

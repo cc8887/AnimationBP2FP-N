@@ -32,6 +32,7 @@
 #include "AnimGraphNode_StateMachineBase.h"
 #include "AnimGraphNode_StateResult.h"
 #include "AnimationStateMachineGraph.h"
+#include "AnimationGraphSchema.h"
 #include "AnimStateEntryNode.h"
 #include "AnimStateNode.h"
 #include "AnimStateTransitionNode.h"
@@ -68,6 +69,75 @@ static FString StripQuotes(const FString& Input)
 		Result = Result.Mid(1, Result.Len() - 2);
 	}
 	return Result;
+}
+
+static bool ValidateExternalDependencies(const TArray<FAnimDependency>& Dependencies, FString& OutError)
+{
+	for (const FAnimDependency& Dependency : Dependencies)
+	{
+		if (!Dependency.Mode.Equals(TEXT("external"), ESearchCase::IgnoreCase))
+		{
+			OutError = FString::Printf(TEXT("Dependency '%s' has unsupported mode '%s'; only mode=external is valid"),
+				*Dependency.ObjectPath, *Dependency.Mode);
+			return false;
+		}
+		if (Dependency.ObjectPath.IsEmpty() || Dependency.ClassPath.IsEmpty() || Dependency.Role.IsEmpty())
+		{
+			OutError = TEXT("Dependency manifest entry requires object-path, class-path, and role");
+			return false;
+		}
+
+		UClass* ExpectedClass = LoadObject<UClass>(nullptr, *Dependency.ClassPath);
+		if (!ExpectedClass)
+		{
+			OutError = FString::Printf(TEXT("Dependency '%s' declares unloadable class '%s'"),
+				*Dependency.ObjectPath, *Dependency.ClassPath);
+			return false;
+		}
+
+		UObject* Object = StaticLoadObject(UObject::StaticClass(), nullptr, *Dependency.ObjectPath);
+		if (!Object)
+		{
+			OutError = FString::Printf(TEXT("Missing dependency '%s' (expected class '%s')"),
+				*Dependency.ObjectPath, *Dependency.ClassPath);
+			return false;
+		}
+		if (!Object->IsA(ExpectedClass))
+		{
+			OutError = FString::Printf(TEXT("Dependency '%s' class mismatch: expected '%s', loaded '%s'"),
+				*Dependency.ObjectPath, *Dependency.ClassPath, *Object->GetClass()->GetPathName());
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool ApplyAnimBlueprintMetadata(UAnimBlueprint* Blueprint, const FAnimBlueprintMetadata& Metadata, FString& OutError)
+{
+	if (Metadata.RootMotionMode.IsEmpty()) return true;
+	if (!Blueprint || !Blueprint->GeneratedClass)
+	{
+		OutError = TEXT("Cannot restore RootMotionMode: AnimBlueprint generated class is unavailable");
+		return false;
+	}
+	UObject* ClassDefaults = Blueprint->GeneratedClass->GetDefaultObject(false);
+	FProperty* RootMotionMode = ClassDefaults
+		? FindFProperty<FProperty>(ClassDefaults->GetClass(), TEXT("RootMotionMode"))
+		: nullptr;
+	if (!RootMotionMode)
+	{
+		OutError = TEXT("Cannot restore RootMotionMode: property is unavailable on the AnimInstance class defaults");
+		return false;
+	}
+	void* ValuePtr = RootMotionMode->ContainerPtrToValuePtr<void>(ClassDefaults);
+	if (!RootMotionMode->ImportText_Direct(*Metadata.RootMotionMode, ValuePtr, ClassDefaults, PPF_None))
+	{
+		OutError = FString::Printf(TEXT("Cannot restore RootMotionMode value '%s'"), *Metadata.RootMotionMode);
+		return false;
+	}
+	Blueprint->Modify();
+	Blueprint->MarkPackageDirty();
+	return true;
 }
 
 namespace
@@ -283,6 +353,29 @@ namespace
 		return SignaturesA == SignaturesB;
 	}
 
+	static bool AreEquivalentLogicGraphSets(const TArray<FLogicGraphDef>& A, const TArray<FLogicGraphDef>& B)
+	{
+		if (A.Num() != B.Num())
+		{
+			return false;
+		}
+		TArray<FString> SignaturesA;
+		TArray<FString> SignaturesB;
+		for (const FLogicGraphDef& Graph : A)
+		{
+			SignaturesA.Add(Graph.Role + TEXT("|") + Graph.Kind + TEXT("|") + Graph.GraphName + TEXT("|")
+				+ Graph.SchemaClassPath + TEXT("|") + CanonicalizeBlueprintLispForComparison(Graph.DSL));
+		}
+		for (const FLogicGraphDef& Graph : B)
+		{
+			SignaturesB.Add(Graph.Role + TEXT("|") + Graph.Kind + TEXT("|") + Graph.GraphName + TEXT("|")
+				+ Graph.SchemaClassPath + TEXT("|") + CanonicalizeBlueprintLispForComparison(Graph.DSL));
+		}
+		SignaturesA.Sort();
+		SignaturesB.Sort();
+		return SignaturesA == SignaturesB;
+	}
+
 	static void RemoveStaleManagedHelperGraphs(UAnimBlueprint* Blueprint, const TArray<FHelperGraphDef>& DesiredHelpers)
 	{
 		if (!Blueprint)
@@ -396,6 +489,76 @@ namespace
 		default:
 			return false;
 		}
+	}
+
+	static bool TryBuildVariablePinType(const FVariableDef& Var, FEdGraphPinType& OutPinType, FString& OutError)
+	{
+		if (Var.PinCategory.IsEmpty())
+		{
+			if (Var.Type == EPinType::Enum)
+			{
+				UEnum* EnumObject = Var.TypeObjectPath.IsEmpty() ? nullptr : LoadObject<UEnum>(nullptr, *Var.TypeObjectPath);
+				if (!EnumObject)
+				{
+					OutError = FString::Printf(TEXT("enum type object '%s' could not be loaded"), *Var.TypeObjectPath);
+					return false;
+				}
+				OutPinType.PinCategory = UEdGraphSchema_K2::PC_Byte;
+				OutPinType.PinSubCategoryObject = EnumObject;
+				return true;
+			}
+			if (!TryBuildEdGraphPinType(Var.Type, OutPinType))
+			{
+				OutError = TEXT("legacy DSL type is unsupported");
+				return false;
+			}
+			return true;
+		}
+
+		OutPinType.PinCategory = FName(*Var.PinCategory);
+		OutPinType.PinSubCategory = FName(*Var.PinSubCategory);
+		const bool bRequiresTypeObject = Var.PinCategory == UEdGraphSchema_K2::PC_Struct.ToString()
+			|| Var.PinCategory == UEdGraphSchema_K2::PC_Object.ToString()
+			|| Var.PinCategory == UEdGraphSchema_K2::PC_Class.ToString()
+			|| Var.PinCategory == UEdGraphSchema_K2::PC_SoftObject.ToString()
+			|| Var.PinCategory == UEdGraphSchema_K2::PC_SoftClass.ToString()
+			|| Var.PinCategory == UEdGraphSchema_K2::PC_Interface.ToString();
+		if (bRequiresTypeObject && Var.TypeObjectPath.IsEmpty())
+		{
+			OutError = FString::Printf(TEXT("pin category '%s' requires :type-object"), *Var.PinCategory);
+			return false;
+		}
+		if (!Var.TypeObjectPath.IsEmpty())
+		{
+			UObject* TypeObject = LoadObject<UObject>(nullptr, *Var.TypeObjectPath);
+			if (!TypeObject)
+			{
+				OutError = FString::Printf(TEXT("pin type object '%s' could not be loaded"), *Var.TypeObjectPath);
+				return false;
+			}
+			OutPinType.PinSubCategoryObject = TypeObject;
+		}
+
+		const FString Container = Var.ContainerType.ToLower();
+		if (Container.IsEmpty() || Container == TEXT("none")) OutPinType.ContainerType = EPinContainerType::None;
+		else if (Container == TEXT("array")) OutPinType.ContainerType = EPinContainerType::Array;
+		else if (Container == TEXT("set")) OutPinType.ContainerType = EPinContainerType::Set;
+		else if (Container == TEXT("map"))
+		{
+			OutError = TEXT("map value terminal type is not represented by this DSL version");
+			return false;
+		}
+		else
+		{
+			OutError = FString::Printf(TEXT("unknown container '%s'"), *Var.ContainerType);
+			return false;
+		}
+
+		OutPinType.bIsReference = Var.bIsReference;
+		OutPinType.bIsConst = Var.bIsConst;
+		OutPinType.bIsWeakPointer = Var.bIsWeakPointer;
+		OutPinType.bIsUObjectWrapper = Var.bIsUObjectWrapper;
+		return true;
 	}
 
 	static FString IMP_NormalizeBindingToken(const FString& In)
@@ -1063,7 +1226,8 @@ UEdGraph* FAnimBPImporter::FindAnimGraph(UAnimBlueprint* Blueprint)
 	
 	for (UEdGraph* Graph : Blueprint->FunctionGraphs)
 	{
-		if (Graph && Graph->GetFName() == TEXT("AnimGraph"))
+		if (Graph && Graph->GetSchema() && Graph->GetSchema()->IsA<UAnimationGraphSchema>()
+			&& Graph->Nodes.ContainsByPredicate([](const UEdGraphNode* Node) { return IsValid(Node) && Node->IsA<UAnimGraphNode_Root>(); }))
 		{
 			return Graph;
 		}
@@ -1096,28 +1260,26 @@ bool FAnimBPImporter::BuildVariables(UAnimBlueprint* Blueprint, const TArray<FVa
 		}
 
 		FEdGraphPinType PinType;
-		if (Var.Type == EPinType::Enum)
+		FString TypeError;
+		if (!TryBuildVariablePinType(Var, PinType, TypeError))
 		{
-			UEnum* EnumObject = Var.TypeObjectPath.IsEmpty() ? nullptr : LoadObject<UEnum>(nullptr, *Var.TypeObjectPath);
-			if (EnumObject)
-			{
-				PinType.PinCategory = UEdGraphSchema_K2::PC_Byte;
-				PinType.PinSubCategoryObject = EnumObject;
-			}
-			else
-			{
-				UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:VariableType] Enum variable '%s' could not load enum '%s' — falling back to name"),
-					*Var.Name, *Var.TypeObjectPath);
-				PinType.PinCategory = UEdGraphSchema_K2::PC_Name;
-			}
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:VariableType] Variable '%s': %s"), *Var.Name, *TypeError);
+			return false;
 		}
-		else if (!TryBuildEdGraphPinType(Var.Type, PinType))
+
+		if (!FBlueprintEditorUtils::AddMemberVariable(Blueprint, FName(*Var.Name), PinType, Var.DefaultValue))
 		{
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Real;
-			PinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[FAILED:VariableCreate] Could not add variable '%s'"), *Var.Name);
+			return false;
 		}
-		
-		FBlueprintEditorUtils::AddMemberVariable(Blueprint, FName(*Var.Name), PinType);
+		const int32 AddedIndex = FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, FName(*Var.Name));
+		if (AddedIndex == INDEX_NONE)
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[FAILED:VariableCreate] Variable '%s' was reported added but cannot be found"), *Var.Name);
+			return false;
+		}
+		Blueprint->NewVariables[AddedIndex].VarType = PinType;
+		Blueprint->NewVariables[AddedIndex].DefaultValue = Var.DefaultValue;
 		UE_LOG(LogAnimBPImporter, Verbose, TEXT("Added variable: %s"), *Var.Name);
 	}
 	
@@ -1157,7 +1319,10 @@ bool FAnimBPImporter::BuildGeneratedVars(UAnimBlueprint* Blueprint, const TArray
 		GeneratedVar.DefaultValue = (Helper.GeneratedType == EPinType::Bool) ? TEXT("false") : TEXT("0.0");
 		TArray<FVariableDef> SingleVar;
 		SingleVar.Add(GeneratedVar);
-		BuildVariables(Blueprint, SingleVar);
+		if (!BuildVariables(Blueprint, SingleVar))
+		{
+			return false;
+		}
 	}
 
 	return true;
@@ -1219,6 +1384,123 @@ bool FAnimBPImporter::BuildHelperGraphs(UAnimBlueprint* Blueprint, const TArray<
 	}
 
 	return bAllSucceeded;
+}
+
+bool FAnimBPImporter::BuildLogicGraphs(UAnimBlueprint* Blueprint, const TArray<FLogicGraphDef>& LogicGraphs, bool bReplaceExistingSet)
+{
+	if (!Blueprint)
+	{
+		return false;
+	}
+
+	TSet<FName> DesiredEventGraphs;
+	TSet<FName> DesiredFunctionGraphs;
+	for (const FLogicGraphDef& LogicGraph : LogicGraphs)
+	{
+		const bool bEvent = LogicGraph.Role.Equals(TEXT("event"), ESearchCase::IgnoreCase)
+			&& LogicGraph.Kind.Equals(TEXT("ubergraph"), ESearchCase::IgnoreCase);
+		const bool bFunction = LogicGraph.Role.Equals(TEXT("function"), ESearchCase::IgnoreCase)
+			&& LogicGraph.Kind.Equals(TEXT("function"), ESearchCase::IgnoreCase);
+		if (!bEvent && !bFunction)
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:LogicGraph] Graph '%s' has inconsistent role '%s' and kind '%s'"),
+				*LogicGraph.GraphName, *LogicGraph.Role, *LogicGraph.Kind);
+			return false;
+		}
+		(bEvent ? DesiredEventGraphs : DesiredFunctionGraphs).Add(FName(*LogicGraph.GraphName));
+	}
+
+	if (bReplaceExistingSet)
+	{
+		TArray<UEdGraph*> StaleGraphs;
+		for (UEdGraph* Graph : Blueprint->UbergraphPages)
+		{
+			if (Graph && !DesiredEventGraphs.Contains(Graph->GetFName())) StaleGraphs.Add(Graph);
+		}
+		for (UEdGraph* Graph : Blueprint->FunctionGraphs)
+		{
+			if (!Graph || (Graph->GetSchema() && Graph->GetSchema()->IsA<UAnimationGraphSchema>())
+				|| Graph->GetName().StartsWith(TEXT("__ABP2FP_HG_"))) continue;
+			if (!DesiredFunctionGraphs.Contains(Graph->GetFName())) StaleGraphs.Add(Graph);
+		}
+		for (UEdGraph* Graph : StaleGraphs)
+		{
+			FBlueprintEditorUtils::RemoveGraph(Blueprint, Graph, EGraphRemoveFlags::MarkTransient);
+		}
+	}
+
+	for (const FLogicGraphDef& LogicGraph : LogicGraphs)
+	{
+		const FString GraphName = LogicGraph.GraphName.TrimStartAndEnd();
+		const FString LispCode = LogicGraph.DSL.TrimStartAndEnd();
+		if (GraphName.IsEmpty() || LispCode.IsEmpty())
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:LogicGraph] Logic graph is missing graph-name or dsl"));
+			return false;
+		}
+		if (GraphName.Contains(TEXT("AnimGraph")) || GraphName.StartsWith(TEXT("__ABP2FP_HG_")))
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:LogicGraph] Refusing reserved graph '%s' in logic-graphs"), *GraphName);
+			return false;
+		}
+
+		const bool bEventGraph = LogicGraph.Role.Equals(TEXT("event"), ESearchCase::IgnoreCase);
+		UEdGraph* TargetGraph = nullptr;
+		const TArray<TObjectPtr<UEdGraph>>& ExistingGraphs = bEventGraph ? Blueprint->UbergraphPages : Blueprint->FunctionGraphs;
+		for (UEdGraph* Graph : ExistingGraphs)
+		{
+			if (Graph && Graph->GetFName() == FName(*GraphName))
+			{
+				TargetGraph = Graph;
+				break;
+			}
+		}
+
+		if (!TargetGraph)
+		{
+			UClass* SchemaClass = UEdGraphSchema_K2::StaticClass();
+			if (!LogicGraph.SchemaClassPath.IsEmpty())
+			{
+				if (UClass* RequestedSchema = LoadObject<UClass>(nullptr, *LogicGraph.SchemaClassPath);
+					RequestedSchema && RequestedSchema->IsChildOf(UEdGraphSchema::StaticClass()))
+				{
+					SchemaClass = RequestedSchema;
+				}
+			}
+			TargetGraph = FBlueprintEditorUtils::CreateNewGraph(
+				Blueprint, FName(*GraphName), UEdGraph::StaticClass(), SchemaClass);
+			if (!TargetGraph)
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:LogicGraph] Failed to create graph '%s'"), *GraphName);
+				return false;
+			}
+			if (bEventGraph)
+			{
+				FBlueprintEditorUtils::AddUbergraphPage(Blueprint, TargetGraph);
+			}
+			else
+			{
+				FBlueprintEditorUtils::AddFunctionGraph<UFunction>(Blueprint, TargetGraph, true, nullptr);
+			}
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		}
+
+		FBlueprintLispConverter::FImportOptions Options;
+		Options.ImportMode = FBlueprintLispConverter::EImportMode::ReplaceGraph;
+		Options.bAutoLayout = false;
+		Options.bCompile = false;
+		Options.bFailOnUnsupportedForm = true;
+		const FBlueprintLispResult ImportResult = bEventGraph
+			? FBlueprintLispConverter::Import(Blueprint, GraphName, LispCode, Options)
+			: FBlueprintLispConverter::ImportGraph(TargetGraph, LispCode, Options);
+		if (!ImportResult.bSuccess)
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:LogicGraph] Failed to import '%s': %s"),
+				*GraphName, *ImportResult.Error);
+			return false;
+		}
+	}
+	return true;
 }
 
 bool FAnimBPImporter::ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph* Graph, UAnimGraphNode_Base* Node,
@@ -1409,6 +1691,67 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		return nullptr;
 	}
 
+	auto RestoreNodeGuid = [&NodeAST](UEdGraphNode* Node) -> bool
+	{
+		if (NodeAST->NodeId.IsEmpty())
+		{
+			Node->CreateNewGuid();
+			return true;
+		}
+
+		FGuid ParsedGuid;
+		if (!FGuid::Parse(NodeAST->NodeId, ParsedGuid) || !ParsedGuid.IsValid())
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[INVALID:NodeId] '%s' is not a complete valid Unreal GUID"), *NodeAST->NodeId);
+			return false;
+		}
+		Node->NodeGuid = ParsedGuid;
+		return true;
+	};
+
+	if (NodeType == TEXT("cached-pose-ref"))
+	{
+		const FString* NameProperty = NodeAST->Properties.Find(TEXT("name"));
+		if (!NameProperty)
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:CachedPoseRef] cached-pose-ref requires a :name property"));
+			return nullptr;
+		}
+
+		const FString CacheName = StripQuotes(*NameProperty);
+		FString NormalizedName = CacheName;
+		NormalizedName.ReplaceInline(TEXT(" "), TEXT("-"));
+		UAnimGraphNode_SaveCachedPose* SaveNode = DefineNodes ? DefineNodes->FindRef(NormalizedName) : nullptr;
+		if (!SaveNode && DefineNodes)
+		{
+			SaveNode = DefineNodes->FindRef(CacheName);
+		}
+		if (!SaveNode)
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:CachedPoseRef] No define named '%s' exists"), *CacheName);
+			return nullptr;
+		}
+
+		UAnimGraphNode_UseCachedPose* UseNode = NewObject<UAnimGraphNode_UseCachedPose>(Graph);
+		if (!RestoreNodeGuid(UseNode))
+		{
+			return nullptr;
+		}
+		UseNode->PostPlacedNewNode();
+		UseNode->AllocateDefaultPins();
+		UseNode->SaveCachedPoseNode = SaveNode;
+		UseNode->Node.CachePoseName = FName(*SaveNode->CacheName);
+		Graph->AddNode(UseNode, false, false);
+		return UseNode;
+	}
+
+	if (NodeAST->Coverage == EAnimNodeCoverage::Lossy || NodeAST->Coverage == EAnimNodeCoverage::Unsupported)
+	{
+		UE_LOG(LogAnimBPImporter, Warning, TEXT("[UNSUPPORTED:NodeCoverage] Node '%s' has non-importable coverage '%s'"),
+			*NodeType, NodeAST->Coverage == EAnimNodeCoverage::Lossy ? TEXT("lossy") : TEXT("unsupported"));
+		return nullptr;
+	}
+
 	// Handle blend-list: the :class property contains the actual UE class name
 	FString EffectiveNodeType = NodeType;
 	if (NodeType == TEXT("blend-list"))
@@ -1421,66 +1764,24 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		}
 	}
 
-	// Handle variable references (bare identifiers like "Post-Layering" for UseCachedPose)
-	// These won't have parentheses in DSL; they are plain identifiers
-	// We detect them by checking: no children, no properties, and name doesn't match a known node class
-	UClass* NodeClass = FindAnimNodeClass(EffectiveNodeType);
+	UClass* NodeClass = nullptr;
+	if (!NodeAST->NodeClassPath.IsEmpty())
+	{
+		NodeClass = LoadClass<UAnimGraphNode_Base>(nullptr, *NodeAST->NodeClassPath);
+		if (!NodeClass || !NodeClass->IsChildOf(UAnimGraphNode_Base::StaticClass()) || NodeClass->HasAnyClassFlags(CLASS_Abstract))
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:NodeClass] Could not load concrete animation node class '%s' for '%s'"),
+				*NodeAST->NodeClassPath, *NodeType);
+			return nullptr;
+		}
+	}
+	else
+	{
+		NodeClass = FindAnimNodeClass(EffectiveNodeType);
+	}
 	if (!NodeClass)
 	{
-		// This might be a cached pose variable reference
-		// Create a UseCachedPose node
-		UAnimGraphNode_UseCachedPose* UseNode = NewObject<UAnimGraphNode_UseCachedPose>(Graph);
-		if (UseNode)
-		{
-			UseNode->CreateNewGuid();
-			UseNode->PostPlacedNewNode();
-			UseNode->AllocateDefaultPins();
-			
-			// Convert kebab-case identifier back to space-separated CacheName
-			// "Post-Layering" -> "Post Layering"
-			FString CacheName = NodeType;
-			CacheName.ReplaceInline(TEXT("-"), TEXT(" "));
-			
-			// Try to find and link to the corresponding SaveCachedPose node
-			bool bLinked = false;
-			if (DefineNodes && DefineNodes->Num() > 0)
-			{
-				// Build a normalized key for matching: convert CacheName (space-sep) to kebab-case
-				FString NormalizedName = CacheName;
-				NormalizedName.ReplaceInline(TEXT(" "), TEXT("-"));
-				
-				// TMap::Find() returns const pointer in UE, use FindRef() for non-const access
-				UAnimGraphNode_SaveCachedPose* SaveNode = nullptr;
-				if (DefineNodes->Contains(NormalizedName))
-				{
-					SaveNode = DefineNodes->FindRef(NormalizedName);
-				}
-				else if (DefineNodes->Contains(CacheName))
-				{
-					SaveNode = DefineNodes->FindRef(CacheName);
-				}
-				
-				if (SaveNode)
-				{
-					// UAnimGraphNode_UseCachedPose exposes SaveCachedPoseNode directly on the editor node.
-					UseNode->SaveCachedPoseNode = SaveNode;
-					UseNode->Node.CachePoseName = FName(*SaveNode->CacheName);
-					bLinked = true;
-					UE_LOG(LogAnimBPImporter, Log, TEXT("Linked UseCachedPose to SaveCachedPose '%s'"), *CacheName);
-				}
-			}
-			
-			Graph->AddNode(UseNode, false, false);
-			
-			if (!bLinked)
-			{
-				UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:CachedPoseLink] Created UseCachedPose for '%s' but could not link to SaveCachedPose — node will show as 'None'"),
-					*CacheName);
-			}
-			return UseNode;
-		}
-
-		UE_LOG(LogAnimBPImporter, Warning, TEXT("Could not create node for type '%s'"), *NodeType);
+		UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:NodeClass] Could not resolve node type '%s'; cached poses require explicit cached-pose-ref syntax"), *NodeType);
 		return nullptr;
 	}
 	
@@ -1492,7 +1793,10 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		return nullptr;
 	}
 	
-	NewNode->CreateNewGuid();
+	if (!RestoreNodeGuid(NewNode))
+	{
+		return nullptr;
+	}
 	NewNode->PostPlacedNewNode();
 	NewNode->AllocateDefaultPins();
 	
@@ -2182,8 +2486,10 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 			// identity-pose is intentionally null (no node created); others should log
 			if (Child.Node->NodeType != TEXT("identity-pose"))
 			{
-				UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:ChildBuildFailed] Node '%s' child '%s' (type '%s') could not be built — connection skipped"),
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:ChildBuildFailed] Node '%s' child '%s' (type '%s') could not be built"),
 					*NodeType, *Child.PinName, *Child.Node->NodeType);
+				Graph->RemoveNode(NewNode);
+				return nullptr;
 			}
 			continue;
 		}
@@ -2860,9 +3166,19 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 	}
 	
 	// Build variables and helper bridges
-	BuildVariables(Blueprint, AST->Variables);
-	BuildGeneratedVars(Blueprint, AST->HelperGraphs);
-	BuildHelperGraphs(Blueprint, AST->HelperGraphs);
+	if (!BuildVariables(Blueprint, AST->Variables))
+	{
+		return false;
+	}
+	if (!BuildGeneratedVars(Blueprint, AST->HelperGraphs)
+		|| !BuildHelperGraphs(Blueprint, AST->HelperGraphs))
+	{
+		return false;
+	}
+	if (!BuildLogicGraphs(Blueprint, AST->LogicGraphs, AST->bHasLogicGraphsBlock))
+	{
+		return false;
+	}
 
 	TMap<FString, FHelperGraphDef> HelperGraphLookup;
 	for (const FHelperGraphDef& Helper : AST->HelperGraphs)
@@ -2912,6 +3228,10 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 		}
 
 		UAnimGraphNode_Base* BodyNode = BuildAnimNode(Def.Body, AnimGraph, &DefineNodesRaw, &HelperGraphLookup);
+		if (!BodyNode && Def.Body->NodeType != TEXT("identity-pose"))
+		{
+			return false;
+		}
 		if (BodyNode)
 		{
 			UEdGraphPin* BodyOutput = FindOutputPosePin(BodyNode);
@@ -2937,6 +3257,10 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 	if (AST->RootNode.IsValid())
 	{
 		UAnimGraphNode_Base* RootTree = BuildAnimNode(AST->RootNode, AnimGraph, &DefineNodesRaw, &HelperGraphLookup);
+		if (!RootTree && AST->RootNode->NodeType != TEXT("identity-pose"))
+		{
+			return false;
+		}
 		
 		if (RootTree)
 		{
@@ -3064,7 +3388,7 @@ UAnimBlueprint* FAnimBPImporter::Import(const FString& DSLCode, const FString& P
 	TArray<FAnimLangParseError> ParseErrors;
 	TSharedPtr<FAnimGraphAST> AST = FAnimLangParser::Parse(DSLCode, ParseErrors);
 	
-	if (!AST.IsValid())
+	if (!AST.IsValid() || ParseErrors.Num() > 0)
 	{
 		if (OutError)
 		{
@@ -3077,15 +3401,6 @@ UAnimBlueprint* FAnimBPImporter::Import(const FString& DSLCode, const FString& P
 		return nullptr;
 	}
 	
-	if (ParseErrors.Num() > 0)
-	{
-		UE_LOG(LogAnimBPImporter, Warning, TEXT("Parse warnings:"));
-		for (const FAnimLangParseError& Err : ParseErrors)
-		{
-			UE_LOG(LogAnimBPImporter, Warning, TEXT("  %s"), *Err.ToString());
-		}
-	}
-	
 	return ImportFromAST(AST, PackagePath, OutError);
 }
 
@@ -3094,6 +3409,14 @@ UAnimBlueprint* FAnimBPImporter::ImportFromAST(const TSharedPtr<FAnimGraphAST>& 
 	if (!AST.IsValid())
 	{
 		if (OutError) *OutError = TEXT("Null AST");
+		return nullptr;
+	}
+
+	FString DependencyError;
+	if (!ValidateExternalDependencies(AST->Dependencies, DependencyError))
+	{
+		if (OutError) *OutError = DependencyError;
+		UE_LOG(LogAnimBPImporter, Error, TEXT("%s"), *DependencyError);
 		return nullptr;
 	}
 	
@@ -3121,8 +3444,15 @@ UAnimBlueprint* FAnimBPImporter::ImportFromAST(const TSharedPtr<FAnimGraphAST>& 
 	BroadcastFinalizeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PreFinalize, LifecycleContext);
 	if (!CompileBlueprint(Blueprint, &CompileError))
 	{
-		UE_LOG(LogAnimBPImporter, Warning, TEXT("Compilation warning: %s"), *CompileError);
-		// Don't fail — the blueprint is still usable
+		UE_LOG(LogAnimBPImporter, Error, TEXT("Compilation failed: %s"), *CompileError);
+		if (OutError) *OutError = CompileError;
+		return nullptr;
+	}
+	FString MetadataError;
+	if (!ApplyAnimBlueprintMetadata(Blueprint, AST->Metadata, MetadataError))
+	{
+		if (OutError) *OutError = MetadataError;
+		return nullptr;
 	}
 	BroadcastFinalizeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PostFinalize, LifecycleContext);
 	
@@ -3266,24 +3596,47 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 	// Add any new variables that don't already exist
 	for (const FVariableDef& Var : NewAST->Variables)
 	{
-		bool bExists = false;
+		int32 ExistingIndex = INDEX_NONE;
 		for (const FBPVariableDescription& ExistingVar : Blueprint->NewVariables)
 		{
 			if (ExistingVar.VarName == FName(*Var.Name))
 			{
-				bExists = true;
+				ExistingIndex = FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, ExistingVar.VarName);
 				break;
 			}
 		}
-		if (!bExists)
+		if (ExistingIndex == INDEX_NONE)
 		{
 			TArray<FVariableDef> SingleVar;
 			SingleVar.Add(Var);
-			BuildVariables(Blueprint, SingleVar);
+			if (!BuildVariables(Blueprint, SingleVar))
+			{
+				return false;
+			}
+		}
+		else
+		{
+			FEdGraphPinType PinType;
+			FString TypeError;
+			if (!TryBuildVariablePinType(Var, PinType, TypeError))
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:VariableType] Variable '%s': %s"), *Var.Name, *TypeError);
+				return false;
+			}
+			Blueprint->NewVariables[ExistingIndex].VarType = PinType;
+			Blueprint->NewVariables[ExistingIndex].DefaultValue = Var.DefaultValue;
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 		}
 	}
-	BuildGeneratedVars(Blueprint, NewAST->HelperGraphs);
-	BuildHelperGraphs(Blueprint, NewAST->HelperGraphs);
+	if (!BuildGeneratedVars(Blueprint, NewAST->HelperGraphs)
+		|| !BuildHelperGraphs(Blueprint, NewAST->HelperGraphs))
+	{
+		return false;
+	}
+	if (!BuildLogicGraphs(Blueprint, NewAST->LogicGraphs, NewAST->bHasLogicGraphsBlock))
+	{
+		return false;
+	}
 	RemoveStaleManagedGeneratedVars(Blueprint, NewAST->HelperGraphs);
 
 	TMap<FString, FHelperGraphDef> HelperGraphLookup;
@@ -3332,6 +3685,10 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 		}
 
 		UAnimGraphNode_Base* BodyNode = BuildAnimNode(Def.Body, AnimGraph, &DefineNodesRaw, &HelperGraphLookup);
+		if (!BodyNode && Def.Body->NodeType != TEXT("identity-pose"))
+		{
+			return false;
+		}
 		if (BodyNode)
 		{
 			UEdGraphPin* BodyOutput = FindOutputPosePin(BodyNode);
@@ -3356,6 +3713,10 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 	if (NewAST->RootNode.IsValid())
 	{
 		UAnimGraphNode_Base* RootTree = BuildAnimNode(NewAST->RootNode, AnimGraph, &DefineNodesRaw, &HelperGraphLookup);
+		if (!RootTree && NewAST->RootNode->NodeType != TEXT("identity-pose"))
+		{
+			return false;
+		}
 		
 		if (RootTree)
 		{
@@ -3415,9 +3776,15 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 		// Parse new DSL
 		TArray<FAnimLangParseError> ParseErrors;
 		TSharedPtr<FAnimGraphAST> NewAST = FAnimLangParser::Parse(NewDSLCode, ParseErrors);
-		if (!NewAST.IsValid())
+		if (!NewAST.IsValid() || ParseErrors.Num() > 0)
 		{
 			Result.Warnings.Add(TEXT("Failed to parse new DSL code"));
+			return Result;
+		}
+		FString DependencyError;
+		if (!ValidateExternalDependencies(NewAST->Dependencies, DependencyError))
+		{
+			Result.Warnings.Add(DependencyError);
 			return Result;
 		}
 		
@@ -3431,7 +3798,19 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 			const AnimBP2FPImportLifecycle::FImportLifecycleContext LifecycleContext =
 				MakeAnimLifecycleContext(ExistingBlueprint, FindAnimGraph(ExistingBlueprint), true, false, true, true);
 			BroadcastFinalizeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PreFinalize, LifecycleContext);
-			CompileBlueprint(ExistingBlueprint, &CompileError);
+			if (!CompileBlueprint(ExistingBlueprint, &CompileError))
+			{
+				Result.bSuccess = false;
+			}
+			else
+			{
+				FString MetadataError;
+				if (!ApplyAnimBlueprintMetadata(ExistingBlueprint, NewAST->Metadata, MetadataError))
+				{
+					Result.bSuccess = false;
+					Result.Warnings.Add(MetadataError);
+				}
+			}
 			BroadcastFinalizeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PostFinalize, LifecycleContext);
 			if (!CompileError.IsEmpty())
 			{
@@ -3451,13 +3830,21 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 		Result.Warnings.Add(FString::Printf(TEXT("Parse: %s"), *Err.ToString()));
 	}
 	
-	if (!NewAST.IsValid())
+	if (!NewAST.IsValid() || ParseErrors.Num() > 0)
 	{
 		Result.Warnings.Add(TEXT("Failed to parse new DSL code"));
 		return Result;
 	}
+	FString DependencyError;
+	if (!ValidateExternalDependencies(NewAST->Dependencies, DependencyError))
+	{
+		Result.Warnings.Add(DependencyError);
+		return Result;
+	}
 
 	const bool bHelperGraphsChanged = !AreEquivalentHelperSets(OldAST->HelperGraphs, NewAST->HelperGraphs);
+	const bool bLogicGraphsChanged = !AreEquivalentLogicGraphSets(OldAST->LogicGraphs, NewAST->LogicGraphs);
+	const bool bMetadataChanged = OldAST->Metadata.RootMotionMode != NewAST->Metadata.RootMotionMode;
 	
 	// Step 3: Compute diff
 	FAnimLangDiffResult Diff = FAnimLangDiffer::Diff(OldAST, NewAST);
@@ -3475,8 +3862,24 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 			? Result.DiffSummary + TEXT("; helper graphs changed")
 			: TEXT("helper graphs changed");
 	}
+	if (bLogicGraphsChanged)
+	{
+		Result.NumChanges += 1;
+		Result.NumStructuralChanges += 1;
+		Result.DiffSummary = Result.DiffSummary.IsEmpty()
+			? TEXT("logic graphs changed")
+			: Result.DiffSummary + TEXT("; logic graphs changed");
+	}
+	if (bMetadataChanged)
+	{
+		Result.NumChanges += 1;
+		Result.NumStructuralChanges += 1;
+		Result.DiffSummary = Result.DiffSummary.IsEmpty()
+			? TEXT("AnimBlueprint metadata changed")
+			: Result.DiffSummary + TEXT("; AnimBlueprint metadata changed");
+	}
 	
-	if (!Diff.HasChanges() && !bHelperGraphsChanged)
+	if (!Diff.HasChanges() && !bHelperGraphsChanged && !bLogicGraphsChanged && !bMetadataChanged)
 	{
 		Result.bSuccess = true;
 		Result.Warnings.Add(TEXT("No changes detected between current blueprint and new DSL"));
@@ -3555,11 +3958,20 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 		if (!CompileBlueprint(ExistingBlueprint, &CompileError))
 		{
 			Result.Warnings.Add(TEXT("Compile: ") + CompileError);
-			// Don't fail — the blueprint is still potentially usable
+			Result.bSuccess = false;
 		}
 		else
 		{
-			Result.AppliedOps.Add(TEXT("Blueprint compiled successfully"));
+			FString MetadataError;
+			if (!ApplyAnimBlueprintMetadata(ExistingBlueprint, NewAST->Metadata, MetadataError))
+			{
+				Result.Warnings.Add(MetadataError);
+				Result.bSuccess = false;
+			}
+			else
+			{
+				Result.AppliedOps.Add(TEXT("Blueprint compiled successfully"));
+			}
 		}
 		BroadcastFinalizeLifecycle(AnimBP2FPImportLifecycle::EImportLifecyclePhase::PostFinalize, LifecycleContext);
 	}

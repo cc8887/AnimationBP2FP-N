@@ -99,6 +99,12 @@ private:
 	FVariableDef ParseVarDef();
 	void ParseHelpers(TSharedPtr<FAnimGraphAST> AST);
 	FHelperGraphDef ParseHelperGraphDef();
+	void ParseLogicGraphs(TSharedPtr<FAnimGraphAST> AST);
+	FLogicGraphDef ParseLogicGraphDef();
+	void ParseMetadata(TSharedPtr<FAnimGraphAST> AST);
+	void ParseDependencies(TSharedPtr<FAnimGraphAST> AST);
+	FAnimDependency ParseDependency();
+	FAnimationAssetMetadataSnapshot ParseAnimationAssetMetadata();
 	void ParseDefine(TSharedPtr<FAnimGraphAST> AST);
 	TSharedPtr<FAnimNodeAST> ParseNodeExpr();
 	TSharedPtr<FAnimNodeAST> ParseNodeBody();  // Inside parentheses, after node type

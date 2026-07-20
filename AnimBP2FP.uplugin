@@ -22,6 +22,10 @@
         {
             "Name": "BlueprintLisp",
             "Enabled": true
+        },
+        {
+            "Name": "AnimationData",
+            "Enabled": true
         }
     ]
 }

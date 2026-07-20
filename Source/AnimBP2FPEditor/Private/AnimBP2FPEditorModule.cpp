@@ -15,6 +15,7 @@
 #include "Misc/MessageDialog.h"
 #include "Animation/AnimBlueprint.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/ARFilter.h"
 #include "Engine/AssetManager.h"
 
 #define LOCTEXT_NAMESPACE "FAnimBP2FPEditorModule"
@@ -181,7 +182,11 @@ void FAnimBP2FPEditorModule::ExportAnimBPToDSL()
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 	
 	TArray<FAssetData> AnimBPAssets;
-	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetClassPathName(), AnimBPAssets);
+	FARFilter Filter;
+	Filter.ClassPaths.Add(UAnimBlueprint::StaticClass()->GetClassPathName());
+	Filter.PackagePaths.Add(FName(TEXT("/Game")));
+	Filter.bRecursivePaths = true;
+	AssetRegistry.GetAssets(Filter, AnimBPAssets);
 	
 	if (AnimBPAssets.Num() == 0)
 	{

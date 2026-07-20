@@ -19,6 +19,67 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogAnimLangPatcher, Log, All);
 
+namespace
+{
+	static bool BuildPatchVariablePinType(const FVariableDef& Var, FEdGraphPinType& OutPinType, FString& OutError)
+	{
+		if (!Var.PinCategory.IsEmpty())
+		{
+			OutPinType.PinCategory = FName(*Var.PinCategory);
+			OutPinType.PinSubCategory = FName(*Var.PinSubCategory);
+			const bool bRequiresTypeObject = Var.PinCategory == UEdGraphSchema_K2::PC_Struct.ToString()
+				|| Var.PinCategory == UEdGraphSchema_K2::PC_Object.ToString()
+				|| Var.PinCategory == UEdGraphSchema_K2::PC_Class.ToString()
+				|| Var.PinCategory == UEdGraphSchema_K2::PC_SoftObject.ToString()
+				|| Var.PinCategory == UEdGraphSchema_K2::PC_SoftClass.ToString()
+				|| Var.PinCategory == UEdGraphSchema_K2::PC_Interface.ToString();
+			if (bRequiresTypeObject && Var.TypeObjectPath.IsEmpty())
+			{
+				OutError = FString::Printf(TEXT("pin category '%s' requires :type-object"), *Var.PinCategory);
+				return false;
+			}
+			if (!Var.TypeObjectPath.IsEmpty())
+			{
+				UObject* TypeObject = LoadObject<UObject>(nullptr, *Var.TypeObjectPath);
+				if (!TypeObject)
+				{
+					OutError = FString::Printf(TEXT("pin type object '%s' could not be loaded"), *Var.TypeObjectPath);
+					return false;
+				}
+				OutPinType.PinSubCategoryObject = TypeObject;
+			}
+			const FString Container = Var.ContainerType.ToLower();
+			if (Container.IsEmpty() || Container == TEXT("none")) OutPinType.ContainerType = EPinContainerType::None;
+			else if (Container == TEXT("array")) OutPinType.ContainerType = EPinContainerType::Array;
+			else if (Container == TEXT("set")) OutPinType.ContainerType = EPinContainerType::Set;
+			else
+			{
+				OutError = Container == TEXT("map")
+					? TEXT("map value terminal type is not represented by this DSL version")
+					: FString::Printf(TEXT("unknown container '%s'"), *Var.ContainerType);
+				return false;
+			}
+			OutPinType.bIsReference = Var.bIsReference;
+			OutPinType.bIsConst = Var.bIsConst;
+			OutPinType.bIsWeakPointer = Var.bIsWeakPointer;
+			OutPinType.bIsUObjectWrapper = Var.bIsUObjectWrapper;
+			return true;
+		}
+
+		switch (Var.Type)
+		{
+		case EPinType::Float: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Real; OutPinType.PinSubCategory = UEdGraphSchema_K2::PC_Float; return true;
+		case EPinType::Int: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Int; return true;
+		case EPinType::Bool: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Boolean; return true;
+		case EPinType::Name: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Name; return true;
+		case EPinType::Vector: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Struct; OutPinType.PinSubCategoryObject = TBaseStructure<FVector>::Get(); return true;
+		case EPinType::Rotator: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Struct; OutPinType.PinSubCategoryObject = TBaseStructure<FRotator>::Get(); return true;
+		case EPinType::Transform: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Struct; OutPinType.PinSubCategoryObject = TBaseStructure<FTransform>::Get(); return true;
+		default: OutError = TEXT("legacy DSL type is unsupported"); return false;
+		}
+	}
+}
+
 // ========== FAnimLangPatchResult ==========
 
 FString FAnimLangPatchResult::ToString() const
@@ -293,30 +354,27 @@ bool FAnimLangPatcher::ApplyVariableChange(
 			}
 		}
 		
-		// Build pin type
 		FEdGraphPinType PinType;
-		switch (NewVar->Type)
+		FString TypeError;
+		if (!BuildPatchVariablePinType(*NewVar, PinType, TypeError))
 		{
-		case EPinType::Float:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Real;
-			PinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
-			break;
-		case EPinType::Int:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Int;
-			break;
-		case EPinType::Bool:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
-			break;
-		case EPinType::Name:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Name;
-			break;
-		default:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Real;
-			PinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
-			break;
+			OutWarnings.Add(FString::Printf(TEXT("Variable '%s' type is unsupported: %s"), *Entry.VariableName, *TypeError));
+			return false;
 		}
 		
-		FBlueprintEditorUtils::AddMemberVariable(Blueprint, FName(*Entry.VariableName), PinType);
+		if (!FBlueprintEditorUtils::AddMemberVariable(Blueprint, FName(*Entry.VariableName), PinType, NewVar->DefaultValue))
+		{
+			OutWarnings.Add(FString::Printf(TEXT("Failed to add variable '%s'"), *Entry.VariableName));
+			return false;
+		}
+		const int32 AddedIndex = FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, FName(*Entry.VariableName));
+		if (AddedIndex == INDEX_NONE)
+		{
+			OutWarnings.Add(FString::Printf(TEXT("Added variable '%s' cannot be found"), *Entry.VariableName));
+			return false;
+		}
+		Blueprint->NewVariables[AddedIndex].VarType = PinType;
+		Blueprint->NewVariables[AddedIndex].DefaultValue = NewVar->DefaultValue;
 		return true;
 	}
 	else if (Entry.Op == EAnimLangDiffOp::VariableRemoved)
@@ -345,33 +403,23 @@ bool FAnimLangPatcher::ApplyVariableChange(
 			return false;
 		}
 		
-		// Remove old
-		FBlueprintEditorUtils::RemoveMemberVariable(Blueprint, FName(*Entry.VariableName));
-		
-		// Add new
 		FEdGraphPinType PinType;
-		switch (NewVar->Type)
+		FString TypeError;
+		if (!BuildPatchVariablePinType(*NewVar, PinType, TypeError))
 		{
-		case EPinType::Float:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Real;
-			PinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
-			break;
-		case EPinType::Int:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Int;
-			break;
-		case EPinType::Bool:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
-			break;
-		case EPinType::Name:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Name;
-			break;
-		default:
-			PinType.PinCategory = UEdGraphSchema_K2::PC_Real;
-			PinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
-			break;
+			OutWarnings.Add(FString::Printf(TEXT("Variable '%s' type is unsupported: %s"), *Entry.VariableName, *TypeError));
+			return false;
 		}
-		
-		FBlueprintEditorUtils::AddMemberVariable(Blueprint, FName(*Entry.VariableName), PinType);
+
+		const int32 ExistingIndex = FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, FName(*Entry.VariableName));
+		if (ExistingIndex == INDEX_NONE)
+		{
+			OutWarnings.Add(FString::Printf(TEXT("Variable '%s' no longer exists for type change"), *Entry.VariableName));
+			return false;
+		}
+		Blueprint->NewVariables[ExistingIndex].VarType = PinType;
+		Blueprint->NewVariables[ExistingIndex].DefaultValue = NewVar->DefaultValue;
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 		return true;
 	}
 	

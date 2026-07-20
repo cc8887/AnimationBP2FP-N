@@ -20,7 +20,9 @@ enum class EPinType : uint8
 	Transform,
 	Name,
 	Enum,
-	Object
+	Object,
+	Struct,
+	Unknown
 };
 
 /**
@@ -76,6 +78,14 @@ struct FNamedChild
 	TSharedPtr<struct FAnimNodeAST> Node;
 };
 
+enum class EAnimNodeCoverage : uint8
+{
+	Exact,
+	Reflected,
+	Lossy,
+	Unsupported
+};
+
 /**
  * 动画节点 AST
  */
@@ -85,6 +95,8 @@ struct ANIMBP2FP_API FAnimNodeAST
 	
 	FString NodeType;  // "sequence-player", "blend", "state-machine", etc.
 	FString NodeId;    // Stable ID for incremental update (maps to UE NodeGuid)
+	FString NodeClassPath;  // Exact editor-node UClass path used by reflected fallback import
+	EAnimNodeCoverage Coverage = EAnimNodeCoverage::Exact;
 	TMap<FString, FString> Properties;  // Non-pose parameters (float, bool, int, enum, etc.)
 	TArray<FNamedChild> Children;  // Pose inputs with pin names
 	
@@ -148,6 +160,13 @@ struct ANIMBP2FP_API FVariableDef
 	FString DefaultValue;
 	FString Description;
 	FString TypeObjectPath;  // For enum/object-like variables that need a concrete asset/class path
+	FString PinCategory;     // Exact UE FEdGraphPinType category (authoritative when non-empty)
+	FString PinSubCategory;
+	FString ContainerType;   // none, array, set, or map
+	bool bIsReference = false;
+	bool bIsConst = false;
+	bool bIsWeakPointer = false;
+	bool bIsUObjectWrapper = false;
 	
 	// For float/int: range
 	float RangeMin = 0.0f;
@@ -184,6 +203,71 @@ struct ANIMBP2FP_API FHelperGraphDef
 	FString ToString(int32 Indent = 0) const;
 };
 
+/** Ordinary Blueprint logic graph represented by BlueprintLisp. */
+struct ANIMBP2FP_API FLogicGraphDef
+{
+	FString Role;             // event or function
+	FString Kind;             // ubergraph or function
+	FString GraphName;
+	FString SchemaClassPath;  // Optional graph schema class path
+	FString DSL;
+
+	FString ToString(int32 Indent = 0) const;
+};
+
+struct ANIMBP2FP_API FAnimNotifySnapshot
+{
+	FString ClassPath;
+	FString Name;
+	float Time = 0.0f;
+	float Duration = 0.0f;
+	bool bIsState = false;
+};
+
+struct ANIMBP2FP_API FAnimSyncMarkerSnapshot
+{
+	FString Name;
+	float Time = 0.0f;
+};
+
+struct ANIMBP2FP_API FMontageSectionSnapshot
+{
+	FString Name;
+	float StartTime = 0.0f;
+	FString NextSectionName;
+};
+
+/** Read-only description of an externally-owned animation asset. */
+struct ANIMBP2FP_API FAnimationAssetMetadataSnapshot
+{
+	bool bHasSnapshot = false;
+	bool bHasRootMotion = false;
+	bool bEnableRootMotion = false;
+	bool bForceRootLock = false;
+	FString RootMotionRootLock;
+	TArray<FAnimNotifySnapshot> Notifies;
+	TArray<FAnimSyncMarkerSnapshot> SyncMarkers;
+	TArray<FMontageSectionSnapshot> MontageSections;
+	TArray<FString> SlotTrackNames;
+	TArray<FString> UnsupportedFields;
+};
+
+struct ANIMBP2FP_API FAnimDependency
+{
+	FString ObjectPath;
+	FString ClassPath;
+	FString Role;
+	FString Mode = TEXT("external");
+	FAnimationAssetMetadataSnapshot AssetMetadata;
+
+	FString ToString(int32 Indent = 0) const;
+};
+
+struct ANIMBP2FP_API FAnimBlueprintMetadata
+{
+	FString RootMotionMode;
+};
+
 /**
  * 完整的动画蓝图 AST
  */
@@ -191,21 +275,16 @@ struct ANIMBP2FP_API FAnimGraphAST
 {
 	FString Name;
 	FString SkeletonPath;       // Target skeleton asset path (e.g. "/Game/Mannequin/Skeleton")
+	FAnimBlueprintMetadata Metadata;
+	TArray<FAnimDependency> Dependencies;
 	TArray<FString> ImplementedInterfaces;  // Asset paths of AnimLayerInterfaces implemented by the BP
 	TArray<FVariableDef> Variables;
 	TArray<FHelperGraphDef> HelperGraphs;  // (helpers ...) 块 — BlueprintLisp helper subgraphs for complex value bindings
+	TArray<FLogicGraphDef> LogicGraphs;    // Ordinary EventGraph/function graphs exported as BlueprintLisp
+	bool bHasLogicGraphsBlock = false;     // Distinguishes legacy DSL from an explicit empty replacement set
 	TArray<FCachedPoseDef> Defines;  // (define ...) 块 — SaveCachedPose 节点
 	TSharedPtr<FAnimNodeAST> RootNode;
 
-	
-	// Optional: Anim Notifies
-	struct FAnimNotify
-	{
-		FString Name;
-		FString CallbackName;
-	};
-	TArray<FAnimNotify> AnimNotifies;
-	
 	FString ToString() const;
 	
 	// S-expression output

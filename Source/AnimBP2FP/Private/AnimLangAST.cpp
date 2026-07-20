@@ -29,6 +29,8 @@ namespace
 		case EPinType::Name:      return TEXT("name");
 		case EPinType::Enum:      return TEXT("enum");
 		case EPinType::Object:    return TEXT("object");
+		case EPinType::Struct:    return TEXT("struct");
+		case EPinType::Unknown:   return TEXT("unknown");
 		default:                  return TEXT("unknown");
 		}
 	}
@@ -48,6 +50,18 @@ namespace
 
 		return EscapeQuotedStringForDSL(Trimmed);
 	}
+
+	static const TCHAR* CoverageToAnimLangString(const EAnimNodeCoverage Coverage)
+	{
+		switch (Coverage)
+		{
+		case EAnimNodeCoverage::Exact: return TEXT("exact");
+		case EAnimNodeCoverage::Reflected: return TEXT("reflected");
+		case EAnimNodeCoverage::Lossy: return TEXT("lossy");
+		case EAnimNodeCoverage::Unsupported: return TEXT("unsupported");
+		default: return TEXT("unsupported");
+		}
+	}
 }
 
 // ========== FAnimNodeAST ==========
@@ -57,6 +71,15 @@ FString FAnimNodeAST::ToString(int32 Indent) const
 	FString IndentStr = FString::ChrN(Indent, ' ');
 	FString ChildIndentStr = FString::ChrN(Indent + 2, ' ');
 	FString Result = FString::Printf(TEXT("%s(%s"), *IndentStr, *NodeType);
+	if (!NodeId.IsEmpty())
+	{
+		Result += FString::Printf(TEXT(" :node-id %s"), *EscapeQuotedStringForDSL(NodeId));
+	}
+	if (!NodeClassPath.IsEmpty())
+	{
+		Result += FString::Printf(TEXT(" :node-class %s"), *EscapeQuotedStringForDSL(NodeClassPath));
+	}
+	Result += FString::Printf(TEXT(" :coverage %s"), CoverageToAnimLangString(Coverage));
 	
 	// Add properties (non-pose parameters)
 	for (const auto& Pair : Properties)
@@ -246,14 +269,32 @@ FString FVariableDef::ToString() const
 		case EPinType::Name:      TypeStr = TEXT("name"); break;
 		case EPinType::Enum:      TypeStr = TEXT("enum"); break;
 		case EPinType::Object:    TypeStr = TEXT("object"); break;
+		case EPinType::Struct:    TypeStr = TEXT("struct"); break;
+		case EPinType::Unknown:   TypeStr = TEXT("unknown"); break;
 		default:                  TypeStr = TEXT("unknown"); break;
 	}
 	
 	FString Result = FString::Printf(TEXT("(%s :%s"), *TypeStr, *Name);
+	if (!PinCategory.IsEmpty())
+	{
+		Result += FString::Printf(TEXT(" :pin-category %s"), *EscapeQuotedStringForDSL(PinCategory));
+	}
+	if (!PinSubCategory.IsEmpty())
+	{
+		Result += FString::Printf(TEXT(" :pin-subcategory %s"), *EscapeQuotedStringForDSL(PinSubCategory));
+	}
 	if (!TypeObjectPath.IsEmpty())
 	{
-		Result += FString::Printf(TEXT(" :type-object (asset \"%s\")"), *TypeObjectPath);
+		Result += FString::Printf(TEXT(" :type-object (asset %s)"), *EscapeQuotedStringForDSL(TypeObjectPath));
 	}
+	if (!ContainerType.IsEmpty() && !ContainerType.Equals(TEXT("none"), ESearchCase::IgnoreCase))
+	{
+		Result += FString::Printf(TEXT(" :container %s"), *ContainerType.ToLower());
+	}
+	if (bIsReference) Result += TEXT(" :reference true");
+	if (bIsConst) Result += TEXT(" :const true");
+	if (bIsWeakPointer) Result += TEXT(" :weak true");
+	if (bIsUObjectWrapper) Result += TEXT(" :object-wrapper true");
 	if (!DefaultValue.IsEmpty())
 	{
 		Result += FString::Printf(TEXT(" %s"), *DefaultValue);
@@ -308,6 +349,90 @@ FString FHelperGraphDef::ToString(int32 Indent) const
 	return Result;
 }
 
+// ========== FLogicGraphDef ==========
+
+FString FLogicGraphDef::ToString(int32 Indent) const
+{
+	const FString IndentStr = FString::ChrN(Indent, ' ');
+	const FString ChildIndent = FString::ChrN(Indent + 2, ' ');
+	FString Result = FString::Printf(TEXT("%s(logic-graph"), *IndentStr);
+	Result += FString::Printf(TEXT("\n%s:role %s"), *ChildIndent, *EscapeQuotedStringForDSL(Role));
+	Result += FString::Printf(TEXT("\n%s:kind %s"), *ChildIndent, *EscapeQuotedStringForDSL(Kind));
+	Result += FString::Printf(TEXT("\n%s:graph-name %s"), *ChildIndent, *EscapeQuotedStringForDSL(GraphName));
+	if (!SchemaClassPath.IsEmpty())
+	{
+		Result += FString::Printf(TEXT("\n%s:schema %s"), *ChildIndent, *EscapeQuotedStringForDSL(SchemaClassPath));
+	}
+	Result += FString::Printf(TEXT("\n%s:dsl %s"), *ChildIndent, *EscapeQuotedStringForDSL(DSL));
+	Result += FString::Printf(TEXT("\n%s)"), *IndentStr);
+	return Result;
+}
+
+FString FAnimDependency::ToString(int32 Indent) const
+{
+	const FString I = FString::ChrN(Indent, ' ');
+	const FString C = FString::ChrN(Indent + 2, ' ');
+	FString Result = FString::Printf(TEXT("%s(dependency\n%s:mode %s\n%s:object-path %s\n%s:class-path %s\n%s:role %s"),
+		*I, *C, *Mode, *C, *EscapeQuotedStringForDSL(ObjectPath), *C, *EscapeQuotedStringForDSL(ClassPath), *C, *EscapeQuotedStringForDSL(Role));
+	if (AssetMetadata.bHasSnapshot)
+	{
+		Result += FString::Printf(TEXT("\n%s:snapshot (animation-asset-metadata"), *C);
+		Result += FString::Printf(TEXT(" :has-root-motion %s :enable-root-motion %s :force-root-lock %s"),
+			AssetMetadata.bHasRootMotion ? TEXT("true") : TEXT("false"),
+			AssetMetadata.bEnableRootMotion ? TEXT("true") : TEXT("false"),
+			AssetMetadata.bForceRootLock ? TEXT("true") : TEXT("false"));
+		if (!AssetMetadata.RootMotionRootLock.IsEmpty())
+		{
+			Result += FString::Printf(TEXT(" :root-motion-root-lock %s"), *EscapeQuotedStringForDSL(AssetMetadata.RootMotionRootLock));
+		}
+		if (!AssetMetadata.Notifies.IsEmpty())
+		{
+			Result += TEXT(" :notifies [");
+			for (const FAnimNotifySnapshot& Notify : AssetMetadata.Notifies)
+			{
+				Result += FString::Printf(TEXT(" (notify :class-path %s :name %s :time %s :duration %s :state %s)"),
+					*EscapeQuotedStringForDSL(Notify.ClassPath), *EscapeQuotedStringForDSL(Notify.Name),
+					*FString::SanitizeFloat(Notify.Time), *FString::SanitizeFloat(Notify.Duration), Notify.bIsState ? TEXT("true") : TEXT("false"));
+			}
+			Result += TEXT(" ]");
+		}
+		if (!AssetMetadata.SyncMarkers.IsEmpty())
+		{
+			Result += TEXT(" :sync-markers [");
+			for (const FAnimSyncMarkerSnapshot& Marker : AssetMetadata.SyncMarkers)
+			{
+				Result += FString::Printf(TEXT(" (sync-marker :name %s :time %s)"), *EscapeQuotedStringForDSL(Marker.Name), *FString::SanitizeFloat(Marker.Time));
+			}
+			Result += TEXT(" ]");
+		}
+		if (!AssetMetadata.MontageSections.IsEmpty())
+		{
+			Result += TEXT(" :montage-sections [");
+			for (const FMontageSectionSnapshot& Section : AssetMetadata.MontageSections)
+			{
+				Result += FString::Printf(TEXT(" (montage-section :name %s :start-time %s :next-section %s)"),
+					*EscapeQuotedStringForDSL(Section.Name), *FString::SanitizeFloat(Section.StartTime), *EscapeQuotedStringForDSL(Section.NextSectionName));
+			}
+			Result += TEXT(" ]");
+		}
+		if (!AssetMetadata.SlotTrackNames.IsEmpty())
+		{
+			Result += TEXT(" :slot-tracks [");
+			for (const FString& Slot : AssetMetadata.SlotTrackNames) Result += TEXT(" ") + EscapeQuotedStringForDSL(Slot);
+			Result += TEXT(" ]");
+		}
+		if (!AssetMetadata.UnsupportedFields.IsEmpty())
+		{
+			Result += TEXT(" :unsupported [");
+			for (const FString& Field : AssetMetadata.UnsupportedFields) Result += TEXT(" ") + EscapeQuotedStringForDSL(Field);
+			Result += TEXT(" ]");
+		}
+		Result += TEXT(")");
+	}
+	Result += FString::Printf(TEXT("\n%s)"), *I);
+	return Result;
+}
+
 // ========== FAnimGraphAST ==========
 
 FString FAnimGraphAST::ToString() const
@@ -318,6 +443,28 @@ FString FAnimGraphAST::ToString() const
 	if (!SkeletonPath.IsEmpty())
 	{
 		Result += FString::Printf(TEXT("  :skeleton \"%s\"\n"), *SkeletonPath);
+	}
+
+	if (!Metadata.RootMotionMode.IsEmpty())
+	{
+		Result += FString::Printf(TEXT("  (metadata :root-motion-mode %s)\n"), *EscapeQuotedStringForDSL(Metadata.RootMotionMode));
+	}
+
+	if (!Dependencies.IsEmpty())
+	{
+		TArray<FAnimDependency> SortedDependencies = Dependencies;
+		SortedDependencies.Sort([](const FAnimDependency& A, const FAnimDependency& B)
+		{
+			if (A.ObjectPath != B.ObjectPath) return A.ObjectPath < B.ObjectPath;
+			if (A.ClassPath != B.ClassPath) return A.ClassPath < B.ClassPath;
+			return A.Role < B.Role;
+		});
+		Result += TEXT("  (dependencies\n");
+		for (const FAnimDependency& Dependency : SortedDependencies)
+		{
+			Result += Dependency.ToString(4) + TEXT("\n");
+		}
+		Result += TEXT("  )\n");
 	}
 	
 	// Implemented interfaces (AnimLayerInterfaces)
@@ -359,6 +506,26 @@ FString FAnimGraphAST::ToString() const
 		for (const FHelperGraphDef& Helper : SortedHelpers)
 		{
 			Result += Helper.ToString(4) + TEXT("\n");
+		}
+		Result += TEXT("  )\n");
+	}
+
+	if (bHasLogicGraphsBlock || LogicGraphs.Num() > 0)
+	{
+		TArray<FLogicGraphDef> SortedGraphs = LogicGraphs;
+		SortedGraphs.StableSort([](const FLogicGraphDef& A, const FLogicGraphDef& B)
+		{
+			if (A.Role != B.Role)
+			{
+				return A.Role == TEXT("event");
+			}
+			return A.GraphName < B.GraphName;
+		});
+
+		Result += TEXT("  (logic-graphs\n");
+		for (const FLogicGraphDef& Graph : SortedGraphs)
+		{
+			Result += Graph.ToString(4) + TEXT("\n");
 		}
 		Result += TEXT("  )\n");
 	}
