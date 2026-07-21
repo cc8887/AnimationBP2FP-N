@@ -2,6 +2,7 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
 #include "AnimLangTokenizer.h"
+#include "AnimLangParser.h"
 
 // ========== FAnimLangToken ==========
 
@@ -34,12 +35,13 @@ FString FAnimLangToken::ToString() const
 
 // ========== FAnimLangTokenizer ==========
 
-FAnimLangTokenizer::FAnimLangTokenizer(const FString& Source)
+FAnimLangTokenizer::FAnimLangTokenizer(const FString& Source, const FString& InSourceFile)
 	: Src(*Source)
 	, Pos(0)
 	, Len(Source.Len())
 	, Line(1)
 	, Col(1)
+	, SourceFile(InSourceFile)
 {
 }
 
@@ -104,14 +106,49 @@ bool FAnimLangTokenizer::IsDigit(TCHAR Ch) const
 
 FAnimLangToken FAnimLangTokenizer::MakeToken(EAnimLangTokenType Type, const FString& Value, int32 StartLine, int32 StartCol, int32 StartOffset) const
 {
-	return FAnimLangToken(Type, Value, StartLine, StartCol, StartOffset);
+	FAnimLangToken Token(Type, Value, StartLine, StartCol, StartOffset);
+	Token.Span.SourceFile = SourceFile;
+	Token.Span.Length = Pos - StartOffset;
+	return Token;
 }
 
 // ========== Main Tokenize ==========
 
 bool FAnimLangTokenizer::Tokenize(const FString& Source, TArray<FAnimLangToken>& OutTokens, TArray<FAnimLangLexError>& OutErrors, bool bKeepComments)
 {
-	FAnimLangTokenizer Lexer(Source);
+	return TokenizeInternal(Source, FString(), OutTokens, OutErrors, bKeepComments);
+}
+
+TArray<FAnimLangToken> FAnimLangTokenizer::Tokenize(
+	const FString& Source,
+	const FString& SourceFile,
+	TArray<FAnimLangParseError>* OutErrors)
+{
+	TArray<FAnimLangToken> Tokens;
+	TArray<FAnimLangLexError> LexErrors;
+	TokenizeInternal(Source, SourceFile, Tokens, LexErrors, false);
+
+	if (OutErrors != nullptr)
+	{
+		for (const FAnimLangLexError& LexError : LexErrors)
+		{
+			FAnimLangParseError& ParseError = OutErrors->AddDefaulted_GetRef();
+			ParseError.Message = LexError.Message;
+			ParseError.Line = LexError.Line;
+			ParseError.Column = LexError.Column;
+		}
+	}
+	return Tokens;
+}
+
+bool FAnimLangTokenizer::TokenizeInternal(
+	const FString& Source,
+	const FString& SourceFile,
+	TArray<FAnimLangToken>& OutTokens,
+	TArray<FAnimLangLexError>& OutErrors,
+	bool bKeepComments)
+{
+	FAnimLangTokenizer Lexer(Source, SourceFile);
 	
 	while (!Lexer.IsAtEnd())
 	{
@@ -138,7 +175,9 @@ bool FAnimLangTokenizer::Tokenize(const FString& Source, TArray<FAnimLangToken>&
 	}
 	
 	// Always end with EOF
-	OutTokens.Add(FAnimLangToken(EAnimLangTokenType::EndOfFile, TEXT(""), Lexer.Line, Lexer.Col, Lexer.Pos));
+	FAnimLangToken EndToken(EAnimLangTokenType::EndOfFile, TEXT(""), Lexer.Line, Lexer.Col, Lexer.Pos);
+	EndToken.Span.SourceFile = SourceFile;
+	OutTokens.Add(MoveTemp(EndToken));
 	
 	return OutErrors.Num() == 0;
 }

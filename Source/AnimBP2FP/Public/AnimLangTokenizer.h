@@ -4,6 +4,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "AnimLangDiagnostics.h"
+
+struct FAnimLangParseError;
 
 /**
  * Token 类型枚举
@@ -45,6 +48,7 @@ struct ANIMBP2FP_API FAnimLangToken
 	int32 Line;           // 1-based line number
 	int32 Column;         // 1-based column number
 	int32 Offset;         // 0-based character offset in source
+	FAnimLangSourceLoc Span;
 	
 	FAnimLangToken()
 		: Type(EAnimLangTokenType::Error), Line(0), Column(0), Offset(0)
@@ -54,6 +58,9 @@ struct ANIMBP2FP_API FAnimLangToken
 	FAnimLangToken(EAnimLangTokenType InType, const FString& InValue, int32 InLine, int32 InCol, int32 InOffset)
 		: Type(InType), Value(InValue), Line(InLine), Column(InCol), Offset(InOffset)
 	{
+		Span.Line = InLine;
+		Span.Column = InCol;
+		Span.Offset = InOffset;
 	}
 	
 	/** Human-readable token type name */
@@ -113,6 +120,12 @@ public:
 	 */
 	static bool Tokenize(const FString& Source, TArray<FAnimLangToken>& OutTokens, TArray<FAnimLangLexError>& OutErrors, bool bKeepComments = false);
 
+	/** Tokenize with source-file spans and parse-compatible errors. */
+	static TArray<FAnimLangToken> Tokenize(
+		const FString& Source,
+		const FString& SourceFile,
+		TArray<FAnimLangParseError>* OutErrors = nullptr);
+
 private:
 	// Internal state
 	const TCHAR* Src;
@@ -120,8 +133,15 @@ private:
 	int32 Len;
 	int32 Line;
 	int32 Col;
+	FString SourceFile;
 	
-	FAnimLangTokenizer(const FString& Source);
+	FAnimLangTokenizer(const FString& Source, const FString& InSourceFile);
+	static bool TokenizeInternal(
+		const FString& Source,
+		const FString& SourceFile,
+		TArray<FAnimLangToken>& OutTokens,
+		TArray<FAnimLangLexError>& OutErrors,
+		bool bKeepComments);
 	
 	// Character helpers
 	TCHAR Peek() const;

@@ -6,6 +6,27 @@
 
 // ========== FAnimLangDiagnostic ==========
 
+FAnimLangDiagnostic::FAnimLangDiagnostic(
+	EAnimLangDiagSeverity InSeverity,
+	EAnimLangDiagCategory InCategory,
+	const FString& InMessage,
+	const FAnimLangSourceLoc& InLocation)
+	: Severity(InSeverity)
+	, Category(InCategory)
+	, Message(InMessage)
+	, Location(InLocation)
+{
+}
+
+FAnimLangDiagnostic& FAnimLangDiagnostic::AddRelatedLocation(
+	const FAnimLangSourceLoc& RelatedLocation,
+	const FString& RelatedMessage)
+{
+	RelatedLocations.Add(RelatedLocation);
+	RelatedMessages.Add(RelatedMessage.IsEmpty() ? TEXT("related") : RelatedMessage);
+	return *this;
+}
+
 FString FAnimLangDiagnostic::ToString() const
 {
 	FString SevStr;
@@ -26,6 +47,8 @@ FString FAnimLangDiagnostic::ToString() const
 	case EAnimLangDiagCategory::Semantic:  CatStr = TEXT("semantic"); break;
 	case EAnimLangDiagCategory::Import:    CatStr = TEXT("import"); break;
 	case EAnimLangDiagCategory::RoundTrip: CatStr = TEXT("roundtrip"); break;
+	case EAnimLangDiagCategory::Module:     CatStr = TEXT("module"); break;
+	case EAnimLangDiagCategory::Capability: CatStr = TEXT("capability"); break;
 	}
 	
 	FString Result = FString::Printf(TEXT("[%s/%s] %s: %s"), *SevStr, *CatStr, *Location.ToString(), *Message);
@@ -117,13 +140,32 @@ FAnimLangDiagnostic FAnimLangDiagnostic::SemanticWarning(const FString& Msg, int
 
 void FAnimLangDiagnostics::Add(EAnimLangDiagSeverity Sev, EAnimLangDiagCategory Cat, const FString& Msg, int32 Line, int32 Col)
 {
-	FAnimLangDiagnostic D;
-	D.Severity = Sev;
-	D.Category = Cat;
-	D.Message = Msg;
-	D.Location.Line = Line;
-	D.Location.Column = Col;
-	Items.Add(D);
+	FAnimLangSourceLoc Location;
+	Location.Line = Line;
+	Location.Column = Col;
+	Items.Emplace(Sev, Cat, Msg, Location);
+}
+
+void FAnimLangDiagnostics::Add(
+	EAnimLangDiagSeverity Sev,
+	EAnimLangDiagCategory Cat,
+	const FString& Msg,
+	const FAnimLangSourceLoc& Location)
+{
+	Items.Emplace(Sev, Cat, Msg, Location);
+}
+
+void FAnimLangDiagnostics::Add(
+	EAnimLangDiagSeverity Sev,
+	EAnimLangDiagCategory Cat,
+	const FString& Msg,
+	const FAnimLangSourceLoc& Location,
+	const FAnimLangSourceLoc& RelatedLocation,
+	const FString& RelatedMessage)
+{
+	FAnimLangDiagnostic Diagnostic(Sev, Cat, Msg, Location);
+	Diagnostic.AddRelatedLocation(RelatedLocation, RelatedMessage);
+	Items.Add(MoveTemp(Diagnostic));
 }
 
 bool FAnimLangDiagnostics::HasErrors() const

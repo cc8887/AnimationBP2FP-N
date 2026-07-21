@@ -26,7 +26,9 @@ enum class EAnimLangDiagCategory : uint8
 	Type,      // Type mismatch
 	Semantic,  // Semantic error (undefined ref, duplicate define, etc.)
 	Import,    // Import/reconstruction error
-	RoundTrip  // Round-trip validation issue
+	RoundTrip, // Round-trip validation issue
+	Module,    // Module identity, import, or dependency error
+	Capability // Cross-module operation is not permitted
 };
 
 /**
@@ -55,6 +57,13 @@ struct FAnimLangSourceLoc
  */
 struct ANIMBP2FP_API FAnimLangDiagnostic
 {
+	FAnimLangDiagnostic() = default;
+	FAnimLangDiagnostic(
+		EAnimLangDiagSeverity InSeverity,
+		EAnimLangDiagCategory InCategory,
+		const FString& InMessage,
+		const FAnimLangSourceLoc& InLocation);
+
 	EAnimLangDiagSeverity Severity;
 	EAnimLangDiagCategory Category;
 	FString Message;
@@ -69,6 +78,7 @@ struct ANIMBP2FP_API FAnimLangDiagnostic
 	
 	FString ToString() const;
 	FString ToCompactString() const;  // "file:line:col: error: message"
+	FAnimLangDiagnostic& AddRelatedLocation(const FAnimLangSourceLoc& RelatedLocation, const FString& RelatedMessage = FString());
 	
 	// Convenience constructors
 	static FAnimLangDiagnostic LexError(const FString& Msg, int32 Line, int32 Col);
@@ -87,6 +97,14 @@ struct ANIMBP2FP_API FAnimLangDiagnostics
 	
 	void Add(const FAnimLangDiagnostic& Diag) { Items.Add(Diag); }
 	void Add(EAnimLangDiagSeverity Sev, EAnimLangDiagCategory Cat, const FString& Msg, int32 Line = 0, int32 Col = 0);
+	void Add(EAnimLangDiagSeverity Sev, EAnimLangDiagCategory Cat, const FString& Msg, const FAnimLangSourceLoc& Location);
+	void Add(
+		EAnimLangDiagSeverity Sev,
+		EAnimLangDiagCategory Cat,
+		const FString& Msg,
+		const FAnimLangSourceLoc& Location,
+		const FAnimLangSourceLoc& RelatedLocation,
+		const FString& RelatedMessage = FString());
 	
 	bool HasErrors() const;
 	bool HasWarnings() const;
