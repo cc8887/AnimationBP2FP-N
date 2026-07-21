@@ -51,6 +51,9 @@ static bool IsAnimPropertyValueForm(const FString& FormName)
 		|| FormName == TEXT("bind-var")
 		|| FormName == TEXT("bind-path")
 		|| FormName == TEXT("subgraph-ref")
+		|| FormName == TEXT("value-expr")
+		|| FormName == TEXT("pin-names")
+		|| FormName == TEXT("member-ref")
 		|| FormName == TEXT("unsupported-ref");
 }
 
@@ -338,6 +341,11 @@ void FAnimLangParser::ParseTopLevel(TSharedPtr<FAnimGraphAST> AST)
 			ParseLogicGraphs(AST);
 			return;
 		}
+		if (Peek(1).Type == EAnimLangTokenType::Identifier && Peek(1).Value == TEXT("animation-layers"))
+		{
+			ParseAnimationLayers(AST);
+			return;
+		}
 		if (Peek(1).Type == EAnimLangTokenType::Identifier && Peek(1).Value == TEXT("metadata"))
 		{
 			ParseMetadata(AST);
@@ -381,8 +389,17 @@ void FAnimLangParser::ParseVariables(TSharedPtr<FAnimGraphAST> AST)
 	
 	while (!IsAtEnd() && !Check(EAnimLangTokenType::RBracket))
 	{
+		const int32 StartPos = Pos;
 		FVariableDef Var = ParseVarDef();
-		AST->Variables.Add(Var);
+		if (!Var.Name.IsEmpty())
+		{
+			AST->Variables.Add(MoveTemp(Var));
+		}
+		if (Pos == StartPos)
+		{
+			Error(TEXT("Variable parser made no progress"));
+			Advance();
+		}
 	}
 	
 	Expect(EAnimLangTokenType::RBracket, TEXT("variables"));
@@ -409,17 +426,25 @@ FVariableDef FAnimLangParser::ParseVarDef()
 		Error(TEXT("Expected type name in variable definition"));
 	}
 	
-	// Variable name as keyword (:VarName)
+	// Explicit :name "Variable Name" syntax, plus the legacy :VariableName shorthand.
 	if (Check(EAnimLangTokenType::Keyword))
 	{
-		Var.Name = Advance().Value;
+		const FString NameToken = Advance().Value;
+		if (NameToken == TEXT("name") && Check(EAnimLangTokenType::String))
+		{
+			Var.Name = Advance().Value;
+		}
+		else
+		{
+			Var.Name = NameToken;
+		}
 	}
 	else
 	{
 		Error(TEXT("Expected :name in variable definition"));
 	}
 	
-	while (!Check(EAnimLangTokenType::RParen))
+	while (!IsAtEnd() && !Check(EAnimLangTokenType::RParen))
 	{
 		if (Check(EAnimLangTokenType::Keyword))
 		{
@@ -470,7 +495,11 @@ FVariableDef FAnimLangParser::ParseVarDef()
 		break;
 	}
 	
-	Expect(EAnimLangTokenType::RParen, TEXT("variable definition"));
+	if (!Expect(EAnimLangTokenType::RParen, TEXT("variable definition")))
+	{
+		Synchronize();
+		Match(EAnimLangTokenType::RParen);
+	}
 	return Var;
 }
 
@@ -697,6 +726,85 @@ FLogicGraphDef FAnimLangParser::ParseLogicGraphDef()
 	return Graph;
 }
 
+void FAnimLangParser::ParseAnimationLayers(TSharedPtr<FAnimGraphAST> AST)
+{
+	Expect(EAnimLangTokenType::LParen, TEXT("animation-layers"));
+	if (!CheckValue(EAnimLangTokenType::Identifier, TEXT("animation-layers")))
+	{
+		Error(TEXT("Expected 'animation-layers'"));
+		return;
+	}
+	Advance();
+	while (!IsAtEnd() && !Check(EAnimLangTokenType::RParen))
+	{
+		if (Check(EAnimLangTokenType::LParen)
+			&& Peek(1).Type == EAnimLangTokenType::Identifier
+			&& Peek(1).Value == TEXT("animation-layer"))
+		{
+			AST->AnimationLayers.Add(ParseAnimationLayerDef());
+			continue;
+		}
+		Error(TEXT("Expected animation-layer entry"));
+		Advance();
+	}
+	Expect(EAnimLangTokenType::RParen, TEXT("animation-layers"));
+}
+
+FAnimationLayerDef FAnimLangParser::ParseAnimationLayerDef()
+{
+	FAnimationLayerDef Layer;
+	Expect(EAnimLangTokenType::LParen, TEXT("animation-layer"));
+	if (!CheckValue(EAnimLangTokenType::Identifier, TEXT("animation-layer")))
+	{
+		Error(TEXT("Expected 'animation-layer'"));
+		return Layer;
+	}
+	Advance();
+	while (!IsAtEnd() && !Check(EAnimLangTokenType::RParen))
+	{
+		if (Check(EAnimLangTokenType::LParen)
+			&& Peek(1).Type == EAnimLangTokenType::Identifier
+			&& Peek(1).Value == TEXT("define"))
+		{
+			Expect(EAnimLangTokenType::LParen, TEXT("animation-layer define"));
+			Advance(); // define
+			FCachedPoseDef& Def = Layer.Defines.AddDefaulted_GetRef();
+			if (Check(EAnimLangTokenType::Identifier)) Def.Name = Advance().Value;
+			else Error(TEXT("Expected animation-layer define name"));
+			if (Check(EAnimLangTokenType::Keyword) && Current().Value == TEXT("cache-name"))
+			{
+				Advance();
+				if (Check(EAnimLangTokenType::String)) Def.Name = Advance().Value;
+				else Error(TEXT("Expected string after animation-layer define :cache-name"));
+			}
+			Def.Body = ParseNodeExpr();
+			Expect(EAnimLangTokenType::RParen, TEXT("animation-layer define"));
+			continue;
+		}
+		if (!Check(EAnimLangTokenType::Keyword))
+		{
+			Error(TEXT("Expected animation-layer field keyword or define"));
+			Advance();
+			continue;
+		}
+		const FString Key = Advance().Value;
+		if (Key == TEXT("root"))
+		{
+			Layer.RootNode = ParseNodeExpr();
+			continue;
+		}
+		const FString Value = (Check(EAnimLangTokenType::String) || Check(EAnimLangTokenType::Identifier))
+			? Advance().Value : ParseRawExpressionText();
+		if (Key == TEXT("interface")) Layer.InterfaceClassPath = Value;
+		else if (Key == TEXT("graph-name")) Layer.GraphName = Value;
+		else if (Key == TEXT("schema")) Layer.SchemaClassPath = Value;
+		else if (Key == TEXT("graph-guid")) Layer.GraphGuid = Value;
+		else Error(FString::Printf(TEXT("Unknown animation-layer field :%s"), *Key));
+	}
+	Expect(EAnimLangTokenType::RParen, TEXT("animation-layer"));
+	return Layer;
+}
+
 void FAnimLangParser::ParseMetadata(TSharedPtr<FAnimGraphAST> AST)
 {
 	Expect(EAnimLangTokenType::LParen, TEXT("metadata"));
@@ -782,6 +890,11 @@ FAnimDependency FAnimLangParser::ParseDependency()
 			Dependency.AssetMetadata = ParseAnimationAssetMetadata();
 			continue;
 		}
+		if (Key == TEXT("typed-snapshot"))
+		{
+			Dependency.TypedSnapshot = ParseExternalAssetTypedSnapshot();
+			continue;
+		}
 		if (!(Check(EAnimLangTokenType::String) || Check(EAnimLangTokenType::Identifier)))
 		{
 			Error(FString::Printf(TEXT("Expected scalar dependency value for :%s"), *Key));
@@ -797,6 +910,84 @@ FAnimDependency FAnimLangParser::ParseDependency()
 	}
 	Expect(EAnimLangTokenType::RParen, TEXT("dependency"));
 	return Dependency;
+}
+
+FExternalAssetTypedSnapshot FAnimLangParser::ParseExternalAssetTypedSnapshot()
+{
+	FExternalAssetTypedSnapshot Snapshot;
+	if (!Expect(EAnimLangTokenType::LParen, TEXT("asset-structure"))) return Snapshot;
+	if (!CheckValue(EAnimLangTokenType::Identifier, TEXT("asset-structure")))
+	{
+		Error(TEXT("Expected 'asset-structure'"));
+		return Snapshot;
+	}
+	Advance();
+	Snapshot.bHasSnapshot = true;
+	while (!IsAtEnd() && !Check(EAnimLangTokenType::RParen))
+	{
+		if (!Check(EAnimLangTokenType::Keyword))
+		{
+			Error(TEXT("Expected typed snapshot field"));
+			Advance();
+			continue;
+		}
+		const FString Key = Advance().Value;
+		if (Key == TEXT("kind") || Key == TEXT("stable-hash"))
+		{
+			if (Check(EAnimLangTokenType::String) || Check(EAnimLangTokenType::Identifier))
+			{
+				const FString Value = Advance().Value;
+				(Key == TEXT("kind") ? Snapshot.Kind : Snapshot.StableHash) = Value;
+			}
+			else Error(FString::Printf(TEXT("Expected scalar typed snapshot value for :%s"), *Key));
+		}
+		else if (Key == TEXT("fields"))
+		{
+			Expect(EAnimLangTokenType::LBracket, TEXT("fields"));
+			while (!IsAtEnd() && !Check(EAnimLangTokenType::RBracket))
+			{
+				Expect(EAnimLangTokenType::LParen, TEXT("field"));
+				if (CheckValue(EAnimLangTokenType::Identifier, TEXT("field"))) Advance(); else Error(TEXT("Expected 'field'"));
+				FExternalAssetSnapshotField Field;
+				while (!IsAtEnd() && !Check(EAnimLangTokenType::RParen))
+				{
+					if (!Check(EAnimLangTokenType::Keyword)) { Error(TEXT("Expected field property")); Advance(); continue; }
+					const FString FieldKey = Advance().Value;
+					if (!(Check(EAnimLangTokenType::String) || Check(EAnimLangTokenType::Identifier)))
+					{
+						Error(TEXT("Expected scalar field value"));
+						if (IsValueStart()) ParseRawExpressionText();
+						continue;
+					}
+					const FString Value = Advance().Value;
+					if (FieldKey == TEXT("path")) Field.Path = Value;
+					else if (FieldKey == TEXT("type")) Field.Type = Value;
+					else if (FieldKey == TEXT("value")) Field.Value = Value;
+					else Error(FString::Printf(TEXT("Unknown typed field property :%s"), *FieldKey));
+				}
+				Expect(EAnimLangTokenType::RParen, TEXT("field"));
+				Snapshot.Fields.Add(MoveTemp(Field));
+			}
+			Expect(EAnimLangTokenType::RBracket, TEXT("fields"));
+		}
+		else if (Key == TEXT("object-references"))
+		{
+			Expect(EAnimLangTokenType::LBracket, TEXT("object-references"));
+			while (!IsAtEnd() && !Check(EAnimLangTokenType::RBracket))
+			{
+				if (Check(EAnimLangTokenType::String) || Check(EAnimLangTokenType::Identifier)) Snapshot.ObjectReferences.Add(Advance().Value);
+				else { Error(TEXT("Expected object reference")); Advance(); }
+			}
+			Expect(EAnimLangTokenType::RBracket, TEXT("object-references"));
+		}
+		else
+		{
+			Error(FString::Printf(TEXT("Unknown typed snapshot property :%s"), *Key));
+			if (IsValueStart()) ParseRawExpressionText();
+		}
+	}
+	Expect(EAnimLangTokenType::RParen, TEXT("asset-structure"));
+	return Snapshot;
 }
 
 FAnimationAssetMetadataSnapshot FAnimLangParser::ParseAnimationAssetMetadata()
@@ -913,6 +1104,12 @@ void FAnimLangParser::ParseDefine(TSharedPtr<FAnimGraphAST> AST)
 		Error(TEXT("Expected define name"));
 		Synchronize();
 		return;
+	}
+	if (Check(EAnimLangTokenType::Keyword) && Current().Value == TEXT("cache-name"))
+	{
+		Advance();
+		if (Check(EAnimLangTokenType::String)) Def.Name = Advance().Value;
+		else Error(TEXT("Expected string after define :cache-name"));
 	}
 	
 	// Body: a node expression
@@ -1115,9 +1312,7 @@ FString FAnimLangParser::ParseValue()
 	// String literal
 	if (Check(EAnimLangTokenType::String))
 	{
-		FString Val = FString::Printf(TEXT("\"%s\""), *Current().Value);
-		Advance();
-		return Val;
+		return EscapeStringForDSL(Advance().Value);
 	}
 	
 	// Number

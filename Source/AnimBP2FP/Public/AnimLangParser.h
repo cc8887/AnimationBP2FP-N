@@ -39,7 +39,8 @@ struct ANIMBP2FP_API FAnimLangParseError
  *                 | ':generated-type' IDENT
  *                 | ':update-group' STRING
  *                 | ':dsl' RawExpr
- *   VarDef      ::= '(' TypeName ':' IDENT Value? ')'
+ *   VarDef      ::= '(' TypeName ':name' STRING VarField* ')'
+ *                 | '(' TypeName ':' IDENT VarField* ')'       -- legacy short name
  *   NodeExpr    ::= '(' NodeType Property* PoseInput* ')'
  *                 | IDENT                                    -- variable reference (UseCachedPose)
  *   Property    ::= ':' KEY Value
@@ -101,10 +102,13 @@ private:
 	FHelperGraphDef ParseHelperGraphDef();
 	void ParseLogicGraphs(TSharedPtr<FAnimGraphAST> AST);
 	FLogicGraphDef ParseLogicGraphDef();
+	void ParseAnimationLayers(TSharedPtr<FAnimGraphAST> AST);
+	FAnimationLayerDef ParseAnimationLayerDef();
 	void ParseMetadata(TSharedPtr<FAnimGraphAST> AST);
 	void ParseDependencies(TSharedPtr<FAnimGraphAST> AST);
 	FAnimDependency ParseDependency();
 	FAnimationAssetMetadataSnapshot ParseAnimationAssetMetadata();
+	FExternalAssetTypedSnapshot ParseExternalAssetTypedSnapshot();
 	void ParseDefine(TSharedPtr<FAnimGraphAST> AST);
 	TSharedPtr<FAnimNodeAST> ParseNodeExpr();
 	TSharedPtr<FAnimNodeAST> ParseNodeBody();  // Inside parentheses, after node type

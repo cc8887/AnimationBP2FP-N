@@ -158,4 +158,71 @@ bool FAnimBP2FPImporterRestoresLogicGraphs::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimBP2FPPureFunctionFlagsRoundTrip,
+	"AnimBP2FP.LogicGraphs.PureFunctionFlagsRoundTrip",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FAnimBP2FPPureFunctionFlagsRoundTrip::RunTest(const FString& Parameters)
+{
+	using namespace AnimBP2FPLogicGraphTests;
+
+	UAnimBlueprint* Source = NewObject<UAnimBlueprint>(GetTransientPackage(), TEXT("ABP_PureFunctionSource"));
+	UEdGraph* SourceGraph = AddGraph(Source, TEXT("ComputePureValue"), true);
+	UK2Node_FunctionEntry* SourceEntry = nullptr;
+	for (UEdGraphNode* Node : SourceGraph->Nodes)
+	{
+		if ((SourceEntry = Cast<UK2Node_FunctionEntry>(Node))) break;
+	}
+	TestNotNull(TEXT("source function entry exists"), SourceEntry);
+	if (!SourceEntry) return false;
+	SourceEntry->SetExtraFlags(SourceEntry->GetExtraFlags() | FUNC_BlueprintPure);
+
+	const TSharedPtr<FAnimGraphAST> AST = FAnimBPExporter::ExportToAST(Source);
+	TestTrue(TEXT("pure function source exports"), AST.IsValid());
+	if (!AST.IsValid()) return false;
+	const FLogicGraphDef* PureGraphDef = AST->LogicGraphs.FindByPredicate(
+		[](const FLogicGraphDef& Def) { return Def.GraphName == TEXT("ComputePureValue"); });
+	TestNotNull(TEXT("pure function logic graph exports"), PureGraphDef);
+	if (!PureGraphDef) return false;
+	TestTrue(TEXT("function DSL records pure flag"), PureGraphDef->DSL.Contains(TEXT(":pure true")));
+
+	UAnimBlueprint* Destination = Cast<UAnimBlueprint>(FKismetEditorUtilities::CreateBlueprint(
+		UAnimInstance::StaticClass(), GetTransientPackage(), TEXT("ABP_PureFunctionDestination"),
+		BPTYPE_Normal, UAnimBlueprint::StaticClass(), UAnimBlueprintGeneratedClass::StaticClass(),
+		FName(TEXT("AnimBP2FPPureFunctionFlagsTest"))));
+	TestNotNull(TEXT("pure function destination is created"), Destination);
+	if (!Destination) return false;
+
+	const FAnimBPImporter::FUpdateResult Result = FAnimBPImporter::UpdateBlueprintDetailed(Destination, AST->ToString());
+	TestTrue(TEXT("pure function imports and compiles"), Result.bSuccess);
+
+	UEdGraph* DestinationGraph = nullptr;
+	for (UEdGraph* Graph : Destination->FunctionGraphs)
+	{
+		if (Graph && Graph->GetName() == TEXT("ComputePureValue"))
+		{
+			DestinationGraph = Graph;
+			break;
+		}
+	}
+	TestNotNull(TEXT("destination pure function graph exists"), DestinationGraph);
+	UK2Node_FunctionEntry* DestinationEntry = nullptr;
+	if (DestinationGraph)
+	{
+		for (UEdGraphNode* Node : DestinationGraph->Nodes)
+		{
+			if ((DestinationEntry = Cast<UK2Node_FunctionEntry>(Node))) break;
+		}
+	}
+	TestTrue(TEXT("destination entry preserves BlueprintPure"), DestinationEntry
+		&& (DestinationEntry->GetFunctionFlags() & FUNC_BlueprintPure) != 0);
+
+	UFunction* GeneratedFunction = Destination->SkeletonGeneratedClass
+		? Destination->SkeletonGeneratedClass->FindFunctionByName(TEXT("ComputePureValue")) : nullptr;
+	TestTrue(TEXT("skeleton function preserves BlueprintPure"), GeneratedFunction
+		&& GeneratedFunction->HasAnyFunctionFlags(FUNC_BlueprintPure));
+	return true;
+}
+
 #endif

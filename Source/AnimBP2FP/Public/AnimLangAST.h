@@ -124,8 +124,20 @@ struct ANIMBP2FP_API FStateMachineAST
 	
 	struct FState
 	{
+		enum class EKind : uint8
+		{
+			State,
+			Alias,
+			Conduit
+		};
+
+		EKind Kind = EKind::State;
 		FString Name;
 		TSharedPtr<FAnimNodeAST> Animation;
+		FString ChildId;
+		bool bGlobalAlias = false;
+		TArray<FString> AliasedStates;
+		FString RuleGraph;
 		
 		// Optional: 完成后自动转换
 		FString TransitionTo;
@@ -215,6 +227,19 @@ struct ANIMBP2FP_API FLogicGraphDef
 	FString ToString(int32 Indent = 0) const;
 };
 
+/** A named Animation Layer implementation owned by an implemented interface. */
+struct ANIMBP2FP_API FAnimationLayerDef
+{
+	FString InterfaceClassPath;
+	FString GraphName;
+	FString SchemaClassPath;
+	FString GraphGuid;
+	TArray<FCachedPoseDef> Defines;
+	TSharedPtr<FAnimNodeAST> RootNode;
+
+	FString ToString(int32 Indent = 0) const;
+};
+
 struct ANIMBP2FP_API FAnimNotifySnapshot
 {
 	FString ClassPath;
@@ -252,6 +277,24 @@ struct ANIMBP2FP_API FAnimationAssetMetadataSnapshot
 	TArray<FString> UnsupportedFields;
 };
 
+/** One canonical, typed property captured from an externally-owned semantic asset. */
+struct ANIMBP2FP_API FExternalAssetSnapshotField
+{
+	FString Path;
+	FString Type;
+	FString Value;
+};
+
+/** Read-only structural snapshot for Chooser, PoseSearch, and similar decision assets. */
+struct ANIMBP2FP_API FExternalAssetTypedSnapshot
+{
+	bool bHasSnapshot = false;
+	FString Kind;
+	FString StableHash;
+	TArray<FExternalAssetSnapshotField> Fields;
+	TArray<FString> ObjectReferences;
+};
+
 struct ANIMBP2FP_API FAnimDependency
 {
 	FString ObjectPath;
@@ -259,6 +302,7 @@ struct ANIMBP2FP_API FAnimDependency
 	FString Role;
 	FString Mode = TEXT("external");
 	FAnimationAssetMetadataSnapshot AssetMetadata;
+	FExternalAssetTypedSnapshot TypedSnapshot;
 
 	FString ToString(int32 Indent = 0) const;
 };
@@ -282,6 +326,7 @@ struct ANIMBP2FP_API FAnimGraphAST
 	TArray<FHelperGraphDef> HelperGraphs;  // (helpers ...) 块 — BlueprintLisp helper subgraphs for complex value bindings
 	TArray<FLogicGraphDef> LogicGraphs;    // Ordinary EventGraph/function graphs exported as BlueprintLisp
 	bool bHasLogicGraphsBlock = false;     // Distinguishes legacy DSL from an explicit empty replacement set
+	TArray<FAnimationLayerDef> AnimationLayers; // Named AnimLayer interface implementation graphs
 	TArray<FCachedPoseDef> Defines;  // (define ...) 块 — SaveCachedPose 节点
 	TSharedPtr<FAnimNodeAST> RootNode;
 

@@ -132,6 +132,10 @@ private:
 	/** Restore ordinary EventGraph/function graphs via strict BlueprintLisp import. */
 	static bool BuildLogicGraphs(UAnimBlueprint* Blueprint, const TArray<FLogicGraphDef>& LogicGraphs, bool bReplaceExistingSet);
 
+	/** Restore named Animation Layer interface graphs and their pose trees. */
+	static bool BuildAnimationLayers(UAnimBlueprint* Blueprint, const TArray<FAnimationLayerDef>& Layers,
+		const TMap<FString, FHelperGraphDef>* HelperGraphs = nullptr);
+
 	/** Build a single animation node from AST, placing it in the given graph */
 	static UAnimGraphNode_Base* BuildAnimNode(const TSharedPtr<FAnimNodeAST>& NodeAST, UEdGraph* Graph,
 		const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes = nullptr,

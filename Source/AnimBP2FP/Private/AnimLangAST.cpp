@@ -81,11 +81,16 @@ FString FAnimNodeAST::ToString(int32 Indent) const
 	}
 	Result += FString::Printf(TEXT(" :coverage %s"), CoverageToAnimLangString(Coverage));
 	
-	// Add properties (non-pose parameters)
-	for (const auto& Pair : Properties)
+	// Add properties (non-pose parameters) in a stable order. TMap iteration
+	// depends on hash allocation history, which must not affect canonical DSL.
+	TArray<FString> PropertyKeys;
+	Properties.GetKeys(PropertyKeys);
+	PropertyKeys.Sort();
+	for (const FString& PropertyKey : PropertyKeys)
 	{
+		const FString& PropertyValue = Properties.FindChecked(PropertyKey);
 		// If the value is a quoted string, re-escape internal quotes for correct DSL output
-		FString OutputValue = Pair.Value;
+		FString OutputValue = PropertyValue;
 		if (OutputValue.StartsWith(TEXT("\"")) && OutputValue.EndsWith(TEXT("\"")))
 		{
 			// Extract inner content (strip outer quotes)
@@ -95,7 +100,7 @@ FString FAnimNodeAST::ToString(int32 Indent) const
 			Inner.ReplaceInline(TEXT("\""), TEXT("\\\""));
 			OutputValue = FString::Printf(TEXT("\"%s\""), *Inner);
 		}
-		Result += FString::Printf(TEXT(" :%s %s"), *Pair.Key, *OutputValue);
+		Result += FString::Printf(TEXT(" :%s %s"), *PropertyKey, *OutputValue);
 	}
 	
 	// Add named children (pose inputs)
@@ -274,7 +279,7 @@ FString FVariableDef::ToString() const
 		default:                  TypeStr = TEXT("unknown"); break;
 	}
 	
-	FString Result = FString::Printf(TEXT("(%s :%s"), *TypeStr, *Name);
+	FString Result = FString::Printf(TEXT("(%s :name %s"), *TypeStr, *EscapeQuotedStringForDSL(Name));
 	if (!PinCategory.IsEmpty())
 	{
 		Result += FString::Printf(TEXT(" :pin-category %s"), *EscapeQuotedStringForDSL(PinCategory));
@@ -368,6 +373,42 @@ FString FLogicGraphDef::ToString(int32 Indent) const
 	return Result;
 }
 
+FString FAnimationLayerDef::ToString(int32 Indent) const
+{
+	const FString I = FString::ChrN(Indent, ' ');
+	const FString C = FString::ChrN(Indent + 2, ' ');
+	const FString D = FString::ChrN(Indent + 4, ' ');
+	FString Result = FString::Printf(TEXT("%s(animation-layer"), *I);
+	Result += FString::Printf(TEXT("\n%s:interface %s"), *C, *EscapeQuotedStringForDSL(InterfaceClassPath));
+	Result += FString::Printf(TEXT("\n%s:graph-name %s"), *C, *EscapeQuotedStringForDSL(GraphName));
+	if (!SchemaClassPath.IsEmpty())
+	{
+		Result += FString::Printf(TEXT("\n%s:schema %s"), *C, *EscapeQuotedStringForDSL(SchemaClassPath));
+	}
+	if (!GraphGuid.IsEmpty())
+	{
+		Result += FString::Printf(TEXT("\n%s:graph-guid %s"), *C, *EscapeQuotedStringForDSL(GraphGuid));
+	}
+	for (const FCachedPoseDef& Def : Defines)
+	{
+		Result += FString::Printf(TEXT("\n%s(define %s"), *C, *Def.GetIdentifier());
+		if (Def.Name != Def.GetIdentifier())
+		{
+			Result += FString::Printf(TEXT(" :cache-name %s"), *EscapeQuotedStringForDSL(Def.Name));
+		}
+		Result += TEXT("\n");
+		Result += Def.Body.IsValid() ? Def.Body->ToString(Indent + 4) : D + TEXT("(identity-pose)");
+		Result += FString::Printf(TEXT("\n%s)"), *C);
+	}
+	if (RootNode.IsValid())
+	{
+		Result += FString::Printf(TEXT("\n%s:root\n"), *C);
+		Result += RootNode->ToString(Indent + 4);
+	}
+	Result += FString::Printf(TEXT("\n%s)"), *I);
+	return Result;
+}
+
 FString FAnimDependency::ToString(int32 Indent) const
 {
 	const FString I = FString::ChrN(Indent, ' ');
@@ -425,6 +466,31 @@ FString FAnimDependency::ToString(int32 Indent) const
 		{
 			Result += TEXT(" :unsupported [");
 			for (const FString& Field : AssetMetadata.UnsupportedFields) Result += TEXT(" ") + EscapeQuotedStringForDSL(Field);
+			Result += TEXT(" ]");
+		}
+		Result += TEXT(")");
+	}
+	if (TypedSnapshot.bHasSnapshot)
+	{
+		Result += FString::Printf(TEXT("\n%s:typed-snapshot (asset-structure :kind %s :stable-hash %s"),
+			*C, *EscapeQuotedStringForDSL(TypedSnapshot.Kind), *EscapeQuotedStringForDSL(TypedSnapshot.StableHash));
+		if (!TypedSnapshot.Fields.IsEmpty())
+		{
+			Result += TEXT(" :fields [");
+			for (const FExternalAssetSnapshotField& Field : TypedSnapshot.Fields)
+			{
+				Result += FString::Printf(TEXT(" (field :path %s :type %s :value %s)"),
+					*EscapeQuotedStringForDSL(Field.Path), *EscapeQuotedStringForDSL(Field.Type), *EscapeQuotedStringForDSL(Field.Value));
+			}
+			Result += TEXT(" ]");
+		}
+		if (!TypedSnapshot.ObjectReferences.IsEmpty())
+		{
+			Result += TEXT(" :object-references [");
+			for (const FString& Reference : TypedSnapshot.ObjectReferences)
+			{
+				Result += TEXT(" ") + EscapeQuotedStringForDSL(Reference);
+			}
 			Result += TEXT(" ]");
 		}
 		Result += TEXT(")");
@@ -529,6 +595,22 @@ FString FAnimGraphAST::ToString() const
 		}
 		Result += TEXT("  )\n");
 	}
+
+	if (!AnimationLayers.IsEmpty())
+	{
+		TArray<FAnimationLayerDef> SortedLayers = AnimationLayers;
+		SortedLayers.Sort([](const FAnimationLayerDef& A, const FAnimationLayerDef& B)
+		{
+			if (A.InterfaceClassPath != B.InterfaceClassPath) return A.InterfaceClassPath < B.InterfaceClassPath;
+			return A.GraphName < B.GraphName;
+		});
+		Result += TEXT("  (animation-layers\n");
+		for (const FAnimationLayerDef& Layer : SortedLayers)
+		{
+			Result += Layer.ToString(4) + TEXT("\n");
+		}
+		Result += TEXT("  )\n");
+	}
 	
 	// Defines (SaveCachedPose -> (define name body))
 	if (Defines.Num() > 0)
@@ -536,7 +618,12 @@ FString FAnimGraphAST::ToString() const
 		Result += TEXT("\n");
 		for (const auto& Def : Defines)
 		{
-			Result += FString::Printf(TEXT("  (define %s\n"), *Def.GetIdentifier());
+			Result += FString::Printf(TEXT("  (define %s"), *Def.GetIdentifier());
+			if (Def.Name != Def.GetIdentifier())
+			{
+				Result += FString::Printf(TEXT(" :cache-name %s"), *EscapeQuotedStringForDSL(Def.Name));
+			}
+			Result += TEXT("\n");
 			if (Def.Body.IsValid())
 			{
 				Result += Def.Body->ToString(4) + TEXT(")\n\n");

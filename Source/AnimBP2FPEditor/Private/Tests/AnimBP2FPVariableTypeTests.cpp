@@ -116,6 +116,39 @@ bool FAnimBP2FPVariablePinTypeSurvivesDSLRoundTrip::RunTest(const FString& Param
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimBP2FPVariableNameWithSpacesRoundTrips,
+	"AnimBP2FP.VariableTypes.NameWithSpacesRoundTrips",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FAnimBP2FPVariableNameWithSpacesRoundTrips::RunTest(const FString& Parameters)
+{
+	TSharedPtr<FAnimGraphAST> AST = MakeShared<FAnimGraphAST>();
+	AST->Name = TEXT("ABP_SpacedVariableName");
+	FVariableDef& Variable = AST->Variables.AddDefaulted_GetRef();
+	Variable.Name = TEXT("MM Search Cost");
+	Variable.Type = EPinType::Float;
+	Variable.PinCategory = UEdGraphSchema_K2::PC_Real.ToString();
+
+	const FString DSL = AST->ToString();
+	const bool bUsesExplicitQuotedName = DSL.Contains(TEXT(":name \"MM Search Cost\""));
+	TestTrue(TEXT("spaced variable name uses explicit quoted syntax"), bUsesExplicitQuotedName);
+	if (!bUsesExplicitQuotedName)
+	{
+		return false;
+	}
+
+	TArray<FAnimLangParseError> Errors;
+	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(DSL, Errors);
+	TestTrue(TEXT("spaced variable DSL parses"), Parsed.IsValid() && Errors.IsEmpty());
+	TestEqual(TEXT("one variable survives"), Parsed.IsValid() ? Parsed->Variables.Num() : 0, 1);
+	if (Parsed.IsValid() && Parsed->Variables.Num() == 1)
+	{
+		TestEqual(TEXT("full variable name survives"), Parsed->Variables[0].Name, Variable.Name);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPVariableExactTypeDiffAndMapFailure,
 	"AnimBP2FP.VariableTypes.ExactTypeDiffAndMapFailure",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)

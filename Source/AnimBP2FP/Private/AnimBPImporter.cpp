@@ -34,12 +34,20 @@
 #include "AnimationStateMachineGraph.h"
 #include "AnimationGraphSchema.h"
 #include "AnimStateEntryNode.h"
+#include "AnimStateNodeBase.h"
 #include "AnimStateNode.h"
+#include "AnimStateAliasNode.h"
+#include "AnimStateConduitNode.h"
 #include "AnimStateTransitionNode.h"
 #include "AnimGraphNode_ModifyCurve.h"
 #include "AnimGraphNode_BlendListBase.h"
 #include "AnimGraphNode_LayeredBoneBlend.h"
 #include "AnimGraphNode_LinkedAnimLayer.h"
+#include "K2Node_AnimGetter.h"
+#include "AnimGraphNode_LinkedInputPose.h"
+#include "AnimGraphNode_IdentityPose.h"
+#include "AnimationGraph.h"
+#include "AnimLangTokenizer.h"
 
 #include "Animation/AnimClassInterface.h"
 #include "Animation/AnimLayerInterface.h"
@@ -54,8 +62,10 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
+#include "K2Node_Event.h"
 #include "Engine/MemberReference.h"
 #include "UObject/UObjectIterator.h"
+#include "UObject/StructOnScope.h"
 #include "Framework/Application/SlateApplication.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogAnimBPImporter, Log, All);
@@ -67,8 +77,52 @@ static FString StripQuotes(const FString& Input)
 	if (Result.StartsWith(TEXT("\"")) && Result.EndsWith(TEXT("\"")))
 	{
 		Result = Result.Mid(1, Result.Len() - 2);
+		FString Decoded;
+		Decoded.Reserve(Result.Len());
+		for (int32 Index = 0; Index < Result.Len(); ++Index)
+		{
+			const TCHAR Character = Result[Index];
+			if (Character != '\\' || Index + 1 >= Result.Len())
+			{
+				Decoded += Character;
+				continue;
+			}
+
+			const TCHAR Escaped = Result[++Index];
+			switch (Escaped)
+			{
+			case '"': Decoded += '"'; break;
+			case '\\': Decoded += '\\'; break;
+			case 'n': Decoded += '\n'; break;
+			case 'r': Decoded += '\r'; break;
+			case 't': Decoded += '\t'; break;
+			default:
+				Decoded += '\\';
+				Decoded += Escaped;
+				break;
+			}
+		}
+		Result = MoveTemp(Decoded);
 	}
 	return Result;
+}
+
+static void ResetStructToExportTextBaseline(const UScriptStruct* Struct, void* StructMemory)
+{
+	if (!Struct || !StructMemory) return;
+	for (TFieldIterator<FProperty> It(Struct); It; ++It)
+	{
+		FProperty* Property = *It;
+		for (int32 ArrayIndex = 0; ArrayIndex < Property->ArrayDim; ++ArrayIndex)
+		{
+			Property->ClearValue_InContainer(StructMemory, ArrayIndex);
+			if (FStructProperty* NestedStructProperty = CastField<FStructProperty>(Property))
+			{
+				void* NestedMemory = NestedStructProperty->ContainerPtrToValuePtr<void>(StructMemory, ArrayIndex);
+				ResetStructToExportTextBaseline(NestedStructProperty->Struct, NestedMemory);
+			}
+		}
+	}
 }
 
 static bool ValidateExternalDependencies(const TArray<FAnimDependency>& Dependencies, FString& OutError)
@@ -605,7 +659,13 @@ namespace
 
 		for (UEdGraphPin* Pin : Node->Pins)
 		{
-			if (!Pin || Pin->Direction != EGPD_Input || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
+			if (!Pin || Pin->Direction != EGPD_Input)
+			{
+				continue;
+			}
+			if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct
+				&& (Pin->PinType.PinSubCategoryObject == FPoseLink::StaticStruct()
+					|| Pin->PinType.PinSubCategoryObject == FComponentSpacePoseLink::StaticStruct()))
 			{
 				continue;
 			}
@@ -794,6 +854,81 @@ namespace
 		return OutPropertyPath.Num() > 0;
 	}
 
+	static bool ParseBindPathForm(const FString& Value, TArray<FString>& OutPropertyPath,
+		EAnimGraphNodePropertyBindingType& OutType, FName& OutContextId, int32& OutArrayIndex,
+		bool& bOutOnlyUpdateWhenActive, bool& bOutHasExplicitType)
+	{
+		OutPropertyPath.Reset();
+		OutType = EAnimGraphNodePropertyBindingType::Property;
+		OutContextId = NAME_None;
+		OutArrayIndex = INDEX_NONE;
+		bOutOnlyUpdateWhenActive = false;
+		bOutHasExplicitType = false;
+
+		const FLispParseResult Parsed = FLispParser::Parse(Value);
+		if (!Parsed.bSuccess || Parsed.Nodes.Num() != 1 || !Parsed.Nodes[0].IsValid()
+			|| !Parsed.Nodes[0]->IsForm(TEXT("bind-path")))
+		{
+			return false;
+		}
+
+		const FLispNodePtr Form = Parsed.Nodes[0];
+		const FLispNodePtr PathNode = Form->Get(1);
+		if (!PathNode.IsValid())
+		{
+			return false;
+		}
+		if (PathNode->IsString() || PathNode->IsSymbol())
+		{
+			PathNode->StringValue.ParseIntoArray(OutPropertyPath, TEXT("."), true);
+		}
+		else if (PathNode->IsList())
+		{
+			for (const FLispNodePtr& Segment : PathNode->Children)
+			{
+				if (Segment.IsValid() && (Segment->IsString() || Segment->IsSymbol()))
+				{
+					OutPropertyPath.Add(Segment->StringValue);
+				}
+			}
+		}
+		OutPropertyPath.RemoveAll([](const FString& Segment) { return Segment.TrimStartAndEnd().IsEmpty(); });
+		if (OutPropertyPath.IsEmpty())
+		{
+			return false;
+		}
+
+		if (const FLispNodePtr TypeNode = Form->GetKeywordArg(TEXT(":type"));
+			TypeNode.IsValid() && (TypeNode->IsString() || TypeNode->IsSymbol()))
+		{
+			bOutHasExplicitType = true;
+			if (TypeNode->StringValue.Equals(TEXT("function"), ESearchCase::IgnoreCase))
+			{
+				OutType = EAnimGraphNodePropertyBindingType::Function;
+			}
+			else if (!TypeNode->StringValue.Equals(TEXT("property"), ESearchCase::IgnoreCase))
+			{
+				return false;
+			}
+		}
+		if (const FLispNodePtr ContextNode = Form->GetKeywordArg(TEXT(":context"));
+			ContextNode.IsValid() && (ContextNode->IsString() || ContextNode->IsSymbol()))
+		{
+			OutContextId = FName(*ContextNode->StringValue);
+		}
+		if (const FLispNodePtr ArrayNode = Form->GetKeywordArg(TEXT(":array-index"));
+			ArrayNode.IsValid() && ArrayNode->IsNumber())
+		{
+			OutArrayIndex = static_cast<int32>(ArrayNode->NumberValue);
+		}
+		if (const FLispNodePtr ActiveNode = Form->GetKeywordArg(TEXT(":only-update-when-active"));
+			ActiveNode.IsValid() && (ActiveNode->IsString() || ActiveNode->IsSymbol()))
+		{
+			bOutOnlyUpdateWhenActive = ActiveNode->StringValue.Equals(TEXT("true"), ESearchCase::IgnoreCase);
+		}
+		return true;
+	}
+
 	static FString ResolveBindingPropertyName(UAnimGraphNode_Base* Node, const FString& KebabKey)
 	{
 		if (!Node)
@@ -839,6 +974,53 @@ namespace
 
 		return FString();
 	}
+
+	static bool ParseExposedPinNames(const FString& Value, TSet<FString>& OutNormalizedNames)
+	{
+		OutNormalizedNames.Reset();
+		const FLispParseResult Parsed = FLispParser::Parse(Value);
+		if (!Parsed.bSuccess || Parsed.Nodes.Num() != 1 || !Parsed.Nodes[0].IsValid()
+			|| !Parsed.Nodes[0]->IsForm(TEXT("pin-names")))
+		{
+			return false;
+		}
+		for (int32 Index = 1; Index < Parsed.Nodes[0]->Num(); ++Index)
+		{
+			const FLispNodePtr NameNode = Parsed.Nodes[0]->Get(Index);
+			if (NameNode.IsValid() && (NameNode->IsString() || NameNode->IsSymbol()))
+			{
+				OutNormalizedNames.Add(IMP_NormalizeBindingToken(NameNode->StringValue));
+			}
+		}
+		return true;
+	}
+
+	static bool RestoreCustomPinVisibility(UAnimGraphNode_Base* Node, const TSet<FString>& NormalizedNames)
+	{
+		if (!Node || NormalizedNames.IsEmpty()) return false;
+		FArrayProperty* ArrayProperty = FindFProperty<FArrayProperty>(Node->GetClass(), TEXT("CustomPinProperties"));
+		FStructProperty* ElementProperty = ArrayProperty ? CastField<FStructProperty>(ArrayProperty->Inner) : nullptr;
+		if (!ElementProperty || !ElementProperty->Struct) return false;
+
+		FNameProperty* NameProperty = FindFProperty<FNameProperty>(ElementProperty->Struct, TEXT("PropertyName"));
+		FBoolProperty* ShowProperty = FindFProperty<FBoolProperty>(ElementProperty->Struct, TEXT("bShowPin"));
+		if (!NameProperty || !ShowProperty) return false;
+
+		bool bChanged = false;
+		FScriptArrayHelper ArrayHelper(ArrayProperty, ArrayProperty->ContainerPtrToValuePtr<void>(Node));
+		for (int32 Index = 0; Index < ArrayHelper.Num(); ++Index)
+		{
+			void* Element = ArrayHelper.GetRawPtr(Index);
+			const FString Name = NameProperty->GetPropertyValue_InContainer(Element).ToString();
+			if (NormalizedNames.Contains(IMP_NormalizeBindingToken(Name))
+				&& !ShowProperty->GetPropertyValue_InContainer(Element))
+			{
+				ShowProperty->SetPropertyValue_InContainer(Element, true);
+				bChanged = true;
+			}
+		}
+		return bChanged;
+	}
 }
 
 // ========== Name Conversion Helpers ==========
@@ -880,7 +1062,7 @@ FString FAnimBPImporter::KebabToCamelClassName(const FString& KebabName)
 		SpecialMappings.Add(TEXT("apply-additive"), TEXT("AnimGraphNode_ApplyAdditive"));
 		SpecialMappings.Add(TEXT("layered-bone-blend"), TEXT("AnimGraphNode_LayeredBoneBlend"));
 		SpecialMappings.Add(TEXT("state-machine"), TEXT("AnimGraphNode_StateMachine"));
-		SpecialMappings.Add(TEXT("identity-pose"), TEXT(""));  // No node needed
+		SpecialMappings.Add(TEXT("identity-pose"), TEXT("AnimGraphNode_IdentityPose"));
 		SpecialMappings.Add(TEXT("root"), TEXT("AnimGraphNode_Root"));
 		// Note: blend-list is NOT here — it uses :class property for the actual type
 	}
@@ -1077,11 +1259,7 @@ bool FAnimBPImporter::SetNodeProperty(UAnimGraphNode_Base* Node, const FString& 
 	FString NormalizedKey = Normalize(KebabKey);
 	
 	// Strip quotes from value
-	FString CleanValue = Value;
-	if (CleanValue.StartsWith(TEXT("\"")) && CleanValue.EndsWith(TEXT("\"")))
-	{
-		CleanValue = CleanValue.Mid(1, CleanValue.Len() - 2);
-	}
+	FString CleanValue = StripQuotes(Value);
 	
 	// Pass 1: Try exact CamelCase match, then case-insensitive, then normalized fuzzy
 	UEdGraphPin* BestMatch = nullptr;
@@ -1096,14 +1274,14 @@ bool FAnimBPImporter::SetNodeProperty(UAnimGraphNode_Base* Node, const FString& 
 			// Exact CamelCase match
 			if (PinNameStr == CamelKey)
 			{
-				Pin->DefaultValue = CleanValue;
-				return true;
+				BestMatch = Pin;
+				break;
 			}
 			// Case-insensitive match
 			if (PinNameStr.Equals(CamelKey, ESearchCase::IgnoreCase))
 			{
-				Pin->DefaultValue = CleanValue;
-				return true;
+				BestMatch = Pin;
+				break;
 			}
 			// Normalized fuzzy match (handles "CurveValues 0" vs "CurveValues0",
 			// "BlendTime 0" vs "BlendTime0", etc.)
@@ -1114,10 +1292,121 @@ bool FAnimBPImporter::SetNodeProperty(UAnimGraphNode_Base* Node, const FString& 
 		}
 	}
 	
+	const bool bPinWasSet = BestMatch != nullptr;
 	if (BestMatch)
 	{
 		BestMatch->DefaultValue = CleanValue;
-		return true;
+	}
+
+	// Some animation editor nodes own semantic settings directly rather than in
+	// their internal FAnimNode_* struct. FMemberReference values use a stable
+	// "-ref" DSL suffix to distinguish them from ordinary scalar properties.
+	for (TFieldIterator<FProperty> PropIt(Node->GetClass()); PropIt; ++PropIt)
+	{
+		FProperty* DirectProp = *PropIt;
+		const FString DirectName = DirectProp->GetName();
+		bool bNameMatches = Normalize(DirectName) == NormalizedKey
+			|| DirectName.Equals(CamelKey, ESearchCase::IgnoreCase);
+		if (!bNameMatches)
+		{
+			const FStructProperty* StructProperty = CastField<FStructProperty>(DirectProp);
+			bNameMatches = StructProperty && StructProperty->Struct == FMemberReference::StaticStruct()
+				&& NormalizedKey == Normalize(DirectName) + TEXT("ref");
+		}
+		if (!bNameMatches)
+		{
+			continue;
+		}
+
+		void* ValuePtr = DirectProp->ContainerPtrToValuePtr<void>(Node);
+		if (const FStructProperty* StructProperty = CastField<FStructProperty>(DirectProp);
+			StructProperty && StructProperty->Struct == FMemberReference::StaticStruct()
+			&& Value.StartsWith(TEXT("(member-ref ")))
+		{
+			const FLispParseResult ParsedReference = FLispParser::Parse(Value);
+			if (!ParsedReference.bSuccess || ParsedReference.Nodes.Num() != 1
+				|| !ParsedReference.Nodes[0].IsValid() || !ParsedReference.Nodes[0]->IsForm(TEXT("member-ref")))
+			{
+				return false;
+			}
+
+			const FLispNodePtr ReferenceForm = ParsedReference.Nodes[0];
+			const FLispNodePtr NameNode = ReferenceForm->GetKeywordArg(TEXT(":name"));
+			const FLispNodePtr SelfNode = ReferenceForm->GetKeywordArg(TEXT(":self"));
+			if (!NameNode.IsValid() || (!NameNode->IsString() && !NameNode->IsSymbol()))
+			{
+				return false;
+			}
+
+			FMemberReference* MemberReference = static_cast<FMemberReference*>(ValuePtr);
+			const FName MemberName(*NameNode->StringValue);
+			const bool bSelfContext = SelfNode.IsValid()
+				&& SelfNode->StringValue.Equals(TEXT("true"), ESearchCase::IgnoreCase);
+			if (bSelfContext)
+			{
+				MemberReference->SetSelfMember(MemberName, FGuid());
+				return true;
+			}
+
+			const FLispNodePtr ParentNode = ReferenceForm->GetKeywordArg(TEXT(":parent"));
+			if (!ParentNode.IsValid() || (!ParentNode->IsString() && !ParentNode->IsSymbol()))
+			{
+				return false;
+			}
+			if (UClass* ParentClass = LoadObject<UClass>(nullptr, *ParentNode->StringValue))
+			{
+				MemberReference->SetExternalMember(MemberName, ParentClass);
+				return true;
+			}
+			return false;
+		}
+
+		// Runtime FAnimNodeFunctionRef values are exported as
+		// (FunctionName="..."). The editor-side property with the same name is an
+		// FMemberReference, so import the runtime struct through reflection and
+		// translate its function name to a self member reference.
+		if (const FStructProperty* StructProperty = CastField<FStructProperty>(DirectProp);
+			StructProperty && StructProperty->Struct == FMemberReference::StaticStruct())
+		{
+			for (TFieldIterator<FStructProperty> AnimPropIt(Node->GetClass()); AnimPropIt; ++AnimPropIt)
+			{
+				FStructProperty* AnimStructProperty = *AnimPropIt;
+				if (!AnimStructProperty->Struct || !AnimStructProperty->Struct->IsChildOf(FAnimNode_Base::StaticStruct())) continue;
+				for (TFieldIterator<FProperty> InnerIt(AnimStructProperty->Struct); InnerIt; ++InnerIt)
+				{
+					FStructProperty* RuntimeFunctionProperty = CastField<FStructProperty>(*InnerIt);
+					if (!RuntimeFunctionProperty || Normalize(RuntimeFunctionProperty->GetName()) != NormalizedKey) continue;
+					FNameProperty* FunctionNameProperty = FindFProperty<FNameProperty>(RuntimeFunctionProperty->Struct, TEXT("FunctionName"));
+					if (!FunctionNameProperty) continue;
+
+					FStructOnScope RuntimeFunctionValue(RuntimeFunctionProperty->Struct);
+					ResetStructToExportTextBaseline(RuntimeFunctionProperty->Struct, RuntimeFunctionValue.GetStructMemory());
+					if (!RuntimeFunctionProperty->ImportText_Direct(*CleanValue, RuntimeFunctionValue.GetStructMemory(), nullptr, PPF_None)) continue;
+					const FName FunctionName = FunctionNameProperty->GetPropertyValue(
+						FunctionNameProperty->ContainerPtrToValuePtr<void>(RuntimeFunctionValue.GetStructMemory()));
+					if (!FunctionName.IsNone())
+					{
+						static_cast<FMemberReference*>(ValuePtr)->SetSelfMember(FunctionName, FGuid());
+						return true;
+					}
+				}
+				break;
+			}
+		}
+
+		if (DirectProp->ImportText_Direct(*CleanValue, ValuePtr, Node, PPF_None))
+		{
+			if (const FStructProperty* StructProperty = CastField<FStructProperty>(DirectProp);
+				StructProperty && StructProperty->Struct == FMemberReference::StaticStruct())
+			{
+				FMemberReference* MemberReference = static_cast<FMemberReference*>(ValuePtr);
+				if (MemberReference->IsSelfContext())
+				{
+					MemberReference->SetSelfMember(MemberReference->GetMemberName(), FGuid());
+				}
+			}
+			return true;
+		}
 	}
 	
 	// Pass 2: Try FProperty reflection on the internal anim node struct
@@ -1139,8 +1428,18 @@ bool FAnimBPImporter::SetNodeProperty(UAnimGraphNode_Base* Node, const FString& 
 				
 				if (Normalize(PropName) == NormalizedKey || PropName.Equals(CamelKey, ESearchCase::IgnoreCase))
 				{
-					// Try to set the property from string
 					void* ValuePtr = InnerProp->ContainerPtrToValuePtr<void>(StructPtr);
+					if (const FStructProperty* InnerStructProperty = CastField<FStructProperty>(InnerProp))
+					{
+						FStructOnScope ImportedValue(InnerStructProperty->Struct);
+						ResetStructToExportTextBaseline(InnerStructProperty->Struct, ImportedValue.GetStructMemory());
+						if (InnerProp->ImportText_Direct(*CleanValue, ImportedValue.GetStructMemory(), nullptr, PPF_None))
+						{
+							InnerProp->CopyCompleteValue(ValuePtr, ImportedValue.GetStructMemory());
+							return true;
+						}
+						return false;
+					}
 					const TCHAR* ImportResult = InnerProp->ImportText_Direct(*CleanValue, ValuePtr, nullptr, PPF_None);
 					if (ImportResult != nullptr)
 					{
@@ -1154,7 +1453,7 @@ bool FAnimBPImporter::SetNodeProperty(UAnimGraphNode_Base* Node, const FString& 
 	
 	UE_LOG(LogAnimBPImporter, Verbose, TEXT("SetNodeProperty: Could not find pin or property for '%s' on '%s'"), 
 		*KebabKey, *Node->GetClass()->GetName());
-	return false;
+	return bPinWasSet;
 }
 
 // ========== Blueprint Creation ==========
@@ -1386,6 +1685,175 @@ bool FAnimBPImporter::BuildHelperGraphs(UAnimBlueprint* Blueprint, const TArray<
 	return bAllSucceeded;
 }
 
+bool FAnimBPImporter::BuildAnimationLayers(UAnimBlueprint* Blueprint, const TArray<FAnimationLayerDef>& Layers,
+	const TMap<FString, FHelperGraphDef>* HelperGraphs)
+{
+	if (!Blueprint)
+	{
+		return false;
+	}
+
+	for (const FAnimationLayerDef& Layer : Layers)
+	{
+		if (Layer.GraphName.TrimStartAndEnd().IsEmpty())
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:AnimationLayer] Layer is missing graph-name"));
+			return false;
+		}
+
+		UEdGraph* LayerGraph = nullptr;
+		for (FBPInterfaceDescription& InterfaceDesc : Blueprint->ImplementedInterfaces)
+		{
+			const bool bMatchingInterface = Layer.InterfaceClassPath.IsEmpty()
+				|| (InterfaceDesc.Interface && InterfaceDesc.Interface->GetPathName() == Layer.InterfaceClassPath);
+			if (!bMatchingInterface) continue;
+			for (UEdGraph* Graph : InterfaceDesc.Graphs)
+			{
+				if (Graph && Graph->GetName() == Layer.GraphName)
+				{
+					LayerGraph = Graph;
+					break;
+				}
+			}
+			if (LayerGraph) break;
+		}
+
+		if (!LayerGraph)
+		{
+			for (UEdGraph* Graph : Blueprint->FunctionGraphs)
+			{
+				if (Graph && Graph->GetName() == Layer.GraphName
+					&& Graph->GetSchema() && Graph->GetSchema()->IsA<UAnimationGraphSchema>())
+				{
+					LayerGraph = Graph;
+					break;
+				}
+			}
+		}
+
+		if (!LayerGraph)
+		{
+			UClass* SchemaClass = UAnimationGraphSchema::StaticClass();
+			if (!Layer.SchemaClassPath.IsEmpty())
+			{
+				if (UClass* RequestedSchema = LoadObject<UClass>(nullptr, *Layer.SchemaClassPath);
+					RequestedSchema && RequestedSchema->IsChildOf(UAnimationGraphSchema::StaticClass()))
+				{
+					SchemaClass = RequestedSchema;
+				}
+			}
+			LayerGraph = FBlueprintEditorUtils::CreateNewGraph(
+				Blueprint, FName(*Layer.GraphName), UAnimationGraph::StaticClass(), SchemaClass);
+			if (!LayerGraph)
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:AnimationLayer] Failed to create graph '%s'"), *Layer.GraphName);
+				return false;
+			}
+			if (Layer.InterfaceClassPath.IsEmpty())
+			{
+				FBlueprintEditorUtils::AddDomainSpecificGraph(Blueprint, LayerGraph);
+			}
+			else
+			{
+				UClass* InterfaceClass = LoadObject<UClass>(nullptr, *Layer.InterfaceClassPath);
+				if (!InterfaceClass)
+				{
+					UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:AnimationLayer] Interface class not found for '%s': %s"),
+						*Layer.GraphName, *Layer.InterfaceClassPath);
+					return false;
+				}
+				FBlueprintEditorUtils::AddInterfaceGraph(Blueprint, LayerGraph, InterfaceClass);
+			}
+		}
+
+		if (!Layer.GraphGuid.IsEmpty())
+		{
+			FGuid ParsedGuid;
+			if (!FGuid::Parse(Layer.GraphGuid, ParsedGuid) || !ParsedGuid.IsValid())
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:AnimationLayer] Invalid graph-guid '%s' for '%s'"),
+					*Layer.GraphGuid, *Layer.GraphName);
+				return false;
+			}
+			LayerGraph->GraphGuid = ParsedGuid;
+		}
+
+		UAnimGraphNode_Root* RootNode = nullptr;
+		TArray<UEdGraphNode*> NodesToRemove;
+		for (UEdGraphNode* Node : LayerGraph->Nodes)
+		{
+			if (!RootNode) RootNode = Cast<UAnimGraphNode_Root>(Node);
+			if (!Node || Node->IsA<UAnimGraphNode_Root>()) continue;
+			NodesToRemove.Add(Node);
+		}
+		for (UEdGraphNode* Node : NodesToRemove)
+		{
+			LayerGraph->RemoveNode(Node);
+		}
+		if (!RootNode)
+		{
+			RootNode = NewObject<UAnimGraphNode_Root>(LayerGraph);
+			RootNode->CreateNewGuid();
+			RootNode->PostPlacedNewNode();
+			RootNode->AllocateDefaultPins();
+			LayerGraph->AddNode(RootNode, false, false);
+		}
+		for (UEdGraphPin* Pin : RootNode->Pins)
+		{
+			if (Pin) Pin->BreakAllPinLinks();
+		}
+
+		TMap<FString, UAnimGraphNode_SaveCachedPose*> DefineNodes;
+		for (const FCachedPoseDef& Def : Layer.Defines)
+		{
+			UAnimGraphNode_SaveCachedPose* SaveNode = NewObject<UAnimGraphNode_SaveCachedPose>(LayerGraph);
+			SaveNode->CreateNewGuid();
+			SaveNode->PostPlacedNewNode();
+			SaveNode->AllocateDefaultPins();
+			SaveNode->CacheName = Def.Name;
+			LayerGraph->AddNode(SaveNode, false, false);
+			DefineNodes.Add(Def.GetIdentifier(), SaveNode);
+		}
+		for (const FCachedPoseDef& Def : Layer.Defines)
+		{
+			UAnimGraphNode_SaveCachedPose* SaveNode = DefineNodes.FindRef(Def.GetIdentifier());
+			if (!SaveNode || !Def.Body.IsValid()) continue;
+			UAnimGraphNode_Base* BodyNode = BuildAnimNode(Def.Body, LayerGraph, &DefineNodes, HelperGraphs);
+			if (!BodyNode && Def.Body->NodeType != TEXT("identity-pose")) return false;
+			if (!BodyNode) continue;
+			UEdGraphPin* BodyOutput = FindOutputPosePin(BodyNode);
+			for (UEdGraphPin* Pin : SaveNode->Pins)
+			{
+				if (BodyOutput && Pin && Pin->Direction == EGPD_Input && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
+				{
+					ConnectPins(BodyOutput, Pin);
+					break;
+				}
+			}
+		}
+
+		if (Layer.RootNode.IsValid())
+		{
+			UAnimGraphNode_Base* RootTree = BuildAnimNode(Layer.RootNode, LayerGraph, &DefineNodes, HelperGraphs);
+			if (!RootTree && Layer.RootNode->NodeType != TEXT("identity-pose")) return false;
+			if (RootTree)
+			{
+				UEdGraphPin* TreeOutput = FindOutputPosePin(RootTree);
+				for (UEdGraphPin* Pin : RootNode->Pins)
+				{
+					if (TreeOutput && Pin && Pin->Direction == EGPD_Input && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
+					{
+						ConnectPins(TreeOutput, Pin);
+						break;
+					}
+				}
+			}
+		}
+		UE_LOG(LogAnimBPImporter, Log, TEXT("Restored animation layer: %s (%s)"), *Layer.GraphName, *Layer.InterfaceClassPath);
+	}
+	return true;
+}
+
 bool FAnimBPImporter::BuildLogicGraphs(UAnimBlueprint* Blueprint, const TArray<FLogicGraphDef>& LogicGraphs, bool bReplaceExistingSet)
 {
 	if (!Blueprint)
@@ -1410,6 +1878,21 @@ bool FAnimBPImporter::BuildLogicGraphs(UAnimBlueprint* Blueprint, const TArray<F
 		(bEvent ? DesiredEventGraphs : DesiredFunctionGraphs).Add(FName(*LogicGraph.GraphName));
 	}
 
+	for (UEdGraph* Ubergraph : Blueprint->UbergraphPages)
+	{
+		if (!Ubergraph) continue;
+		TArray<UEdGraphNode*> DuplicateEvents;
+		for (UEdGraphNode* Node : Ubergraph->Nodes)
+		{
+			if (UK2Node_Event* EventNode = Cast<UK2Node_Event>(Node);
+				EventNode && DesiredFunctionGraphs.Contains(EventNode->EventReference.GetMemberName()))
+			{
+				DuplicateEvents.Add(EventNode);
+			}
+		}
+		for (UEdGraphNode* DuplicateEvent : DuplicateEvents) Ubergraph->RemoveNode(DuplicateEvent);
+	}
+
 	if (bReplaceExistingSet)
 	{
 		TArray<UEdGraph*> StaleGraphs;
@@ -1426,6 +1909,64 @@ bool FAnimBPImporter::BuildLogicGraphs(UAnimBlueprint* Blueprint, const TArray<F
 		for (UEdGraph* Graph : StaleGraphs)
 		{
 			FBlueprintEditorUtils::RemoveGraph(Blueprint, Graph, EGraphRemoveFlags::MarkTransient);
+		}
+	}
+
+	auto FindOrCreateLogicGraph = [Blueprint](const FLogicGraphDef& LogicGraph) -> UEdGraph*
+	{
+		const FString GraphName = LogicGraph.GraphName.TrimStartAndEnd();
+		const bool bEventGraph = LogicGraph.Role.Equals(TEXT("event"), ESearchCase::IgnoreCase);
+		const TArray<TObjectPtr<UEdGraph>>& ExistingGraphs = bEventGraph ? Blueprint->UbergraphPages : Blueprint->FunctionGraphs;
+		for (UEdGraph* Graph : ExistingGraphs)
+		{
+			if (Graph && Graph->GetFName() == FName(*GraphName)) return Graph;
+		}
+
+		UClass* SchemaClass = UEdGraphSchema_K2::StaticClass();
+		if (!LogicGraph.SchemaClassPath.IsEmpty())
+		{
+			if (UClass* RequestedSchema = LoadObject<UClass>(nullptr, *LogicGraph.SchemaClassPath);
+				RequestedSchema && RequestedSchema->IsChildOf(UEdGraphSchema::StaticClass()))
+			{
+				SchemaClass = RequestedSchema;
+			}
+		}
+		UEdGraph* Graph = FBlueprintEditorUtils::CreateNewGraph(
+			Blueprint, FName(*GraphName), UEdGraph::StaticClass(), SchemaClass);
+		if (!Graph) return nullptr;
+		if (bEventGraph) FBlueprintEditorUtils::AddUbergraphPage(Blueprint, Graph);
+		else FBlueprintEditorUtils::AddFunctionGraph<UFunction>(Blueprint, Graph, true, nullptr);
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		return Graph;
+	};
+
+	// All function graph identities must exist before any body is imported. Then import
+	// signatures in a separate pass so cross-function calls resolve against the target BP.
+	for (const FLogicGraphDef& LogicGraph : LogicGraphs)
+	{
+		if (!FindOrCreateLogicGraph(LogicGraph))
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:LogicGraph] Failed to create graph '%s'"), *LogicGraph.GraphName);
+			return false;
+		}
+	}
+	for (const FLogicGraphDef& LogicGraph : LogicGraphs)
+	{
+		if (LogicGraph.Role.Equals(TEXT("event"), ESearchCase::IgnoreCase)) continue;
+		UEdGraph* FunctionGraph = FindOrCreateLogicGraph(LogicGraph);
+		FBlueprintLispConverter::FImportOptions SignatureOptions;
+		SignatureOptions.ImportMode = FBlueprintLispConverter::EImportMode::ReplaceGraph;
+		SignatureOptions.bAutoLayout = false;
+		SignatureOptions.bCompile = false;
+		SignatureOptions.bFailOnUnsupportedForm = true;
+		SignatureOptions.bSignatureOnly = true;
+		const FBlueprintLispResult SignatureResult = FBlueprintLispConverter::ImportGraph(
+			FunctionGraph, LogicGraph.DSL.TrimStartAndEnd(), SignatureOptions);
+		if (!SignatureResult.bSuccess)
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:LogicGraph] Failed to import signature for '%s': %s"),
+				*LogicGraph.GraphName, *SignatureResult.Error);
+			return false;
 		}
 	}
 
@@ -1546,11 +2087,22 @@ bool FAnimBPImporter::ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph
 	else if (FormName == TEXT("bind-path"))
 	{
 		TArray<FString> PropertyPath;
-		if (!ParseBindPathArgument(Argument, PropertyPath))
+		EAnimGraphNodePropertyBindingType BindingType = EAnimGraphNodePropertyBindingType::Property;
+		FName ContextId = NAME_None;
+		int32 ArrayIndex = INDEX_NONE;
+		bool bOnlyUpdateWhenActive = false;
+		bool bHasExplicitType = false;
+		if (!ParseBindPathForm(Value, PropertyPath, BindingType, ContextId, ArrayIndex,
+			bOnlyUpdateWhenActive, bHasExplicitType))
 		{
 			UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:BindPath] Node '%s' property ':%s' = %s — could not parse bind-path argument"),
 				*Node->GetName(), *KebabKey, *Value);
 			return true;
+		}
+		if (!bHasExplicitType && Blueprint->SkeletonGeneratedClass
+			&& Blueprint->SkeletonGeneratedClass->FindFunctionByName(FName(*PropertyPath.Last())))
+		{
+			BindingType = EAnimGraphNodePropertyBindingType::Function;
 		}
 
 		const FString PropertyName = ResolveBindingPropertyName(Node, KebabKey);
@@ -1566,6 +2118,17 @@ bool FAnimBPImporter::ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph
 		{
 			BindingObject->Modify();
 		}
+		const int32 OptionalPinIndex = Node->ShowPinForProperties.IndexOfByPredicate(
+			[&PropertyName](const FOptionalPinFromProperty& OptionalPin)
+			{
+				return OptionalPin.PropertyName == FName(*PropertyName);
+			});
+		if (OptionalPinIndex != INDEX_NONE)
+		{
+			// UE's binding UI exposes the destination pin before adding the binding. Without
+			// this, the compiler folds the bound field into an anonymous constant property.
+			Node->SetPinVisibility(true, OptionalPinIndex);
+		}
 
 		TMap<FName, FAnimGraphNodePropertyBinding>* PropertyBindings = GetMutablePropertyBindingMap(Node);
 		if (!PropertyBindings)
@@ -1579,10 +2142,11 @@ bool FAnimBPImporter::ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph
 		PropertyBinding.PropertyName = FName(*PropertyName);
 		PropertyBinding.PropertyPath = PropertyPath;
 		PropertyBinding.PathAsText = FText::FromString(JoinBindingPath(PropertyPath));
-		PropertyBinding.Type = EAnimGraphNodePropertyBindingType::Property;
+		PropertyBinding.Type = BindingType;
 		PropertyBinding.bIsBound = true;
-		PropertyBinding.ArrayIndex = INDEX_NONE;
-		PropertyBinding.ContextId = NAME_None;
+		PropertyBinding.ArrayIndex = ArrayIndex;
+		PropertyBinding.ContextId = ContextId;
+		PropertyBinding.bOnlyUpdateWhenActive = bOnlyUpdateWhenActive;
 		PropertyBindings->Add(FName(*PropertyName), PropertyBinding);
 
 		Node->ReconstructNode();
@@ -1684,12 +2248,6 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 	}
 
 	const FString& NodeType = NodeAST->NodeType;
-
-	// Skip identity-pose (no actual node)
-	if (NodeType == TEXT("identity-pose"))
-	{
-		return nullptr;
-	}
 
 	auto RestoreNodeGuid = [&NodeAST](UEdGraphNode* Node) -> bool
 	{
@@ -1799,28 +2357,6 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 	}
 	NewNode->PostPlacedNewNode();
 	NewNode->AllocateDefaultPins();
-	
-	// Clean up pins where AllocateDefaultPins copies AutogeneratedDefaultValue into DefaultValue.
-	// This prevents re-export from emitting redundant properties like :alpha 1.0, :x 0.0, etc.
-	for (UEdGraphPin* Pin : NewNode->Pins)
-	{
-		if (Pin && Pin->Direction == EGPD_Input && !Pin->DefaultValue.IsEmpty() && !Pin->AutogeneratedDefaultValue.IsEmpty())
-		{
-			if (Pin->DefaultValue == Pin->AutogeneratedDefaultValue)
-			{
-				Pin->DefaultValue.Empty();
-			}
-			else if (FCString::IsNumeric(*Pin->DefaultValue) && FCString::IsNumeric(*Pin->AutogeneratedDefaultValue))
-			{
-				float ValF = FCString::Atof(*Pin->DefaultValue);
-				float DefF = FCString::Atof(*Pin->AutogeneratedDefaultValue);
-				if (FMath::IsNearlyEqual(ValF, DefF, 1e-6f))
-				{
-					Pin->DefaultValue.Empty();
-				}
-			}
-		}
-	}
 	
 	Graph->AddNode(NewNode, false, false);
 	
@@ -1938,18 +2474,6 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 				// Reconstruct node to regenerate pins from the layer definition.
 				static_cast<UEdGraphNode*>(LayerNode)->ReconstructNode();
 				
-				// Clean up pins after ReconstructNode
-				for (UEdGraphPin* Pin : LayerNode->Pins)
-				{
-					if (Pin && Pin->Direction == EGPD_Input && !Pin->DefaultValue.IsEmpty() && !Pin->AutogeneratedDefaultValue.IsEmpty())
-					{
-						if (Pin->DefaultValue == Pin->AutogeneratedDefaultValue)
-						{
-							Pin->DefaultValue.Empty();
-						}
-					}
-				}
-				
 				UE_LOG(LogAnimBPImporter, Log, TEXT("LinkedAnimLayer: set layer='%s', pins=%d"),
 					*LayerFName.ToString(), LayerNode->Pins.Num());
 			}
@@ -1960,7 +2484,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 				return nullptr;
 			}
 		}
-		
+
 		// Ensure pose input pins exist for all DSL children.
 		// If ReconstructNode did not produce them (e.g., new blueprint without SkeletonGeneratedClass),
 		// manually create the necessary pose pins from the DSL child node names.
@@ -1968,7 +2492,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		{
 			const FString& ChildPinName = Child.PinName;
 			FString CamelPinName = KebabToCamel(ChildPinName);
-			
+
 			// Check if this pose pin already exists
 			bool bPinExists = false;
 			for (UEdGraphPin* Pin : LayerNode->Pins)
@@ -1997,7 +2521,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 			}
 		}
 	}
-	
+
 	// SequencePlayer / SequenceEvaluator: set animation sequence
 	// Supports both :name "ShortName" (legacy) and :sequence (asset "/Game/Path") formats
 	if (UAnimGraphNode_SequencePlayer* SeqPlayer = Cast<UAnimGraphNode_SequencePlayer>(NewNode))
@@ -2175,6 +2699,18 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 					FString BaseName = Pair.Key.Left(LastDash);
 					ArrayProperties.FindOrAdd(BaseName).Add(Idx, Pair.Value);
 				}
+			}
+		}
+		if (const FString* CanonicalBlendTime = NodeAST->Properties.Find(TEXT("blend-time")))
+		{
+			FString BlendTimeText = StripQuotes(*CanonicalBlendTime);
+			BlendTimeText.RemoveFromStart(TEXT("("));
+			BlendTimeText.RemoveFromEnd(TEXT(")"));
+			TArray<FString> BlendTimes;
+			BlendTimeText.ParseIntoArray(BlendTimes, TEXT(","), false);
+			for (int32 Index = 0; Index < BlendTimes.Num(); ++Index)
+			{
+				ArrayProperties.FindOrAdd(TEXT("blend-time")).Add(Index, BlendTimes[Index].TrimStartAndEnd());
 			}
 		}
 		
@@ -2357,42 +2893,101 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 				bNeedReconstruct = true;
 			}
 		}
-		
+
 		if (bNeedReconstruct)
 		{
 			NewNode->ReconstructNode();
-			
-			// Clean up pins where ReconstructNode copies AutogeneratedDefaultValue into DefaultValue
-			for (UEdGraphPin* Pin : NewNode->Pins)
+
+		}
+	}
+
+	// Custom-property nodes such as Control Rig derive their input pins from a target asset.
+	// Restore that asset first, then the authored exposure set, before importing pin values.
+	if (const FString* RigReference = NodeAST->Properties.Find(TEXT("control-rig-asset-reference")))
+	{
+		if (SetNodeProperty(NewNode, TEXT("control-rig-asset-reference"), *RigReference))
+		{
+			NewNode->ReconstructNode();
+
+			TSet<FString> ExposedNames;
+			if (const FString* ExposedPins = NodeAST->Properties.Find(TEXT("exposed-input-pins")))
 			{
-				if (Pin && Pin->Direction == EGPD_Input && !Pin->DefaultValue.IsEmpty() && !Pin->AutogeneratedDefaultValue.IsEmpty())
+				ParseExposedPinNames(*ExposedPins, ExposedNames);
+			}
+			else
+			{
+				// Compatibility with DSL exported before the explicit exposure manifest.
+				for (const TPair<FString, FString>& Pair : NodeAST->Properties)
 				{
-					if (Pin->DefaultValue == Pin->AutogeneratedDefaultValue)
-					{
-						Pin->DefaultValue.Empty();
-					}
-					else if (FCString::IsNumeric(*Pin->DefaultValue) && FCString::IsNumeric(*Pin->AutogeneratedDefaultValue))
-					{
-						float ValF = FCString::Atof(*Pin->DefaultValue);
-						float DefF = FCString::Atof(*Pin->AutogeneratedDefaultValue);
-						if (FMath::IsNearlyEqual(ValF, DefF, 1e-6f))
-						{
-							Pin->DefaultValue.Empty();
-						}
-					}
+					ExposedNames.Add(IMP_NormalizeBindingToken(Pair.Key));
 				}
+			}
+			if (RestoreCustomPinVisibility(NewNode, ExposedNames))
+			{
+				NewNode->ReconstructNode();
 			}
 		}
 	}
-	
+
+	if (UAnimGraphNode_LinkedInputPose* LinkedInputPose = Cast<UAnimGraphNode_LinkedInputPose>(NewNode))
+	{
+		if (const FString* NameProperty = NodeAST->Properties.Find(TEXT("name")))
+		{
+			LinkedInputPose->Node.Name = FName(*StripQuotes(*NameProperty));
+			LinkedInputPose->ReconstructNode();
+		}
+	}
+
+	// Some nodes, notably Orientation Warping, create different input pins for
+	// each mode. Apply the shape-controlling enum before importing bindings.
+	if (const FString* ModeProperty = NodeAST->Properties.Find(TEXT("mode")))
+	{
+		if (SetNodeProperty(NewNode, TEXT("mode"), *ModeProperty))
+		{
+			NewNode->ReconstructNode();
+		}
+	}
+
+	const bool bUsesCurveAlpha = NodeAST->Properties.Contains(TEXT("alpha-curve-name"));
+	const bool bUsesBoolAlpha = NodeAST->Properties.Contains(TEXT("b-alpha-bool-enabled"));
+	if (bUsesCurveAlpha || bUsesBoolAlpha)
+	{
+		const EAnimAlphaInputType AlphaInputTypeValue = bUsesCurveAlpha
+			? EAnimAlphaInputType::Curve
+			: EAnimAlphaInputType::Bool;
+		for (TFieldIterator<FStructProperty> PropIt(NewNode->GetClass()); PropIt; ++PropIt)
+		{
+			FStructProperty* StructProperty = *PropIt;
+			if (!StructProperty->Struct || !StructProperty->Struct->IsChildOf(FAnimNode_Base::StaticStruct())) continue;
+			if (FProperty* AlphaInputType = FindFProperty<FProperty>(StructProperty->Struct, TEXT("AlphaInputType")))
+			{
+				void* StructMemory = StructProperty->ContainerPtrToValuePtr<void>(NewNode);
+				void* ValueMemory = AlphaInputType->ContainerPtrToValuePtr<void>(StructMemory);
+				if (FEnumProperty* EnumProperty = CastField<FEnumProperty>(AlphaInputType))
+				{
+					EnumProperty->GetUnderlyingProperty()->SetIntPropertyValue(ValueMemory, static_cast<int64>(AlphaInputTypeValue));
+				}
+				else if (FByteProperty* ByteProperty = CastField<FByteProperty>(AlphaInputType))
+				{
+					ByteProperty->SetPropertyValue(ValueMemory, static_cast<uint8>(AlphaInputTypeValue));
+				}
+			}
+			break;
+		}
+		NewNode->ReconstructNode();
+	}
+
 	// Set non-pose properties via pins
 	for (const auto& Pair : NodeAST->Properties)
 	{
 		// Skip special properties already handled above
 		if (Pair.Key == TEXT("name") || Pair.Key == TEXT("loop") || 
 			Pair.Key == TEXT("class") || Pair.Key == TEXT("initial") || 
-			Pair.Key == TEXT("transitions") || Pair.Key == TEXT("layer") ||
-			Pair.Key == TEXT("interface") || Pair.Key == TEXT("bound-enum"))
+			Pair.Key == TEXT("transitions") || Pair.Key == TEXT("state-nodes") || Pair.Key == TEXT("layer") ||
+			Pair.Key == TEXT("interface") || Pair.Key == TEXT("bound-enum") ||
+			Pair.Key == TEXT("exposed-input-pins") ||
+			Pair.Key == TEXT("bound-graph-class") || Pair.Key == TEXT("bound-graph-schema") ||
+			Pair.Key == TEXT("bound-graph-guid"))
 		{
 			continue;
 		}
@@ -2412,6 +3007,27 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		// The pin will retain its default value (no connection restored).
 		if (ConnectPropertyBinding(Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForGraph(Graph)), Graph, NewNode, Pair.Key, Pair.Value, HelperGraphs))
 		{
+			continue;
+		}
+
+		if (Pair.Value.StartsWith(TEXT("(value-expr ")))
+		{
+			const FLispParseResult ParsedValue = FLispParser::Parse(Pair.Value);
+			UEdGraphPin* TargetPin = FindInputValuePin(NewNode, Pair.Key);
+			if (!ParsedValue.bSuccess || ParsedValue.Nodes.Num() != 1 || !ParsedValue.Nodes[0].IsValid()
+				|| ParsedValue.Nodes[0]->GetFormName() != TEXT("value-expr") || ParsedValue.Nodes[0]->Num() != 2 || !TargetPin)
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:LinkedPureExpression] Node '%s' property ':%s' has invalid value-expr metadata or no target pin"),
+					*NodeType, *Pair.Key);
+				continue;
+			}
+			const FString ExpressionCode = ParsedValue.Nodes[0]->Get(1)->ToString(false, 0);
+			const FBlueprintLispResult ImportedExpression = FBlueprintLispConverter::ImportPureExpression(Graph, TargetPin, ExpressionCode);
+			if (!ImportedExpression.bSuccess)
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:LinkedPureExpression] Node '%s' property ':%s' import failed: %s"),
+					*NodeType, *Pair.Key, *ImportedExpression.Error);
+			}
 			continue;
 		}
 
@@ -2447,14 +3063,39 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		}
 	}
 
-	if (UAnimGraphNode_TwoWayBlend* BlendNode = Cast<UAnimGraphNode_TwoWayBlend>(NewNode))
+	auto ReapplyBlendTime = [&]()
 	{
-		if (NodeAST->Properties.Contains(TEXT("alpha-curve-name")))
+		if (UAnimGraphNode_BlendListBase* BlendListNode = Cast<UAnimGraphNode_BlendListBase>(NewNode))
 		{
-			BlendNode->BlendNode.AlphaInputType = EAnimAlphaInputType::Curve;
-			BlendNode->ReconstructNode();
+			if (const FString* BlendTimeProperty = NodeAST->Properties.Find(TEXT("blend-time")))
+			{
+				BlendListNode->ReconstructNode();
+				SetNodeProperty(BlendListNode, TEXT("blend-time"), *BlendTimeProperty);
+
+				FString BlendTimeText = StripQuotes(*BlendTimeProperty);
+				BlendTimeText.RemoveFromStart(TEXT("("));
+				BlendTimeText.RemoveFromEnd(TEXT(")"));
+				TArray<FString> BlendTimes;
+				BlendTimeText.ParseIntoArray(BlendTimes, TEXT(","), false);
+				for (UEdGraphPin* Pin : BlendListNode->Pins)
+				{
+					if (!Pin || Pin->Direction != EGPD_Input) continue;
+					FString NormalizedPinName = Pin->PinName.ToString().ToLower();
+					NormalizedPinName.ReplaceInline(TEXT(" "), TEXT(""));
+					NormalizedPinName.ReplaceInline(TEXT("_"), TEXT(""));
+					NormalizedPinName.ReplaceInline(TEXT("-"), TEXT(""));
+					if (!NormalizedPinName.StartsWith(TEXT("blendtime"))) continue;
+					const FString IndexText = NormalizedPinName.Mid(9);
+					if (!IndexText.IsNumeric()) continue;
+					const int32 Index = FCString::Atoi(*IndexText);
+					if (BlendTimes.IsValidIndex(Index))
+					{
+						Pin->DefaultValue = BlendTimes[Index].TrimStartAndEnd();
+					}
+				}
+			}
 		}
-	}
+	};
 	
 	// ---- Handle state machine ----
 	if (NodeType == TEXT("state-machine"))
@@ -2469,10 +3110,107 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		UE_LOG(LogAnimBPImporter, Log, TEXT("Created node: %s (%s)"), *NodeType, *NodeClass->GetName());
 		return NewNode;
 	}
+
+	bool bIsBlendStackNode = false;
+	for (const UClass* TestClass = NewNode->GetClass(); TestClass; TestClass = TestClass->GetSuperClass())
+	{
+		if (TestClass->GetName() == TEXT("AnimGraphNode_BlendStack_Base"))
+		{
+			bIsBlendStackNode = true;
+			break;
+		}
+	}
+	if (bIsBlendStackNode)
+	{
+		const FNamedChild* SampleChild = NodeAST->Children.FindByPredicate(
+			[](const FNamedChild& Child) { return Child.PinName == TEXT("sample-graph"); });
+		if (!SampleChild || !SampleChild->Node.IsValid() || NewNode->GetSubGraphs().IsEmpty())
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:BlendStackBoundGraph] BlendStack '%s' is missing :sample-graph or bound graph"), *NodeType);
+			Graph->RemoveNode(NewNode);
+			return nullptr;
+		}
+
+		UEdGraph* BoundGraph = NewNode->GetSubGraphs()[0];
+		if (const FString* RequestedClass = NodeAST->Properties.Find(TEXT("bound-graph-class"));
+			RequestedClass && StripQuotes(*RequestedClass) != BoundGraph->GetClass()->GetPathName())
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:BlendStackBoundGraph] Bound graph class mismatch: requested %s, created %s"),
+				**RequestedClass, *BoundGraph->GetClass()->GetPathName());
+			Graph->RemoveNode(NewNode);
+			return nullptr;
+		}
+		if (const FString* RequestedSchema = NodeAST->Properties.Find(TEXT("bound-graph-schema"));
+			RequestedSchema && BoundGraph->GetSchema()
+			&& StripQuotes(*RequestedSchema) != BoundGraph->GetSchema()->GetClass()->GetPathName())
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:BlendStackBoundGraph] Bound graph schema mismatch: requested %s, created %s"),
+				**RequestedSchema, *BoundGraph->GetSchema()->GetClass()->GetPathName());
+			Graph->RemoveNode(NewNode);
+			return nullptr;
+		}
+		if (const FString* RequestedGuid = NodeAST->Properties.Find(TEXT("bound-graph-guid")))
+		{
+			FGuid ParsedGuid;
+			if (!FGuid::Parse(StripQuotes(*RequestedGuid), ParsedGuid) || !ParsedGuid.IsValid())
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:BlendStackBoundGraph] Invalid bound graph GUID: %s"), **RequestedGuid);
+				Graph->RemoveNode(NewNode);
+				return nullptr;
+			}
+			BoundGraph->GraphGuid = ParsedGuid;
+		}
+
+		UAnimGraphNode_Root* SampleResult = nullptr;
+		TArray<UEdGraphNode*> SampleNodesToRemove;
+		for (UEdGraphNode* BoundNode : BoundGraph->Nodes)
+		{
+			if (!SampleResult) SampleResult = Cast<UAnimGraphNode_Root>(BoundNode);
+			if (BoundNode && !BoundNode->IsA<UAnimGraphNode_Root>()) SampleNodesToRemove.Add(BoundNode);
+		}
+		for (UEdGraphNode* BoundNode : SampleNodesToRemove) BoundGraph->RemoveNode(BoundNode);
+		if (!SampleResult)
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:BlendStackBoundGraph] Created bound graph has no result node"));
+			Graph->RemoveNode(NewNode);
+			return nullptr;
+		}
+		for (UEdGraphPin* Pin : SampleResult->Pins) if (Pin) Pin->BreakAllPinLinks();
+
+		UAnimGraphNode_Base* SampleRoot = BuildAnimNode(SampleChild->Node, BoundGraph, DefineNodes, HelperGraphs);
+		if (!SampleRoot)
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:BlendStackBoundGraph] Failed to rebuild sample graph root '%s'"),
+				*SampleChild->Node->NodeType);
+			Graph->RemoveNode(NewNode);
+			return nullptr;
+		}
+		UEdGraphPin* SampleOutput = FindOutputPosePin(SampleRoot);
+		UEdGraphPin* ResultInput = nullptr;
+		for (UEdGraphPin* Pin : SampleResult->Pins)
+		{
+			if (Pin && Pin->Direction == EGPD_Input && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
+			{
+				ResultInput = Pin;
+				break;
+			}
+		}
+		if (!SampleOutput || !ResultInput)
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:BlendStackBoundGraph] Sample graph root/result pose pins are missing"));
+			Graph->RemoveNode(NewNode);
+			return nullptr;
+		}
+		ConnectPins(SampleOutput, ResultInput);
+	}
 	
 	// ---- Recursively build children and connect ----
 	for (const FNamedChild& Child : NodeAST->Children)
 	{
+		if (bIsBlendStackNode && Child.PinName == TEXT("sample-graph"))
+		{
+			continue;
+		}
 		if (!Child.Node.IsValid())
 		{
 			UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:InvalidChild] Node '%s' has a null child node in DSL (pin '%s') — skipping"),
@@ -2525,12 +3263,102 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 				*Child.Node->NodeType, *NodeType, *Child.PinName);
 		}
 	}
-	
+
+	ReapplyBlendTime();
+	static const FName AlphaPropertiesToReapply[] = {
+		TEXT("alpha-bool-blend"),
+		TEXT("alpha-scale-bias-clamp")
+	};
+	for (const FName& PropertyName : AlphaPropertiesToReapply)
+	{
+		if (const FString* PropertyValue = NodeAST->Properties.Find(PropertyName.ToString()))
+		{
+			SetNodeProperty(NewNode, PropertyName.ToString(), *PropertyValue);
+		}
+	}
 	UE_LOG(LogAnimBPImporter, Log, TEXT("Created node: %s (%s)"), *NodeType, *NodeClass->GetName());
 	return NewNode;
 }
 
 // ========== State Machine Building ==========
+
+namespace
+{
+	struct FImportedStateMachineNode
+	{
+		FString Kind;
+		FString Name;
+		FString ChildId;
+		bool bEmpty = false;
+		bool bGlobal = false;
+		TArray<FString> Targets;
+		FString RuleGraph;
+	};
+
+	static bool ParseStateMachineNodes(const FString& Source, TArray<FImportedStateMachineNode>& OutNodes)
+	{
+		TArray<FAnimLangToken> Tokens;
+		TArray<FAnimLangLexError> Errors;
+		if (!FAnimLangTokenizer::Tokenize(Source, Tokens, Errors) || Errors.Num() > 0)
+		{
+			return false;
+		}
+
+		int32 Index = 0;
+		auto Is = [&Tokens, &Index](const EAnimLangTokenType Type)
+		{
+			return Tokens.IsValidIndex(Index) && Tokens[Index].Type == Type;
+		};
+		if (!Is(EAnimLangTokenType::LBracket))
+		{
+			return false;
+		}
+		++Index;
+
+		while (Tokens.IsValidIndex(Index) && !Is(EAnimLangTokenType::RBracket) && !Is(EAnimLangTokenType::EndOfFile))
+		{
+			if (!Is(EAnimLangTokenType::LParen))
+			{
+				++Index;
+				continue;
+			}
+			++Index;
+			if (!Is(EAnimLangTokenType::Identifier))
+			{
+				return false;
+			}
+
+			FImportedStateMachineNode& Node = OutNodes.AddDefaulted_GetRef();
+			Node.Kind = Tokens[Index++].Value;
+			while (Tokens.IsValidIndex(Index) && !Is(EAnimLangTokenType::RParen) && !Is(EAnimLangTokenType::EndOfFile))
+			{
+				if (!Is(EAnimLangTokenType::Keyword))
+				{
+					++Index;
+					continue;
+				}
+				const FString Key = Tokens[Index++].Value;
+				if (!Tokens.IsValidIndex(Index))
+				{
+					return false;
+				}
+				const FAnimLangToken& Value = Tokens[Index++];
+				if (Key == TEXT("name") && Value.Type == EAnimLangTokenType::String) Node.Name = Value.Value;
+				else if (Key == TEXT("child") && Value.Type == EAnimLangTokenType::String) Node.ChildId = Value.Value;
+				else if (Key == TEXT("empty") && Value.Type == EAnimLangTokenType::Bool) Node.bEmpty = Value.Value == TEXT("true");
+				else if (Key == TEXT("global") && Value.Type == EAnimLangTokenType::Bool) Node.bGlobal = Value.Value == TEXT("true");
+				else if (Key == TEXT("target") && Value.Type == EAnimLangTokenType::String) Node.Targets.Add(Value.Value);
+				else if (Key == TEXT("rule-graph") && Value.Type == EAnimLangTokenType::String) Node.RuleGraph = Value.Value;
+			}
+			if (!Is(EAnimLangTokenType::RParen) || Node.Name.IsEmpty())
+			{
+				return false;
+			}
+			++Index;
+		}
+		return Is(EAnimLangTokenType::RBracket);
+	}
+}
 
 bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, const TSharedPtr<FAnimNodeAST>& NodeAST,
 	const TMap<FString, UAnimGraphNode_SaveCachedPose*>* DefineNodes,
@@ -2562,100 +3390,139 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 		InitialStateName = StripQuotes(*InitialProp);
 	}
 	
-	// Collect state nodes from children
-	TMap<FString, UAnimStateNode*> StateNodes;
-	
-	for (const FNamedChild& Child : NodeAST->Children)
+	TArray<FImportedStateMachineNode> NodeSpecs;
+	if (const FString* StateNodesProp = NodeAST->Properties.Find(TEXT("state-nodes")))
 	{
-		if (!Child.Node.IsValid()) continue;
-		
-		// Convert kebab pin name back to state name (e.g. "in-ragdoll" -> "In Ragdoll")
-		FString StateName = Child.PinName;
-		StateName.ReplaceInline(TEXT("-"), TEXT(" "));
-		// Capitalize first letter of each word
-		FString TitleCaseName;
-		bool bCapNext = true;
-		for (TCHAR Ch : StateName)
+		if (!ParseStateMachineNodes(*StateNodesProp, NodeSpecs))
 		{
-			if (Ch == ' ')
+			UE_LOG(LogAnimBPImporter, Error, TEXT("State machine has malformed :state-nodes metadata"));
+			return false;
+		}
+	}
+	else
+	{
+		// Backward compatibility for DSL written before explicit topology metadata.
+		for (const FNamedChild& Child : NodeAST->Children)
+		{
+			FImportedStateMachineNode& Spec = NodeSpecs.AddDefaulted_GetRef();
+			Spec.Kind = TEXT("state");
+			Spec.ChildId = Child.PinName;
+			Spec.Name = Child.PinName;
+			Spec.Name.ReplaceInline(TEXT("-"), TEXT(" "));
+			for (int32 CharIndex = 0; CharIndex < Spec.Name.Len(); ++CharIndex)
 			{
-				bCapNext = true;
-				TitleCaseName += Ch;
-			}
-			else if (bCapNext)
-			{
-				TitleCaseName += FChar::ToUpper(Ch);
-				bCapNext = false;
-			}
-			else
-			{
-				TitleCaseName += Ch;
+				if (CharIndex == 0 || Spec.Name[CharIndex - 1] == ' ')
+				{
+					Spec.Name[CharIndex] = FChar::ToUpper(Spec.Name[CharIndex]);
+				}
 			}
 		}
-		
-		// Create state node
-		UAnimStateNode* StateNode = NewObject<UAnimStateNode>(SMGraph);
-		if (StateNode)
+	}
+
+	auto FindStateChild = [&NodeAST](const FString& ChildId) -> TSharedPtr<FAnimNodeAST>
+	{
+		for (const FNamedChild& Child : NodeAST->Children)
 		{
+			if (Child.PinName == ChildId) return Child.Node;
+		}
+		return nullptr;
+	};
+
+	TMap<FString, UAnimStateNodeBase*> StateNodes;
+	TMap<FString, UAnimStateAliasNode*> AliasNodes;
+	for (const FImportedStateMachineNode& Spec : NodeSpecs)
+	{
+		if (Spec.Kind == TEXT("state"))
+		{
+			UAnimStateNode* StateNode = NewObject<UAnimStateNode>(SMGraph);
 			StateNode->CreateNewGuid();
+			if (Spec.ChildId.StartsWith(TEXT("state-")))
+			{
+				FGuid RestoredGuid;
+				if (FGuid::ParseExact(Spec.ChildId.Mid(6), EGuidFormats::Digits, RestoredGuid))
+				{
+					StateNode->NodeGuid = RestoredGuid;
+				}
+			}
 			StateNode->PostPlacedNewNode();
 			StateNode->AllocateDefaultPins();
 			SMGraph->AddNode(StateNode, false, false);
-			
-			// Set the state name
-			StateNode->OnRenameNode(TitleCaseName);
-			
-			// Set state name via the bound graph's name
-			// The state node should have a BoundGraph where we place the state result + animation tree
-			if (StateNode->BoundGraph)
+			StateNode->OnRenameNode(Spec.Name);
+
+			const TSharedPtr<FAnimNodeAST> StateAnimation = FindStateChild(Spec.ChildId);
+			if (StateAnimation.IsValid() && StateNode->BoundGraph)
 			{
-				// Find the state result node in the bound graph
-				UAnimGraphNode_StateResult* ResultNode = nullptr;
-				for (UEdGraphNode* ExistingNode : StateNode->BoundGraph->Nodes)
-				{
-					ResultNode = Cast<UAnimGraphNode_StateResult>(ExistingNode);
-					if (ResultNode) break;
-				}
-				
-				if (!ResultNode)
-				{
-					ResultNode = NewObject<UAnimGraphNode_StateResult>(StateNode->BoundGraph);
-					ResultNode->CreateNewGuid();
-					ResultNode->PostPlacedNewNode();
-					ResultNode->AllocateDefaultPins();
-					StateNode->BoundGraph->AddNode(ResultNode, false, false);
-				}
-				
-				// Build the animation subtree for this state
-				UAnimGraphNode_Base* AnimTree = BuildAnimNode(Child.Node, StateNode->BoundGraph, DefineNodes, HelperGraphs);
+				UAnimGraphNode_StateResult* ResultNode = StateNode->GetResultNodeInsideState();
+				UAnimGraphNode_Base* AnimTree = BuildAnimNode(StateAnimation, StateNode->BoundGraph, DefineNodes, HelperGraphs);
 				if (AnimTree && ResultNode)
 				{
-					UEdGraphPin* AnimOutput = FindOutputPosePin(AnimTree);
-					UEdGraphPin* ResultInput = nullptr;
-					for (UEdGraphPin* Pin : ResultNode->Pins)
-					{
-						if (Pin && Pin->Direction == EGPD_Input)
-						{
-							ResultInput = Pin;
-							break;
-						}
-					}
-					if (AnimOutput && ResultInput)
-					{
-						ConnectPins(AnimOutput, ResultInput);
-					}
+					ConnectPins(FindOutputPosePin(AnimTree), StateNode->GetPoseSinkPinInsideState());
 				}
 			}
-			
-			StateNodes.Add(TitleCaseName, StateNode);
-			UE_LOG(LogAnimBPImporter, Log, TEXT("Created state: %s"), *TitleCaseName);
+			StateNodes.Add(Spec.Name, StateNode);
+			UE_LOG(LogAnimBPImporter, Log, TEXT("Created state: %s"), *Spec.Name);
+		}
+		else if (Spec.Kind == TEXT("alias"))
+		{
+			UAnimStateAliasNode* AliasNode = NewObject<UAnimStateAliasNode>(SMGraph);
+			AliasNode->CreateNewGuid();
+			AliasNode->PostPlacedNewNode();
+			AliasNode->AllocateDefaultPins();
+			SMGraph->AddNode(AliasNode, false, false);
+			AliasNode->OnRenameNode(Spec.Name);
+			AliasNode->bGlobalAlias = Spec.bGlobal;
+			StateNodes.Add(Spec.Name, AliasNode);
+			AliasNodes.Add(Spec.Name, AliasNode);
+			UE_LOG(LogAnimBPImporter, Log, TEXT("Created alias: %s"), *Spec.Name);
+		}
+		else if (Spec.Kind == TEXT("conduit"))
+		{
+			UAnimStateConduitNode* ConduitNode = NewObject<UAnimStateConduitNode>(SMGraph);
+			ConduitNode->CreateNewGuid();
+			ConduitNode->PostPlacedNewNode();
+			ConduitNode->AllocateDefaultPins();
+			SMGraph->AddNode(ConduitNode, false, false);
+			ConduitNode->OnRenameNode(Spec.Name);
+			if (!Spec.RuleGraph.IsEmpty() && ConduitNode->GetBoundGraph())
+			{
+				FBlueprintLispConverter::FImportOptions LispOpts;
+				LispOpts.ImportMode = FBlueprintLispConverter::EImportMode::ReplaceGraph;
+				LispOpts.bAutoLayout = false;
+				LispOpts.bCompile = false;
+				const FBlueprintLispResult LispResult = FBlueprintLispConverter::ImportGraph(
+					ConduitNode->GetBoundGraph(), Spec.RuleGraph, LispOpts);
+				if (!LispResult.bSuccess)
+				{
+					UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:ConduitRuleGraphImport] Conduit '%s': %s"),
+						*Spec.Name, *LispResult.Error);
+				}
+			}
+			StateNodes.Add(Spec.Name, ConduitNode);
+			UE_LOG(LogAnimBPImporter, Log, TEXT("Created conduit: %s"), *Spec.Name);
+		}
+	}
+
+	for (const FImportedStateMachineNode& Spec : NodeSpecs)
+	{
+		UAnimStateAliasNode* const* AliasPtr = AliasNodes.Find(Spec.Name);
+		if (!AliasPtr || !*AliasPtr) continue;
+		for (const FString& TargetName : Spec.Targets)
+		{
+			if (UAnimStateNodeBase* const* Target = StateNodes.Find(TargetName))
+			{
+				(*AliasPtr)->GetAliasedStates().Add(*Target);
+			}
+			else
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("Alias '%s' target '%s' was not found"), *Spec.Name, *TargetName);
+			}
 		}
 	}
 	
 	// Connect entry node to initial state
 	if (!InitialStateName.IsEmpty())
 	{
-		UAnimStateNode** InitState = StateNodes.Find(InitialStateName);
+		UAnimStateNodeBase** InitState = StateNodes.Find(InitialStateName);
 		if (InitState && *InitState)
 		{
 			// Find the entry node
@@ -2766,13 +3633,17 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 			// Parse the entry: "FromState -> ToState :duration X :priority Y :bidirectional true :rule (...)"
 			// Find " -> " to split From and the rest
 			int32 ArrowIdx = INDEX_NONE;
-			EntryStr.FindChar('-', ArrowIdx);
-			// Search for " -> " pattern (space-arrow-space or arrow-space)
+			// Search for the delimiter outside quoted endpoint names. Alias names may contain "->".
 			int32 SearchPos = 0;
 			bool bFoundArrow = false;
+			bool bInEndpointString = false;
 			while (SearchPos < EntryStr.Len() - 2)
 			{
-				if (EntryStr[SearchPos] == '-' && EntryStr[SearchPos+1] == '>')
+				if (EntryStr[SearchPos] == '"' && (SearchPos == 0 || EntryStr[SearchPos - 1] != '\\'))
+				{
+					bInEndpointString = !bInEndpointString;
+				}
+				else if (!bInEndpointString && EntryStr[SearchPos] == '-' && EntryStr[SearchPos+1] == '>')
 				{
 					ArrowIdx = SearchPos;
 					bFoundArrow = true;
@@ -2788,7 +3659,7 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 			}
 			
 			FParsedTransition Trans;
-			Trans.FromState = EntryStr.Left(ArrowIdx).TrimStartAndEnd();
+			Trans.FromState = StripQuotes(EntryStr.Left(ArrowIdx).TrimStartAndEnd());
 			
 			// After "->", the rest is "ToState :key val ..."
 			// ToState ends at the first " :" (space + colon = keyword start)
@@ -2807,7 +3678,7 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 			
 			if (FirstKeyword != INDEX_NONE)
 			{
-				Trans.ToState = Rest.Left(FirstKeyword).TrimStartAndEnd();
+				Trans.ToState = StripQuotes(Rest.Left(FirstKeyword).TrimStartAndEnd());
 				FString Props = Rest.Mid(FirstKeyword).TrimStartAndEnd();
 				
 				// Parse keyword properties from the Props string
@@ -2958,7 +3829,7 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 			else
 			{
 				// No keywords — just "ToState"
-				Trans.ToState = Rest.TrimStartAndEnd();
+				Trans.ToState = StripQuotes(Rest.TrimStartAndEnd());
 			}
 			
 			if (!Trans.FromState.IsEmpty() && !Trans.ToState.IsEmpty())
@@ -2987,8 +3858,8 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 				}
 			}
 			
-			UAnimStateNode** FromStatePtr = StateNodes.Find(Trans.FromState);
-			UAnimStateNode** ToStatePtr = StateNodes.Find(Trans.ToState);
+			UAnimStateNodeBase** FromStatePtr = StateNodes.Find(Trans.FromState);
+			UAnimStateNodeBase** ToStatePtr = StateNodes.Find(Trans.ToState);
 			
 			if (!FromStatePtr || !*FromStatePtr)
 			{
@@ -3037,6 +3908,19 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 						BoundGraph, Trans.RuleGraph, LispOpts);
 					if (LispResult.bSuccess)
 					{
+						for (UEdGraphNode* RuleNode : BoundGraph->Nodes)
+						{
+							if (UK2Node_AnimGetter* AnimGetter = Cast<UK2Node_AnimGetter>(RuleNode))
+							{
+								AnimGetter->SourceStateNode = *FromStatePtr;
+								AnimGetter->SourceNode = SMNode;
+								AnimGetter->SourceAnimBlueprint = Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForGraph(BoundGraph));
+								if (UFunction* GetterFunction = AnimGetter->GetTargetFunction())
+								{
+									AnimGetter->GetterClass = GetterFunction->GetOwnerClass();
+								}
+							}
+						}
 						UE_LOG(LogAnimBPImporter, Log, TEXT("Restored rule-graph for transition %s -> %s"),
 							*Trans.FromState, *Trans.ToState);
 					}
@@ -3187,6 +4071,17 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 		{
 			HelperGraphLookup.Add(Helper.Id, Helper);
 		}
+	}
+	if (!BuildAnimationLayers(Blueprint, AST->AnimationLayers, &HelperGraphLookup))
+	{
+		return false;
+	}
+	if (AST->AnimationLayers.Num() > 0)
+	{
+		FKismetEditorUtilities::CompileBlueprint(Blueprint,
+			EBlueprintCompileOptions::RegenerateSkeletonOnly
+			| EBlueprintCompileOptions::SkipGarbageCollection
+			| EBlueprintCompileOptions::SkipSave);
 	}
 	
 	// Build defines (SaveCachedPose nodes)
@@ -3361,13 +4256,6 @@ bool FAnimBPImporter::CompileBlueprint(UAnimBlueprint* Blueprint, FString* OutEr
 	
 	Blueprint->Modify();
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
-
-	// Force-reconstruct all nodes so that Wildcard pins (e.g. EnumEquality input pins)
-	// have their concrete types propagated via PostReconstructNode -> NotifyPinConnectionListChanged.
-	// This is the same path taken by the OnLoad compilation pipeline (bIsRegeneratingOnLoad=true),
-	// but skipped in ordinary CompileBlueprint calls.  Without this, EnumEquality nodes imported
-	// by BlueprintLisp remain Wildcard and produce LogBlueprint: Error entries.
-	FBlueprintEditorUtils::ReconstructAllNodes(Blueprint);
 
 	FKismetEditorUtilities::CompileBlueprint(Blueprint);
 	
@@ -3646,6 +4534,17 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 		{
 			HelperGraphLookup.Add(Helper.Id, Helper);
 		}
+	}
+	if (!BuildAnimationLayers(Blueprint, NewAST->AnimationLayers, &HelperGraphLookup))
+	{
+		return false;
+	}
+	if (NewAST->AnimationLayers.Num() > 0)
+	{
+		FKismetEditorUtilities::CompileBlueprint(Blueprint,
+			EBlueprintCompileOptions::RegenerateSkeletonOnly
+			| EBlueprintCompileOptions::SkipGarbageCollection
+			| EBlueprintCompileOptions::SkipSave);
 	}
 	
 	// Step 3: Build defines (SaveCachedPose nodes)
@@ -3951,6 +4850,87 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 	// Step 5: Compile
 	if (Result.bSuccess)
 	{
+		struct FBlendListPinCompileState
+		{
+			FName Name;
+			FString DefaultValue;
+			FString AutogeneratedDefaultValue;
+		};
+		struct FBlendListCompileState
+		{
+			TWeakObjectPtr<UAnimGraphNode_BlendListBase> Node;
+			TArray<FString> BlendTimes;
+			TArray<FBlendListPinCompileState> Pins;
+		};
+		TArray<FBlendListCompileState> BlendListCompileStates;
+		TArray<UEdGraph*> BlueprintGraphs;
+		ExistingBlueprint->GetAllGraphs(BlueprintGraphs);
+		for (UEdGraph* Graph : BlueprintGraphs)
+		{
+			if (!Graph) continue;
+			for (UEdGraphNode* GraphNode : Graph->Nodes)
+			{
+				UAnimGraphNode_BlendListBase* BlendListNode = Cast<UAnimGraphNode_BlendListBase>(GraphNode);
+				if (!BlendListNode) continue;
+				FBlendListCompileState& State = BlendListCompileStates.AddDefaulted_GetRef();
+				State.Node = BlendListNode;
+				for (UEdGraphPin* Pin : BlendListNode->Pins)
+				{
+					if (Pin && Pin->PinName.ToString().StartsWith(TEXT("BlendTime_")))
+					{
+						State.Pins.Add({ Pin->PinName, Pin->DefaultValue, Pin->AutogeneratedDefaultValue });
+					}
+				}
+				for (TFieldIterator<FStructProperty> PropIt(BlendListNode->GetClass()); PropIt; ++PropIt)
+				{
+					FStructProperty* StructProperty = *PropIt;
+					if (!StructProperty->Struct || !StructProperty->Struct->IsChildOf(FAnimNode_Base::StaticStruct())) continue;
+					FArrayProperty* BlendTimeProperty = FindFProperty<FArrayProperty>(StructProperty->Struct, TEXT("BlendTime"));
+					if (!BlendTimeProperty) break;
+					void* StructMemory = StructProperty->ContainerPtrToValuePtr<void>(BlendListNode);
+					FScriptArrayHelper ArrayHelper(BlendTimeProperty, BlendTimeProperty->ContainerPtrToValuePtr<void>(StructMemory));
+					for (int32 Index = 0; Index < ArrayHelper.Num(); ++Index)
+					{
+						FString Value;
+						BlendTimeProperty->Inner->ExportText_Direct(Value, ArrayHelper.GetRawPtr(Index), nullptr, nullptr, PPF_None);
+						State.BlendTimes.Add(MoveTemp(Value));
+					}
+					break;
+				}
+			}
+		}
+		auto RestoreBlendListCompileState = [&BlendListCompileStates]()
+		{
+			for (const FBlendListCompileState& State : BlendListCompileStates)
+			{
+				UAnimGraphNode_BlendListBase* BlendListNode = State.Node.Get();
+				if (!BlendListNode) continue;
+				for (const FBlendListPinCompileState& PinState : State.Pins)
+				{
+					if (UEdGraphPin* Pin = BlendListNode->FindPin(PinState.Name))
+					{
+						Pin->DefaultValue = PinState.DefaultValue;
+						Pin->AutogeneratedDefaultValue = PinState.AutogeneratedDefaultValue;
+					}
+				}
+				for (TFieldIterator<FStructProperty> PropIt(BlendListNode->GetClass()); PropIt; ++PropIt)
+				{
+					FStructProperty* StructProperty = *PropIt;
+					if (!StructProperty->Struct || !StructProperty->Struct->IsChildOf(FAnimNode_Base::StaticStruct())) continue;
+					FArrayProperty* BlendTimeProperty = FindFProperty<FArrayProperty>(StructProperty->Struct, TEXT("BlendTime"));
+					if (!BlendTimeProperty) break;
+					void* StructMemory = StructProperty->ContainerPtrToValuePtr<void>(BlendListNode);
+					FScriptArrayHelper ArrayHelper(BlendTimeProperty, BlendTimeProperty->ContainerPtrToValuePtr<void>(StructMemory));
+					ArrayHelper.EmptyAndAddValues(State.BlendTimes.Num());
+					for (int32 Index = 0; Index < State.BlendTimes.Num(); ++Index)
+					{
+						BlendTimeProperty->Inner->ImportText_Direct(*State.BlendTimes[Index], ArrayHelper.GetRawPtr(Index), nullptr, PPF_None);
+					}
+					break;
+				}
+			}
+		};
+
 		FString CompileError;
 		const AnimBP2FPImportLifecycle::FImportLifecycleContext LifecycleContext =
 			MakeAnimLifecycleContext(ExistingBlueprint, FindAnimGraph(ExistingBlueprint), !Result.bUsedIncrementalPatch, Result.bUsedIncrementalPatch, true, true);
@@ -3962,6 +4942,7 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 		}
 		else
 		{
+			RestoreBlendListCompileState();
 			FString MetadataError;
 			if (!ApplyAnimBlueprintMetadata(ExistingBlueprint, NewAST->Metadata, MetadataError))
 			{

@@ -338,18 +338,26 @@ bool FAnimBP2FPBlendStackEmptyBoundGraphIsUnsupported::RunTest(const FString& Pa
 	{
 		return false;
 	}
-	TestEqual(TEXT("BlendStack is unsupported when BlueprintLisp cannot represent its bound graph"),
-		static_cast<uint8>(BlendStackAST->Coverage), static_cast<uint8>(EAnimNodeCoverage::Unsupported));
-	const FString* BoundGraphDSL = BlendStackAST->Properties.Find(TEXT("bound-graph"));
-	TestNull(TEXT("BlueprintLisp skip markers are never serialized as a bound graph"), BoundGraphDSL);
-	const FString* UnsupportedSchema = BlendStackAST->Properties.Find(TEXT("unsupported-bound-graph-schema"));
-	const FString* UnsupportedNodeClasses = BlendStackAST->Properties.Find(TEXT("unsupported-bound-graph-node-classes"));
-	TestTrue(TEXT("unsupported bound graph records its exact schema"), UnsupportedSchema && !UnsupportedSchema->IsEmpty());
-	TestTrue(TEXT("unsupported bound graph records its exact node classes"), UnsupportedNodeClasses && !UnsupportedNodeClasses->IsEmpty());
+	TestTrue(TEXT("BlendStack bound pose graph is semantically supported"), BlendStackAST->Coverage != EAnimNodeCoverage::Unsupported);
+	const FNamedChild* SampleGraph = BlendStackAST->Children.FindByPredicate(
+		[](const FNamedChild& Child) { return Child.PinName == TEXT("sample-graph"); });
+	TestTrue(TEXT("BlendStack exports its sample pose graph"), SampleGraph && SampleGraph->Node.IsValid());
+	TestTrue(TEXT("default sample graph preserves BlendStackInput"), SampleGraph && SampleGraph->Node.IsValid()
+		&& SampleGraph->Node->NodeClassPath.Contains(TEXT("AnimGraphNode_BlendStackInput")));
+	TestTrue(TEXT("bound graph class is recorded"), BlendStackAST->Properties.Contains(TEXT("bound-graph-class")));
+	TestTrue(TEXT("bound graph schema is recorded"), BlendStackAST->Properties.Contains(TEXT("bound-graph-schema")));
+	TestTrue(TEXT("bound graph GUID is recorded"), BlendStackAST->Properties.Contains(TEXT("bound-graph-guid")));
 
 	UAnimBlueprint* ImportDestination = NewAnimBlueprint(TEXT("ABP_BlendStackLossyImport"));
 	const FAnimBPImporter::FUpdateResult ImportResult = FAnimBPImporter::UpdateBlueprintDetailed(ImportDestination, Exported->ToString());
-	TestFalse(TEXT("unsupported BlendStack export is rejected"), ImportResult.bSuccess);
+	TestTrue(TEXT("semantic BlendStack export imports"), ImportResult.bSuccess);
+	const TSharedPtr<FAnimGraphAST> ReExported = ImportResult.bSuccess ? FAnimBPExporter::ExportToAST(ImportDestination) : nullptr;
+	const TSharedPtr<FAnimNodeAST> ReExportedBlendStack = ReExported.IsValid()
+		? FindNodeByClassPath(ReExported->RootNode, BlendStackClass->GetPathName()) : nullptr;
+	TestTrue(TEXT("imported BlendStack re-exports"), ReExportedBlendStack.IsValid());
+	TestTrue(TEXT("re-export preserves the sample graph"), ReExportedBlendStack.IsValid()
+		&& ReExportedBlendStack->Children.ContainsByPredicate(
+			[](const FNamedChild& Child) { return Child.PinName == TEXT("sample-graph") && Child.Node.IsValid(); }));
 	return true;
 }
 
