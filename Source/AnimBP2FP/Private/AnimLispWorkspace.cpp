@@ -6,9 +6,20 @@
 #include "AnimLangParser.h"
 #include "AnimLangTokenizer.h"
 #include "RigLangParser.h"
+#include "RigVMCore/RigVMRegistry.h"
 
 namespace
 {
+bool AreRigVMLinkTypesCompatible(const FAnimLispTypeRef& A, const FAnimLispTypeRef& B)
+{
+	if (A == B) return true;
+	const FRigVMRegistry_RWLock& Registry = FRigVMRegistry::Get();
+	const TRigVMTypeIndex AIndex = Registry.GetTypeIndexFromCPPType(A.CPPType);
+	const TRigVMTypeIndex BIndex = Registry.GetTypeIndexFromCPPType(B.CPPType);
+	return AIndex != INDEX_NONE && BIndex != INDEX_NONE
+		&& Registry.CanMatchTypes(AIndex, BIndex, true);
+}
+
 struct FTokenForm
 {
 	int32 Start = INDEX_NONE;
@@ -20,6 +31,8 @@ struct FTokenForm
 struct FWorkspaceUse
 {
 	FString QualifiedName;
+	FRigFunctionIdentifierAST FunctionIdentifier;
+	bool bLegacyShortCall = false;
 	EAnimLispCapability Required = EAnimLispCapability::DefinitionOnly;
 	EAnimLispSymbolKind ExpectedKind = EAnimLispSymbolKind::RigEntry;
 	FAnimLangSourceLoc Location;
@@ -361,7 +374,8 @@ void LintRigGraph(const FRigGraphAST& Graph, FAnimLangDiagnostics& OutDiag)
 			OutDiag.Add(Diagnostic);
 			bValidLink = false;
 		}
-		if (SourcePin != nullptr && TargetPin != nullptr && SourcePin->Type != TargetPin->Type)
+		if (SourcePin != nullptr && TargetPin != nullptr
+			&& !AreRigVMLinkTypesCompatible(SourcePin->Type, TargetPin->Type))
 		{
 			FAnimLangDiagnostic Diagnostic(
 				EAnimLangDiagSeverity::Error,
@@ -495,9 +509,11 @@ void LintRigGraph(const FRigGraphAST& Graph, FAnimLangDiagnostics& OutDiag)
 void LintRigModule(const FRigModuleAST& Rig, FAnimLangDiagnostics& OutDiag)
 {
 	TMap<FString, const FRigHierarchyElementAST*> ElementsByName;
+	TMap<FString, const FRigHierarchyElementAST*> ElementsById;
 	for (const FRigHierarchyElementAST& Element : Rig.Hierarchy)
 	{
 		ElementsByName.FindOrAdd(Element.Name, &Element);
+		ElementsById.FindOrAdd(Element.StableId, &Element);
 	}
 	for (const FRigHierarchyElementAST& Element : Rig.Hierarchy)
 	{
@@ -511,6 +527,62 @@ void LintRigModule(const FRigModuleAST& Rig, FAnimLangDiagnostics& OutDiag)
 					*Element.Name,
 					*Element.ParentName),
 				Element.Location);
+		}
+		TSet<FString> SeenParentIds;
+		for (const FRigHierarchyParentAST& Parent : Element.Parents)
+		{
+			if (!ElementsById.Contains(Parent.StableId))
+			{
+				OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Semantic,
+					FString::Printf(TEXT("Hierarchy element '%s' has missing parent '%s'"), *Element.Name, *Parent.StableId), Parent.Location);
+			}
+			if (SeenParentIds.Contains(Parent.StableId))
+			{
+				OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Semantic,
+					FString::Printf(TEXT("Hierarchy element '%s' has duplicate parent '%s'"), *Element.Name, *Parent.StableId), Parent.Location);
+			}
+			SeenParentIds.Add(Parent.StableId);
+			auto FiniteWeight = [](const FRigHierarchyWeightAST& Weight)
+			{
+				return FMath::IsFinite(Weight.Location) && FMath::IsFinite(Weight.Rotation) && FMath::IsFinite(Weight.Scale);
+			};
+			if (!FiniteWeight(Parent.CurrentWeight) || !FiniteWeight(Parent.InitialWeight))
+				OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Semantic, TEXT("Hierarchy parent weight must be finite"), Parent.Location);
+		}
+		TSet<uint8> SeenTransformRoles;
+		for (const FRigHierarchyTransformAST& Transform : Element.Transforms)
+		{
+			const uint8 Role = static_cast<uint8>(Transform.Role);
+			if (SeenTransformRoles.Contains(Role))
+				OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Semantic,
+					FString::Printf(TEXT("Hierarchy element '%s' has duplicate transform role"), *Element.Name), Transform.Location);
+			SeenTransformRoles.Add(Role);
+			if (Transform.Value.ContainsNaN())
+				OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Semantic, TEXT("Hierarchy transform must contain finite values"), Transform.Location);
+		}
+		for (const FRigHierarchyStateAST& State : Element.States)
+		{
+			if (State.Kind == ERigHierarchyStateKind::ControlValue)
+			{
+				int32 RequiredComponents = 0;
+				if (State.Type == TEXT("Position") || State.Type == TEXT("Scale") || State.Type == TEXT("Rotator") || State.Type == TEXT("Vector2D")) RequiredComponents = 3;
+				else if (State.Type == TEXT("Transform")) RequiredComponents = 10;
+				else if (State.Type == TEXT("TransformNoScale")) RequiredComponents = 7;
+				else if (State.Type == TEXT("EulerTransform")) RequiredComponents = 9;
+				else if (State.Type != TEXT("Bool") && State.Type != TEXT("Float") && State.Type != TEXT("ScaleFloat") && State.Type != TEXT("Integer"))
+					OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Semantic, TEXT("Invalid control value type"), State.Location);
+				if (RequiredComponents > 0 && State.Components.Num() != RequiredComponents)
+					OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Semantic,
+						FString::Printf(TEXT("Control value type '%s' requires %d components"), *State.Type, RequiredComponents), State.Location);
+			}
+		}
+		TSet<FString> SeenMetadataNames;
+		for (const FRigHierarchyMetadataAST& Metadata : Element.Metadata)
+		{
+			if (SeenMetadataNames.Contains(Metadata.Name))
+				OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Semantic,
+					FString::Printf(TEXT("Hierarchy element '%s' has duplicate metadata '%s'"), *Element.Name, *Metadata.Name), Metadata.Location);
+			SeenMetadataNames.Add(Metadata.Name);
 		}
 	}
 
@@ -546,8 +618,91 @@ void LintRigModule(const FRigModuleAST& Rig, FAnimLangDiagnostics& OutDiag)
 		for (const FString& Name : Path) Finished.Add(Name);
 	}
 
-	for (const FRigFunctionAST& Function : Rig.Functions) LintRigGraph(Function.Graph, OutDiag);
-	for (const FRigEntryAST& Entry : Rig.Entries) LintRigGraph(Entry.Graph, OutDiag);
+	TMap<FString, uint8> TypedParentVisit;
+	TArray<FString> TypedParentPath;
+	bool bTypedCycleReported = false;
+	TFunction<void(const FString&)> VisitTypedParents = [&](const FString& ElementId)
+	{
+		if (bTypedCycleReported || TypedParentVisit.FindRef(ElementId) == 2) return;
+		if (TypedParentVisit.FindRef(ElementId) == 1)
+		{
+			const int32 CycleStart = TypedParentPath.Find(ElementId);
+			TArray<FString> Cycle;
+			const int32 FirstIndex = CycleStart == INDEX_NONE ? 0 : CycleStart;
+			for (int32 Index = FirstIndex; Index < TypedParentPath.Num(); ++Index) Cycle.Add(TypedParentPath[Index]);
+			Cycle.Add(ElementId);
+			const FRigHierarchyElementAST* Element = ElementsById.FindRef(ElementId);
+			OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Semantic,
+				TEXT("Hierarchy multi-parent cycle: ") + FString::Join(Cycle, TEXT(" -> ")),
+				Element ? Element->Location : FAnimLangSourceLoc());
+			bTypedCycleReported = true;
+			return;
+		}
+		TypedParentVisit.Add(ElementId, 1);
+		TypedParentPath.Add(ElementId);
+		if (const FRigHierarchyElementAST* Element = ElementsById.FindRef(ElementId))
+			for (const FRigHierarchyParentAST& Parent : Element->Parents)
+				if (ElementsById.Contains(Parent.StableId)) VisitTypedParents(Parent.StableId);
+		TypedParentPath.Pop(EAllowShrinking::No);
+		TypedParentVisit.Add(ElementId, 2);
+	};
+	for (const FRigHierarchyElementAST& Element : Rig.Hierarchy) VisitTypedParents(Element.StableId);
+
+	if (!Rig.Graphs.IsEmpty())
+	{
+		for (const FRigGraphAST& Graph : Rig.Graphs) LintRigGraph(Graph, OutDiag);
+	}
+	else
+	{
+		for (const FRigFunctionAST& Function : Rig.Functions) LintRigGraph(Function.Graph, OutDiag);
+		for (const FRigEntryAST& Entry : Rig.Entries) LintRigGraph(Entry.Graph, OutDiag);
+	}
+}
+
+FAnimLispTypeRef RigFunctionTypeSignature(const FRigFunctionAST& Function)
+{
+	auto Atom = [](const FString& Value)
+	{
+		return FString::Printf(TEXT("%d#%s"), Value.Len(), *Value);
+	};
+	auto DirectionText = [](const ERigPinDirection Direction) -> const TCHAR*
+	{
+		switch (Direction)
+		{
+		case ERigPinDirection::Output: return TEXT("output");
+		case ERigPinDirection::IO: return TEXT("io");
+		case ERigPinDirection::Visible: return TEXT("visible");
+		case ERigPinDirection::Hidden: return TEXT("hidden");
+		case ERigPinDirection::Invalid: return TEXT("invalid");
+		default: return TEXT("input");
+		}
+	};
+	TArray<FString> Arguments;
+	const TArray<FRigCallableArgumentAST>* OrderedArguments = &Function.Arguments;
+	TArray<FRigCallableArgumentAST> LegacyArguments;
+	if (OrderedArguments->IsEmpty() && (!Function.Inputs.IsEmpty() || !Function.Outputs.IsEmpty()))
+	{
+		LegacyArguments = Function.Inputs;
+		LegacyArguments.Append(Function.Outputs);
+		OrderedArguments = &LegacyArguments;
+	}
+	for (const FRigCallableArgumentAST& Argument : *OrderedArguments)
+	{
+		Arguments.Add(
+			FString(DirectionText(Argument.Direction)) + TEXT("|")
+			+ Atom(Argument.Name) + TEXT("|")
+			+ Atom(Argument.Type.CPPType) + TEXT("|")
+			+ Atom(Argument.Type.CPPTypeObject) + TEXT("|")
+			+ Atom(Argument.Type.ContainerType) + TEXT("|")
+			+ Atom(Argument.DefaultValue) + TEXT("|")
+			+ (Argument.bExecuteContext ? TEXT("execute") : TEXT("value")) + TEXT("|")
+			+ (Argument.bConstant ? TEXT("const") : TEXT("mutable")) + TEXT("|")
+			+ (Argument.bInputVariable ? TEXT("input-variable") : TEXT("value")));
+	}
+	FAnimLispTypeRef Signature;
+	Signature.CPPType = TEXT("rig-fn(") + FString::Join(Arguments, TEXT(";"))
+		+ TEXT(")->") + Atom(Function.ReturnCPPType.IsEmpty() ? TEXT("void") : Function.ReturnCPPType);
+	return Signature;
 }
 }
 
@@ -562,6 +717,7 @@ struct FAnimLispWorkspace::FImpl
 	TMap<FString, int32> FailedModuleByIdentity;
 	TMap<FString, int32> DefinitionByModuleAndName;
 	TMap<FString, ERigVariableAccess> RigVariableAccessBySymbol;
+	TMap<FString, FRigFunctionIdentifierAST> RigFunctionIdentifierBySymbol;
 	TSet<FString> QuarantinedModuleIdentities;
 	TSet<int32> QuarantinedDefinitionIndices;
 	TArray<FAnimLangDiagnostic> EarlyDiagnostics;
@@ -576,6 +732,7 @@ struct FAnimLispWorkspace::FImpl
 		FailedModuleByIdentity.Reset();
 		DefinitionByModuleAndName.Reset();
 		RigVariableAccessBySymbol.Reset();
+		RigFunctionIdentifierBySymbol.Reset();
 		QuarantinedModuleIdentities.Reset();
 		QuarantinedDefinitionIndices.Reset();
 		EarlyDiagnostics.Reset();
@@ -674,6 +831,7 @@ struct FAnimLispWorkspace::FImpl
 		Module.ContentHash = Rig->Header.ContentHash;
 		Module.Location = Rig->Header.Location;
 		Module.Rig = Rig;
+		Module.ParseErrors = MoveTemp(Errors);
 		for (const FRigImportAST& Import : Rig->Imports) Module.Imports.Add(Import.Import);
 		ModuleBySource.Add(SourceFile, Modules.Num() - 1);
 		ModuleByIdentity.FindOrAdd(Module.Id.ToString(), Modules.Num() - 1);
@@ -698,13 +856,37 @@ struct FAnimLispWorkspace::FImpl
 			const EAnimLispCapability Capability = Function.Visibility == TEXT("internal")
 				? EAnimLispCapability::DefinitionOnly
 				: EAnimLispCapability::RigCall;
-			AddDefinition(Module, Function.Name, EAnimLispSymbolKind::RigFunction, Capability,
-				FAnimLispTypeRef(), Function.Location, Function.StableId);
+			const int32 DefinitionIndex = AddDefinition(Module, Function.Name,
+				EAnimLispSymbolKind::RigFunction, Capability,
+				RigFunctionTypeSignature(Function), Function.Location, Function.StableId);
+			RigFunctionIdentifierBySymbol.Add(
+				SymbolKey(Definitions[DefinitionIndex].Id), Function.FunctionIdentifier);
 		}
 		for (const FRigEntryAST& Entry : Rig->Entries)
 		{
 			AddDefinition(Module, Entry.Name, EAnimLispSymbolKind::RigEntry,
 				EAnimLispCapability::AnimRuntimeReference, FAnimLispTypeRef(), Entry.Location, Entry.StableId);
+		}
+		auto CollectCalls = [&Module](const FRigGraphAST& Graph)
+		{
+			for (const FRigNodeAST& Node : Graph.Nodes)
+			{
+				if (Node.Kind != ERigNodeKind::Call) continue;
+				FWorkspaceUse& Use = Module.Uses.AddDefaulted_GetRef();
+				Use.QualifiedName = Node.FunctionName;
+				Use.FunctionIdentifier = Node.FunctionIdentifier;
+				Use.bLegacyShortCall = !Node.FunctionIdentifier.IsComplete();
+				Use.Required = EAnimLispCapability::RigCall;
+				Use.ExpectedKind = EAnimLispSymbolKind::RigFunction;
+				Use.Location = Node.Location;
+			}
+		};
+		if (!Rig->Graphs.IsEmpty())
+			for (const FRigGraphAST& Graph : Rig->Graphs) CollectCalls(Graph);
+		else
+		{
+			for (const FRigFunctionAST& Function : Rig->Functions) CollectCalls(Function.Graph);
+			for (const FRigEntryAST& Entry : Rig->Entries) CollectCalls(Entry.Graph);
 		}
 	}
 
@@ -1219,7 +1401,7 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag)
 		for (const FRigLangParseError& Error : Module.ParseErrors)
 		{
 			OutDiag.Add(
-				EAnimLangDiagSeverity::Error,
+				Error.bWarning ? EAnimLangDiagSeverity::Warning : EAnimLangDiagSeverity::Error,
 				Error.Message.Contains(TEXT("Duplicate"))
 					? EAnimLangDiagCategory::Semantic
 					: EAnimLangDiagCategory::Parse,
@@ -1341,6 +1523,81 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag)
 		}
 	}
 
+	TArray<uint8> ImportVisitState;
+	ImportVisitState.SetNumZeroed(Impl->Modules.Num());
+	TArray<int32> ImportVisitStack;
+	bool bImportCycleReported = false;
+	TFunction<void(int32)> VisitRigImports = [&](const int32 ModuleIndex)
+	{
+		if (bImportCycleReported || !Impl->Modules.IsValidIndex(ModuleIndex)) return;
+		ImportVisitState[ModuleIndex] = 1;
+		ImportVisitStack.Add(ModuleIndex);
+		for (const FAnimLispImport& Import : Impl->Modules[ModuleIndex].Imports)
+		{
+			if (Import.Target.Kind != EAnimLispModuleKind::Rig) continue;
+			const int32* TargetIndex = Impl->ModuleByIdentity.Find(Import.Target.ToString());
+			if (TargetIndex == nullptr) continue;
+			if (ImportVisitState[*TargetIndex] == 0)
+			{
+				VisitRigImports(*TargetIndex);
+			}
+			else if (ImportVisitState[*TargetIndex] == 1 && !bImportCycleReported)
+			{
+				const int32 StackStart = ImportVisitStack.Find(*TargetIndex);
+				TArray<FString> CycleNames;
+				for (int32 StackIndex = StackStart; StackIndex < ImportVisitStack.Num(); ++StackIndex)
+				{
+					CycleNames.Add(Impl->Modules[ImportVisitStack[StackIndex]].Id.AssetPath);
+				}
+				CycleNames.Add(Impl->Modules[*TargetIndex].Id.AssetPath);
+				OutDiag.Add(
+					EAnimLangDiagSeverity::Error,
+					EAnimLangDiagCategory::Module,
+					TEXT("module-cycle: Rig import dependency cycle: ") + FString::Join(CycleNames, TEXT(" -> ")),
+					Import.Location);
+				bImportCycleReported = true;
+			}
+		}
+		ImportVisitStack.Pop(EAllowShrinking::No);
+		ImportVisitState[ModuleIndex] = 2;
+	};
+	for (int32 ModuleIndex = 0; ModuleIndex < Impl->Modules.Num() && !bImportCycleReported; ++ModuleIndex)
+	{
+		if (Impl->Modules[ModuleIndex].Id.Kind == EAnimLispModuleKind::Rig
+			&& Impl->Modules[ModuleIndex].bIndexable
+			&& ImportVisitState[ModuleIndex] == 0)
+		{
+			VisitRigImports(ModuleIndex);
+		}
+	}
+
+	struct FRigCallModuleEdge
+	{
+		int32 TargetModuleIndex = INDEX_NONE;
+		FAnimLangSourceLoc CallLocation;
+	};
+	TArray<TArray<FRigCallModuleEdge>> RigCallEdges;
+	RigCallEdges.SetNum(Impl->Modules.Num());
+	for (int32 ModuleIndex = 0; ModuleIndex < Impl->Modules.Num(); ++ModuleIndex)
+	{
+		const FWorkspaceModule& Module = Impl->Modules[ModuleIndex];
+		if (!Module.bIndexable || Module.Id.Kind != EAnimLispModuleKind::Rig
+			|| BlockedModules.Contains(ModuleIndex)) continue;
+		for (const FWorkspaceUse& Use : Module.Uses)
+		{
+			if (Use.ExpectedKind != EAnimLispSymbolKind::RigFunction) continue;
+			const FAnimLispDefinition* Target = Impl->Resolve(Module, Use.QualifiedName);
+			if (Target == nullptr || Target->Id.Module.Kind != EAnimLispModuleKind::Rig
+				|| Target->Id.Module == Module.Id) continue;
+			if (const int32* TargetIndex = Impl->ModuleByIdentity.Find(Target->Id.Module.ToString()))
+			{
+				FRigCallModuleEdge& Edge = RigCallEdges[ModuleIndex].AddDefaulted_GetRef();
+				Edge.TargetModuleIndex = *TargetIndex;
+				Edge.CallLocation = Use.Location;
+			}
+		}
+	}
+
 	TArray<uint8> VisitState;
 	VisitState.SetNumZeroed(Impl->Modules.Num());
 	TArray<int32> VisitStack;
@@ -1350,30 +1607,27 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag)
 		if (bCycleReported || !Impl->Modules.IsValidIndex(ModuleIndex)) return;
 		VisitState[ModuleIndex] = 1;
 		VisitStack.Add(ModuleIndex);
-		const FWorkspaceModule& Module = Impl->Modules[ModuleIndex];
-		for (const FAnimLispImport& Import : Module.Imports)
+		for (const FRigCallModuleEdge& Edge : RigCallEdges[ModuleIndex])
 		{
-			if (Import.Target.Kind != EAnimLispModuleKind::Rig) continue;
-			const int32* TargetIndex = Impl->ModuleByIdentity.Find(Import.Target.ToString());
-			if (TargetIndex == nullptr) continue;
-			if (VisitState[*TargetIndex] == 0)
+			if (!Impl->Modules.IsValidIndex(Edge.TargetModuleIndex)) continue;
+			if (VisitState[Edge.TargetModuleIndex] == 0)
 			{
-				VisitRigModule(*TargetIndex);
+				VisitRigModule(Edge.TargetModuleIndex);
 			}
-			else if (VisitState[*TargetIndex] == 1 && !bCycleReported)
+			else if (VisitState[Edge.TargetModuleIndex] == 1 && !bCycleReported)
 			{
-				const int32 StackStart = VisitStack.Find(*TargetIndex);
+				const int32 StackStart = VisitStack.Find(Edge.TargetModuleIndex);
 				TArray<FString> CycleNames;
 				for (int32 StackIndex = StackStart; StackIndex < VisitStack.Num(); ++StackIndex)
 				{
 					CycleNames.Add(Impl->Modules[VisitStack[StackIndex]].Id.AssetPath);
 				}
-				CycleNames.Add(Impl->Modules[*TargetIndex].Id.AssetPath);
+				CycleNames.Add(Impl->Modules[Edge.TargetModuleIndex].Id.AssetPath);
 				OutDiag.Add(
 					EAnimLangDiagSeverity::Error,
 					EAnimLangDiagCategory::Module,
-					TEXT("Rig import cycle: ") + FString::Join(CycleNames, TEXT(" -> ")),
-					Import.Location);
+					TEXT("rig-call-cycle: Rig call cycle: ") + FString::Join(CycleNames, TEXT(" -> ")),
+					Edge.CallLocation);
 				bCycleReported = true;
 			}
 		}
@@ -1396,7 +1650,77 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag)
 		if (!Module.bIndexable || BlockedModules.Contains(ModuleIndex)) continue;
 		for (const FWorkspaceUse& Use : Module.Uses)
 		{
-			if (const FAnimLispDefinition* Definition = Impl->Resolve(Module, Use.QualifiedName))
+			const bool bRigCall = Use.ExpectedKind == EAnimLispSymbolKind::RigFunction;
+			if (bRigCall && Use.FunctionIdentifier.IsComplete())
+			{
+				FString ExplicitAlias;
+				FString ExplicitSymbol;
+				if (SplitQualifiedName(Use.QualifiedName, ExplicitAlias, ExplicitSymbol))
+				{
+					const FAnimLispImport* Import = Module.Imports.FindByPredicate(
+						[&ExplicitAlias](const FAnimLispImport& Candidate)
+						{
+							return Candidate.Alias == ExplicitAlias;
+						});
+					if (Import != nullptr && !RigFunctionHostMatchesModule(
+						Use.FunctionIdentifier.HostObject, Import->Target.AssetPath))
+					{
+						OutDiag.Add(
+							EAnimLangDiagSeverity::Error,
+							EAnimLangDiagCategory::Semantic,
+							FString::Printf(
+								TEXT("rig-call-alias-host-mismatch: alias '%s' targets '%s' but the typed identifier host is '%s'"),
+								*ExplicitAlias, *Import->Target.AssetPath, *Use.FunctionIdentifier.HostObject),
+							Use.Location);
+						continue;
+					}
+				}
+			}
+			const FAnimLispDefinition* Definition = nullptr;
+			if (bRigCall && Use.bLegacyShortCall
+				&& !Use.QualifiedName.Contains(TEXT("/"))
+				&& !Use.QualifiedName.Contains(TEXT(".")))
+			{
+				TSet<FAnimLispModuleId> VisibleRigModules;
+				VisibleRigModules.Add(Module.Id);
+				for (const FAnimLispImport& Import : Module.Imports)
+				{
+					if (Import.Target.Kind == EAnimLispModuleKind::Rig) VisibleRigModules.Add(Import.Target);
+				}
+				TArray<const FAnimLispDefinition*> Candidates;
+				for (const FAnimLispDefinition& Candidate : Impl->Definitions)
+				{
+					if (Candidate.Id.Kind == EAnimLispSymbolKind::RigFunction
+						&& Candidate.Id.QualifiedName == Use.QualifiedName
+						&& VisibleRigModules.Contains(Candidate.Id.Module)
+						&& !Impl->QuarantinedModuleIdentities.Contains(Candidate.Id.Module.ToString()))
+					{
+						Candidates.Add(&Candidate);
+					}
+				}
+				if (Candidates.Num() > 1)
+				{
+					FAnimLangDiagnostic Diagnostic(
+						EAnimLangDiagSeverity::Error,
+						EAnimLangDiagCategory::Semantic,
+						FString::Printf(TEXT("Ambiguous Rig call '%s'"), *Use.QualifiedName),
+						Use.Location);
+					for (const FAnimLispDefinition* Candidate : Candidates)
+					{
+						Diagnostic.AddRelatedLocation(Candidate->Location,
+							FString::Printf(TEXT("Candidate in %s"), *Candidate->Id.Module.AssetPath));
+					}
+					OutDiag.Add(Diagnostic);
+					continue;
+				}
+				if (Candidates.Num() == 1) Definition = Candidates[0];
+			}
+			else
+			{
+				Definition = Impl->Resolve(Module, Use.QualifiedName);
+			}
+
+			if (Definition != nullptr)
 			{
 				if (Definition->Id.Kind != Use.ExpectedKind)
 				{
@@ -1411,10 +1735,25 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag)
 					OutDiag.Add(Diagnostic);
 					continue;
 				}
-				FAnimLispReference& Reference = Impl->References.AddDefaulted_GetRef();
-				Reference.Target = Definition->Id;
-				Reference.Location = Use.Location;
-				if (!MatchesCapability(Definition->Capability, Use.Required))
+				if (bRigCall && Use.FunctionIdentifier.IsComplete())
+				{
+					const FRigFunctionIdentifierAST* DeclaredIdentifier =
+						Impl->RigFunctionIdentifierBySymbol.Find(SymbolKey(Definition->Id));
+					if (DeclaredIdentifier == nullptr || *DeclaredIdentifier != Use.FunctionIdentifier)
+					{
+						FAnimLangDiagnostic Diagnostic(
+							EAnimLangDiagSeverity::Error,
+							EAnimLangDiagCategory::Semantic,
+							FString::Printf(TEXT("Rig call '%s' exact function identity does not match its declaration"),
+								*Use.QualifiedName),
+							Use.Location);
+						Diagnostic.AddRelatedLocation(Definition->Location, TEXT("Resolved declaration is here"));
+						OutDiag.Add(Diagnostic);
+						continue;
+					}
+				}
+				const bool bLocalRigCall = bRigCall && Definition->Id.Module == Module.Id;
+				if (!bLocalRigCall && !MatchesCapability(Definition->Capability, Use.Required))
 				{
 					FAnimLangDiagnostic Diagnostic(
 						EAnimLangDiagSeverity::Error,
@@ -1425,14 +1764,20 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag)
 						Use.Location);
 					Diagnostic.AddRelatedLocation(Definition->Location, TEXT("Symbol defined here"));
 					OutDiag.Add(Diagnostic);
+					continue;
 				}
+				FAnimLispReference& Reference = Impl->References.AddDefaulted_GetRef();
+				Reference.Target = Definition->Id;
+				Reference.Location = Use.Location;
 			}
 			else
 			{
 				OutDiag.Add(
 					EAnimLangDiagSeverity::Error,
 					EAnimLangDiagCategory::Semantic,
-					FString::Printf(TEXT("Unresolved symbol '%s'"), *Use.QualifiedName),
+					bRigCall
+						? FString::Printf(TEXT("Unresolved Rig call '%s'"), *Use.QualifiedName)
+						: FString::Printf(TEXT("Unresolved symbol '%s'"), *Use.QualifiedName),
 					Use.Location);
 			}
 		}

@@ -5,6 +5,8 @@
 
 #include "AnimLangDiagnostics.h"
 #include "AnimLispWorkspace.h"
+#include "RigLangAST.h"
+#include "Rigs/RigHierarchyElements.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -19,6 +21,18 @@ FString RigHeader(const FString& Asset, const FString& Hash)
 		TEXT("(rig-module :asset \"%s\" :class \"/Script/ControlRig.ControlRigBlueprint\" :version 1 :content-hash \"%s\")\n"),
 		*Asset,
 		*Hash);
+}
+
+FString TransformControlSettings()
+{
+	FRigControlSettings Settings;
+	Settings.ControlType = ERigControlType::Transform;
+	FString Serialized;
+	FRigControlSettings::StaticStruct()->ExportText(
+		Serialized, &Settings, &Settings, nullptr, PPF_None, nullptr);
+	Serialized.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+	Serialized.ReplaceInline(TEXT("\""), TEXT("\\\""));
+	return TEXT("\"") + Serialized + TEXT("\"");
 }
 
 FString AnimHeader(const FString& Asset, const FString& Hash)
@@ -166,6 +180,313 @@ bool FAnimLispWorkspaceCapabilityTest::RunTest(const FString& Parameters)
 	{
 		TestEqual(TEXT("Related location points at Rig definition"), Diagnostic->RelatedLocations[0].SourceFile, FString(TEXT("FootRig.riglang")));
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimLispWorkspaceRigFunctionSignatureTest,
+	"AnimBP2FP.AnimLisp.Workspace.RigFunctionSignature",
+	AnimLispWorkspaceTests::TestFlags)
+
+bool FAnimLispWorkspaceRigFunctionSignatureTest::RunTest(const FString& Parameters)
+{
+	FAnimLispWorkspace Workspace;
+	Workspace.AddSource(
+		TEXT("Signature.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/Signature"), TEXT("signature-hash"))
+		+ TEXT("(define-rig-function \"Interleaved\" :id \"fn\" :visibility public :return-cpp-type \"bool\"\n")
+		+ TEXT("  (rig-argument :name \"A\" :direction input :cpp-type \"float\" :cpp-type-object \"\" :container-type \"\" :default \"1.25\" :execute-context false :constant true :input-variable false)\n")
+		+ TEXT("  (rig-argument :name \"B\" :direction io :cpp-type \"FVector\" :cpp-type-object \"/Script/CoreUObject.Vector\" :container-type \"\" :default \"a;b:c\" :execute-context false :constant false :input-variable false)\n")
+		+ TEXT("  (rig-argument :name \"C\" :direction output :cpp-type \"TArray<int32>\" :cpp-type-object \"\" :container-type \"array\" :default \"()\" :execute-context false :constant false :input-variable false))\n"));
+	FAnimLangDiagnostics Diagnostics;
+	TestTrue(TEXT("Typed Rig function workspace builds"), Workspace.Build(Diagnostics));
+	const FAnimLispDefinition* Definition = Workspace.FindDefinition(TEXT("Signature.riglang"), TEXT("Interleaved"));
+	if (!TestNotNull(TEXT("Typed Rig function definition resolves"), Definition)) return false;
+	TestFalse(TEXT("Rig function definition type signature is not empty"), Definition->TypeSignature.CPPType.IsEmpty());
+	const FString& Signature = Definition->TypeSignature.CPPType;
+	const int32 InputOffset = Signature.Find(TEXT("input|1#A|5#float|0#|0#|4#1.25|value|const|value"));
+	const int32 IOOffset = Signature.Find(TEXT("io|1#B|7#FVector|"));
+	const int32 OutputOffset = Signature.Find(TEXT("output|1#C|13#TArray<int32>|0#|5#array|2#()|value|mutable|value"));
+	TestTrue(TEXT("Signature preserves ordered input and all flags"), InputOffset != INDEX_NONE);
+	TestTrue(TEXT("Signature preserves ordered IO and object type"), IOOffset != INDEX_NONE && Signature.Contains(TEXT("#/Script/CoreUObject.Vector|0#|5#a;b:c|value|mutable|value")));
+	TestTrue(TEXT("Signature preserves ordered output array"), OutputOffset != INDEX_NONE);
+	TestTrue(TEXT("Signature argument order is exact"), InputOffset < IOOffset && IOOffset < OutputOffset);
+	TestTrue(TEXT("Signature length-prefixes delimiter-bearing defaults"), Signature.Contains(TEXT("5#a;b:c")));
+	TestTrue(TEXT("Signature preserves length-prefixed return type"), Definition->TypeSignature.CPPType.EndsWith(TEXT("->4#bool")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimLispWorkspaceTypedHierarchyValidationTest,
+	"AnimBP2FP.AnimLisp.Workspace.TypedHierarchyValidation",
+	AnimLispWorkspaceTests::TestFlags)
+
+bool FAnimLispWorkspaceTypedHierarchyValidationTest::RunTest(const FString& Parameters)
+{
+	FAnimLispWorkspace Workspace;
+	const FString Settings = AnimLispWorkspaceTests::TransformControlSettings();
+	Workspace.AddSource(TEXT("InvalidHierarchy.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/InvalidHierarchy"), TEXT("invalid-hash"))
+		+ TEXT("(rig-hierarchy\n")
+		+ TEXT(" (bone :id \"Bone:A\" :name \"A\" :parent \"\"\n")
+		+ TEXT("  (rig-parent :id \"Bone:Missing\" :label \"Missing\" :current-location 1 :current-rotation 1 :current-scale 1 :initial-location 1 :initial-rotation 1 :initial-scale 1)\n")
+		+ TEXT("  (rig-transform :role initial-local :translation (0 0 0) :rotation (0 0 0 1) :scale (1 1 1))\n")
+		+ TEXT("  (rig-transform :role initial-local :translation (1 0 0) :rotation (0 0 0 1) :scale (1 1 1)))\n")
+		+ TEXT(" (control :id \"Control:C\" :name \"C\" :parent \"A\"\n")
+		+ TEXT("  (rig-state :kind control-settings :role initial :type Transform :serialized ") + Settings + TEXT(")\n")
+		+ TEXT("  (rig-state :kind control-value :role initial :type Transform :components (1 2 3 0 0 0 1 1 1 1))))\n"));
+	FAnimLangDiagnostics Diagnostics;
+	TestFalse(TEXT("Invalid typed hierarchy fails workspace build"), Workspace.Build(Diagnostics));
+	TestNotNull(TEXT("Missing secondary parent is diagnosed"), AnimLispWorkspaceTests::FindDiagnostic(
+		Diagnostics, EAnimLangDiagCategory::Semantic, TEXT("missing parent 'Bone:Missing'")));
+	TestNotNull(TEXT("Duplicate transform role is diagnosed"), AnimLispWorkspaceTests::FindDiagnostic(
+		Diagnostics, EAnimLangDiagCategory::Semantic, TEXT("duplicate transform role")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimLispWorkspaceGraphOwnershipValidationTest,
+	"AnimBP2FP.AnimLisp.Workspace.GraphOwnershipValidation",
+	AnimLispWorkspaceTests::TestFlags)
+
+bool FAnimLispWorkspaceGraphOwnershipValidationTest::RunTest(const FString& Parameters)
+{
+	FAnimLispWorkspace ValidWorkspace;
+	ValidWorkspace.AddSource(TEXT("ValidGraphOwnership.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/ValidGraphOwnership"), TEXT("valid-graph-hash"))
+		+ TEXT("(define-rig-graph :id \"root\" :editor-guid \"11111111-1111-1111-1111-111111111111\" :role \"root\" :parent-id \"\"\n")
+		+ TEXT("  (rig-collapse :id \"collapse\" :guid \"collapse-guid\" :class \"/Script/RigVMDeveloper.RigVMCollapseNode\" :contained-graph-id \"child\"))\n")
+		+ TEXT("(define-rig-graph :id \"child\" :editor-guid \"22222222-2222-2222-2222-222222222222\" :role \"node-contained\" :parent-id \"root\")\n")
+		+ TEXT("(define-rig-entry \"ForwardSolve\" :id \"entry\" :event \"Forward Solve\" :graph-id \"root\")\n"));
+	FAnimLangDiagnostics ValidDiagnostics;
+	TestTrue(TEXT("Valid typed graph ownership builds through the workspace"),
+		ValidWorkspace.Build(ValidDiagnostics));
+	TestFalse(TEXT("Valid typed graph ownership has no errors"), ValidDiagnostics.HasErrors());
+	TestNull(TEXT("Canonical graph ownership emits no legacy GUID warning"),
+		AnimLispWorkspaceTests::FindDiagnostic(
+			ValidDiagnostics, EAnimLangDiagCategory::Parse, TEXT("legacy-editor-guid-normalized")));
+
+	FAnimLispWorkspace LegacyWorkspace;
+	LegacyWorkspace.AddSource(TEXT("LegacyGraphGuid.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/LegacyGraphGuid"), TEXT("legacy-graph-hash"))
+		+ TEXT("(define-rig-graph :id \"root\" :role \"root\" :parent-id \"\")\n")
+		+ TEXT("(define-rig-entry \"ForwardSolve\" :id \"entry\" :event \"Forward Solve\" :graph-id \"root\")\n"));
+	FAnimLangDiagnostics LegacyDiagnostics;
+	TestTrue(TEXT("Missing legacy graph GUID migrates without failing the workspace"),
+		LegacyWorkspace.Build(LegacyDiagnostics));
+	const FAnimLangDiagnostic* LegacyDiagnostic = AnimLispWorkspaceTests::FindDiagnostic(
+		LegacyDiagnostics,
+		EAnimLangDiagCategory::Parse,
+		TEXT("legacy-editor-guid-normalized"));
+	if (TestNotNull(TEXT("Workspace publishes the legacy graph GUID migration warning"), LegacyDiagnostic))
+	{
+		TestEqual(TEXT("Legacy graph GUID diagnostic is a warning"),
+			LegacyDiagnostic->Severity, EAnimLangDiagSeverity::Warning);
+		TestEqual(TEXT("Legacy graph GUID warning points to the Rig source"),
+			LegacyDiagnostic->Location.SourceFile, FString(TEXT("LegacyGraphGuid.riglang")));
+		TestTrue(TEXT("Legacy graph GUID warning has a source line"), LegacyDiagnostic->Location.Line > 1);
+	}
+
+	FAnimLispWorkspace InvalidWorkspace;
+	InvalidWorkspace.AddSource(TEXT("InvalidGraphOwnership.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/InvalidGraphOwnership"), TEXT("invalid-graph-hash"))
+		+ TEXT("(define-rig-graph :id \"root\" :editor-guid \"11111111-1111-1111-1111-111111111111\" :role \"root\" :parent-id \"\"\n")
+		+ TEXT("  (rig-collapse :id \"collapse\" :guid \"collapse-guid\" :class \"/Script/RigVMDeveloper.RigVMCollapseNode\" :contained-graph-id \"missing\"))\n")
+		+ TEXT("(define-rig-entry \"ForwardSolve\" :id \"entry\" :event \"Forward Solve\" :graph-id \"root\")\n"));
+	FAnimLangDiagnostics InvalidDiagnostics;
+	TestFalse(TEXT("Stale typed graph ownership fails the workspace build"),
+		InvalidWorkspace.Build(InvalidDiagnostics));
+	const FAnimLangDiagnostic* Diagnostic = AnimLispWorkspaceTests::FindDiagnostic(
+		InvalidDiagnostics,
+		EAnimLangDiagCategory::Parse,
+		TEXT("references missing contained graph 'missing'"));
+	if (TestNotNull(TEXT("Workspace preserves the exact graph ownership diagnostic"), Diagnostic))
+	{
+		TestEqual(TEXT("Graph ownership diagnostic points to the Rig source"),
+			Diagnostic->Location.SourceFile, FString(TEXT("InvalidGraphOwnership.riglang")));
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimLispWorkspaceRigCallIdentityTest,
+	"AnimBP2FP.AnimLisp.Workspace.RigCallIdentity",
+	AnimLispWorkspaceTests::TestFlags)
+
+bool FAnimLispWorkspaceRigCallIdentityTest::RunTest(const FString& Parameters)
+{
+	auto Function = [](const FString& Asset, const FString& Name, const FString& Visibility)
+	{
+		const FString Host = FString::Printf(TEXT("%s.%s_C"), *Asset, *FPaths::GetBaseFilename(Asset));
+		const FString Path = FString::Printf(TEXT("%s.%s:RigVMFunctionLibrary.%s"),
+			*Asset, *FPaths::GetBaseFilename(Asset), *Name);
+		FRigFunctionIdentifierAST Identifier;
+		Identifier.HostObject = Host;
+		Identifier.LibraryNodePath = Path;
+		return FString::Printf(
+			TEXT("(define-rig-function \"%s\" :id \"%s\" :visibility %s :return-cpp-type \"void\" :identifier-host \"%s\" :library-node-path \"%s\")\n"),
+			*Name, *Identifier.ToStableId(), *Visibility, *Host, *Path);
+	};
+	auto Call = [](const FString& Id, const FString& QualifiedName, const FString& Host, const FString& Path)
+	{
+		return FString::Printf(
+			TEXT("  (rig-call :id \"%s\" :guid \"%s-guid\" :function \"%s\" :class \"\" :function-identifier-host \"%s\" :function-library-node-path \"%s\")\n"),
+			*Id, *Id, *QualifiedName, *Host, *Path);
+	};
+	auto Caller = [&Call](const FString& Calls)
+	{
+		return FString(TEXT("(define-rig-function \"Caller\" :id \"caller\" :visibility public :return-cpp-type \"void\"\n"))
+			+ Calls + TEXT(")\n");
+	};
+	const FString AHost = TEXT("/Game/Rigs/A.A_C");
+	const FString APath = TEXT("/Game/Rigs/A.A:RigVMFunctionLibrary.Solve");
+	const FString BHost = TEXT("/Game/Rigs/B.B_C");
+	const FString BPath = TEXT("/Game/Rigs/B.B:RigVMFunctionLibrary.Solve");
+
+	FAnimLispWorkspace ExactWorkspace;
+	ExactWorkspace.AddSource(TEXT("B.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/B"), TEXT("b-hash"))
+		+ Function(TEXT("/Game/Rigs/B"), TEXT("Solve"), TEXT("public")));
+	ExactWorkspace.AddSource(TEXT("A.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/A"), TEXT("a-hash"))
+		+ TEXT("(import-rig :asset \"/Game/Rigs/B\" :alias B :content-hash \"b-hash\")\n")
+		+ Function(TEXT("/Game/Rigs/A"), TEXT("Solve"), TEXT("public"))
+		+ Caller(Call(TEXT("local-call"), TEXT("Solve"), AHost, APath)
+			+ Call(TEXT("external-call"), TEXT("B/Solve"), BHost, BPath)));
+	FAnimLangDiagnostics ExactDiagnostics;
+	const bool bExactBuild = ExactWorkspace.Build(ExactDiagnostics);
+	for (const FAnimLangDiagnostic& Diagnostic : ExactDiagnostics.Items)
+		AddInfo(TEXT("Exact Rig call diagnostic: ") + Diagnostic.Message);
+	TestTrue(TEXT("Local and external calls with the same short name resolve exactly"), bExactBuild);
+	const FAnimLispDefinition* Local = ExactWorkspace.FindDefinition(TEXT("A.riglang"), TEXT("Solve"));
+	const FAnimLispDefinition* External = ExactWorkspace.FindDefinition(TEXT("A.riglang"), TEXT("B/Solve"));
+	if (TestNotNull(TEXT("Local same-name function resolves"), Local)
+		&& TestNotNull(TEXT("External same-name function resolves"), External))
+	{
+		TestEqual(TEXT("Local call indexes one exact reference"),
+			ExactWorkspace.FindReferences(Local->Id).Num(), 1);
+		TestEqual(TEXT("External call indexes one exact reference"),
+			ExactWorkspace.FindReferences(External->Id).Num(), 1);
+	}
+
+	FAnimLispWorkspace MissingWorkspace;
+	MissingWorkspace.AddSource(TEXT("Missing.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/A"), TEXT("a-hash"))
+		+ Caller(Call(TEXT("missing"), TEXT("Missing"), AHost,
+			TEXT("/Game/Rigs/A.A:RigVMFunctionLibrary.Missing"))));
+	FAnimLangDiagnostics MissingDiagnostics;
+	TestFalse(TEXT("Missing exact local call target fails the workspace"),
+		MissingWorkspace.Build(MissingDiagnostics));
+	TestNotNull(TEXT("Missing exact call target is diagnosed"),
+		AnimLispWorkspaceTests::FindDiagnostic(
+			MissingDiagnostics, EAnimLangDiagCategory::Semantic, TEXT("Unresolved Rig call")));
+
+	FAnimLispWorkspace AliasHostMismatchWorkspace;
+	AliasHostMismatchWorkspace.AddSource(TEXT("B.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/B"), TEXT("b-hash"))
+		+ Function(TEXT("/Game/Rigs/B"), TEXT("Solve"), TEXT("public")));
+	AliasHostMismatchWorkspace.AddSource(TEXT("A.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/A"), TEXT("a-hash"))
+		+ TEXT("(import-rig :asset \"/Game/Rigs/B\" :alias B :content-hash \"b-hash\")\n")
+		+ Caller(Call(TEXT("wrong-alias-host"), TEXT("B/Solve"),
+			TEXT("/Game/Rigs/C.C_C"), TEXT("/Game/Rigs/C.C:RigVMFunctionLibrary.Solve"))));
+	FAnimLangDiagnostics AliasHostMismatchDiagnostics;
+	TestFalse(TEXT("Explicit call alias must target the typed identifier host"),
+		AliasHostMismatchWorkspace.Build(AliasHostMismatchDiagnostics));
+	const FAnimLangDiagnostic* AliasHostMismatchDiagnostic = AnimLispWorkspaceTests::FindDiagnostic(
+		AliasHostMismatchDiagnostics, EAnimLangDiagCategory::Semantic,
+		TEXT("rig-call-alias-host-mismatch"));
+	if (TestNotNull(TEXT("Alias and typed host mismatch has a dedicated diagnostic"),
+		AliasHostMismatchDiagnostic))
+	{
+		TestEqual(TEXT("Alias-host mismatch diagnostic retains the source file"),
+			AliasHostMismatchDiagnostic->Location.SourceFile, FString(TEXT("A.riglang")));
+		TestTrue(TEXT("Alias-host mismatch diagnostic retains a source line"),
+			AliasHostMismatchDiagnostic->Location.Line > 0);
+	}
+
+	FAnimLispWorkspace AmbiguousWorkspace;
+	AmbiguousWorkspace.AddSource(TEXT("B.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/B"), TEXT("b-hash"))
+		+ Function(TEXT("/Game/Rigs/B"), TEXT("Solve"), TEXT("public")));
+	AmbiguousWorkspace.AddSource(TEXT("C.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/C"), TEXT("c-hash"))
+		+ Function(TEXT("/Game/Rigs/C"), TEXT("Solve"), TEXT("public")));
+	AmbiguousWorkspace.AddSource(TEXT("A.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/A"), TEXT("a-hash"))
+		+ TEXT("(import-rig :asset \"/Game/Rigs/B\" :alias B :content-hash \"b-hash\")\n")
+		+ TEXT("(import-rig :asset \"/Game/Rigs/C\" :alias C :content-hash \"c-hash\")\n")
+		+ TEXT("(define-rig-function \"Caller\" :id \"caller\" :visibility public :return-cpp-type \"void\"\n")
+		+ TEXT("  (rig-call :id \"legacy\" :guid \"22222222-2222-2222-2222-222222222222\" :function \"Solve\" :class \"\"))\n"));
+	FAnimLangDiagnostics AmbiguousDiagnostics;
+	TestFalse(TEXT("Ambiguous legacy short call fails the workspace"),
+		AmbiguousWorkspace.Build(AmbiguousDiagnostics));
+	TestNotNull(TEXT("Ambiguous legacy short call is diagnosed"),
+		AnimLispWorkspaceTests::FindDiagnostic(
+			AmbiguousDiagnostics, EAnimLangDiagCategory::Semantic, TEXT("Ambiguous Rig call")));
+
+	FAnimLispWorkspace CapabilityWorkspace;
+	CapabilityWorkspace.AddSource(TEXT("B.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/B"), TEXT("b-hash"))
+		+ Function(TEXT("/Game/Rigs/B"), TEXT("Solve"), TEXT("internal")));
+	CapabilityWorkspace.AddSource(TEXT("A.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/A"), TEXT("a-hash"))
+		+ TEXT("(import-rig :asset \"/Game/Rigs/B\" :alias B :content-hash \"b-hash\")\n")
+		+ Caller(Call(TEXT("external-internal"), TEXT("B/Solve"), BHost, BPath)));
+	FAnimLangDiagnostics CapabilityDiagnostics;
+	TestFalse(TEXT("External call to an internal Rig function fails capability validation"),
+		CapabilityWorkspace.Build(CapabilityDiagnostics));
+	TestNotNull(TEXT("External internal function call emits capability diagnostic"),
+		AnimLispWorkspaceTests::FindDiagnostic(
+			CapabilityDiagnostics, EAnimLangDiagCategory::Capability, TEXT("B/Solve")));
+
+	FAnimLispWorkspace StaleWorkspace;
+	StaleWorkspace.AddSource(TEXT("B.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/B"), TEXT("b-new"))
+		+ Function(TEXT("/Game/Rigs/B"), TEXT("Solve"), TEXT("public")));
+	StaleWorkspace.AddSource(TEXT("A.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/A"), TEXT("a-hash"))
+		+ TEXT("(import-rig :asset \"/Game/Rigs/B\" :alias B :content-hash \"b-old\")\n")
+		+ Caller(Call(TEXT("stale"), TEXT("B/Solve"), BHost, BPath)));
+	FAnimLangDiagnostics StaleDiagnostics;
+	TestFalse(TEXT("Stale imported Rig call dependency fails the workspace"),
+		StaleWorkspace.Build(StaleDiagnostics));
+	TestNotNull(TEXT("Stale imported Rig call dependency is diagnosed"),
+		AnimLispWorkspaceTests::FindDiagnostic(
+			StaleDiagnostics, EAnimLangDiagCategory::Module, TEXT("hash")));
+
+	FAnimLispWorkspace ImportOnlyCycleWorkspace;
+	ImportOnlyCycleWorkspace.AddSource(TEXT("A.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/A"), TEXT("a-hash"))
+		+ TEXT("(import-rig :asset \"/Game/Rigs/B\" :alias B :content-hash \"b-hash\")\n")
+		+ Function(TEXT("/Game/Rigs/A"), TEXT("Solve"), TEXT("public")));
+	ImportOnlyCycleWorkspace.AddSource(TEXT("B.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/B"), TEXT("b-hash"))
+		+ TEXT("(import-rig :asset \"/Game/Rigs/A\" :alias A :content-hash \"a-hash\")\n")
+		+ Function(TEXT("/Game/Rigs/B"), TEXT("Solve"), TEXT("public")));
+	FAnimLangDiagnostics ImportOnlyCycleDiagnostics;
+	TestFalse(TEXT("Mutual imports still form a frozen module dependency cycle"),
+		ImportOnlyCycleWorkspace.Build(ImportOnlyCycleDiagnostics));
+	TestNotNull(TEXT("Import-only dependency cycle has the module-cycle diagnostic"),
+		AnimLispWorkspaceTests::FindDiagnostic(
+			ImportOnlyCycleDiagnostics, EAnimLangDiagCategory::Module, TEXT("module-cycle")));
+
+	FAnimLispWorkspace CycleWorkspace;
+	CycleWorkspace.AddSource(TEXT("A.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/A"), TEXT("a-hash"))
+		+ TEXT("(import-rig :asset \"/Game/Rigs/B\" :alias B :content-hash \"b-hash\")\n")
+		+ Function(TEXT("/Game/Rigs/A"), TEXT("Solve"), TEXT("public"))
+		+ Caller(Call(TEXT("a-to-b"), TEXT("B/Solve"), BHost, BPath)));
+	CycleWorkspace.AddSource(TEXT("B.riglang"),
+		AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/B"), TEXT("b-hash"))
+		+ TEXT("(import-rig :asset \"/Game/Rigs/A\" :alias A :content-hash \"a-hash\")\n")
+		+ Function(TEXT("/Game/Rigs/B"), TEXT("Solve"), TEXT("public"))
+		+ Caller(Call(TEXT("b-to-a"), TEXT("A/Solve"), AHost, APath)));
+	FAnimLangDiagnostics CycleDiagnostics;
+	TestFalse(TEXT("Cross-Rig call cycle fails the workspace"), CycleWorkspace.Build(CycleDiagnostics));
+	TestNotNull(TEXT("Cross-Rig call cycle is diagnosed"),
+		AnimLispWorkspaceTests::FindDiagnostic(
+			CycleDiagnostics, EAnimLangDiagCategory::Module, TEXT("Rig call cycle")));
 	return true;
 }
 
@@ -1315,22 +1636,34 @@ bool FAnimLispWorkspaceGraphPinSemanticsTest::RunTest(const FString& Parameters)
 			+ TEXT("    (pin :path \"Execute\" :direction output :cpp-type \"bool\" :execute-context true))\n")
 			+ TEXT("  (rig-unit :id \"value-target\" :guid \"10000000-0000-0000-0000-000000000008\" :class \"/Script/Test.Unit\"\n")
 			+ TEXT("    (pin :path \"Value\" :direction input :cpp-type \"bool\" :execute-context false))\n")
+			+ TEXT("  (rig-unit :id \"visible-source\" :guid \"10000000-0000-0000-0000-000000000009\" :class \"/Script/Test.Unit\"\n")
+			+ TEXT("    (pin :path \"Value\" :direction visible :cpp-type \"bool\" :execute-context false))\n")
+			+ TEXT("  (rig-unit :id \"visible-target\" :guid \"10000000-0000-0000-0000-000000000010\" :class \"/Script/Test.Unit\"\n")
+			+ TEXT("    (pin :path \"Value\" :direction visible :cpp-type \"bool\" :execute-context false))\n")
+			+ TEXT("  (rig-unit :id \"invalid-source\" :guid \"10000000-0000-0000-0000-000000000011\" :class \"/Script/Test.Unit\"\n")
+			+ TEXT("    (pin :path \"Value\" :direction invalid :cpp-type \"bool\" :execute-context false))\n")
+			+ TEXT("  (rig-unit :id \"invalid-target\" :guid \"10000000-0000-0000-0000-000000000012\" :class \"/Script/Test.Unit\"\n")
+			+ TEXT("    (pin :path \"Value\" :direction invalid :cpp-type \"bool\" :execute-context false))\n")
 			+ TEXT("  (rig-link :from \"input-source.Value\" :to \"valid-target.Value\")\n")
 			+ TEXT("  (rig-link :from \"valid-source.Value\" :to \"output-target.Value\")\n")
 			+ TEXT("  (rig-link :from \"hidden-source.Value\" :to \"valid-target.Value\")\n")
 			+ TEXT("  (rig-link :from \"valid-source.Value\" :to \"hidden-target.Value\")\n")
+			+ TEXT("  (rig-link :from \"visible-source.Value\" :to \"valid-target.Value\")\n")
+			+ TEXT("  (rig-link :from \"valid-source.Value\" :to \"visible-target.Value\")\n")
+			+ TEXT("  (rig-link :from \"invalid-source.Value\" :to \"valid-target.Value\")\n")
+			+ TEXT("  (rig-link :from \"valid-source.Value\" :to \"invalid-target.Value\")\n")
 			+ TEXT("  (rig-link :from \"exec-source.Execute\" :to \"value-target.Value\"))\n"));
 
 	FAnimLangDiagnostics Diagnostics;
 	TestFalse(TEXT("Invalid graph pin semantics fail build"), Workspace.Build(Diagnostics));
 	TestEqual(
-		TEXT("Input and hidden pins are rejected as sources"),
+		TEXT("Input, visible, hidden, and invalid pins are rejected as sources"),
 		AnimLispWorkspaceTests::CountDiagnosticsContaining(Diagnostics, TEXT("cannot be used as a link source")),
-		2);
+		4);
 	TestEqual(
-		TEXT("Output and hidden pins are rejected as targets"),
+		TEXT("Output, visible, hidden, and invalid pins are rejected as targets"),
 		AnimLispWorkspaceTests::CountDiagnosticsContaining(Diagnostics, TEXT("cannot be used as a link target")),
-		2);
+		4);
 	const FAnimLangDiagnostic* ExecuteDiagnostic = AnimLispWorkspaceTests::FindDiagnostic(
 		Diagnostics,
 		EAnimLangDiagCategory::Semantic,
@@ -1402,6 +1735,44 @@ bool FAnimLispWorkspaceGraphCycleCoverageTest::RunTest(const FString& Parameters
 	TestNull(
 		TEXT("Missing pin does not create graph cycle"),
 		AnimLispWorkspaceTests::FindDiagnostic(MissingPinDiagnostics, EAnimLangDiagCategory::Semantic, TEXT("Graph cycle")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimLispWorkspaceRigVMNumericLinkCompatibilityTest,
+	"AnimBP2FP.AnimLisp.Workspace.RigVMNumericLinkCompatibility",
+	AnimLispWorkspaceTests::TestFlags)
+
+bool FAnimLispWorkspaceRigVMNumericLinkCompatibilityTest::RunTest(const FString& Parameters)
+{
+	const FString GraphPrefix = AnimLispWorkspaceTests::RigHeader(TEXT("/Game/Rigs/NumericLinks"), TEXT("numeric-links"))
+		+ TEXT("(define-rig-entry \"ForwardsSolve\" :id \"entry\" :event \"Forwards Solve\"\n")
+		+ TEXT("  (rig-unit :id \"source\" :guid \"40000000-0000-0000-0000-000000000001\" :class \"/Script/Test.Unit\"\n")
+		+ TEXT("    (pin :path \"Value\" :direction output :cpp-type \"float\"))\n")
+		+ TEXT("  (rig-unit :id \"target\" :guid \"40000000-0000-0000-0000-000000000002\" :class \"/Script/Test.Unit\"\n");
+
+	FAnimLispWorkspace CompatibleWorkspace;
+	CompatibleWorkspace.AddSource(
+		TEXT("CompatibleNumeric.riglang"),
+		GraphPrefix
+			+ TEXT("    (pin :path \"Value\" :direction input :cpp-type \"double\"))\n")
+			+ TEXT("  (rig-link :from \"source.Value\" :to \"target.Value\"))\n"));
+	FAnimLangDiagnostics CompatibleDiagnostics;
+	TestTrue(TEXT("RigVM float-to-double link compatibility is accepted"),
+		CompatibleWorkspace.Build(CompatibleDiagnostics));
+
+	FAnimLispWorkspace IncompatibleWorkspace;
+	IncompatibleWorkspace.AddSource(
+		TEXT("IncompatibleNumeric.riglang"),
+		GraphPrefix
+			+ TEXT("    (pin :path \"Value\" :direction input :cpp-type \"bool\"))\n")
+			+ TEXT("  (rig-link :from \"source.Value\" :to \"target.Value\"))\n"));
+	FAnimLangDiagnostics IncompatibleDiagnostics;
+	TestFalse(TEXT("RigVM float-to-bool link incompatibility is rejected"),
+		IncompatibleWorkspace.Build(IncompatibleDiagnostics));
+	TestNotNull(TEXT("Incompatible RigVM types retain the exact-type diagnostic"),
+		AnimLispWorkspaceTests::FindDiagnostic(
+			IncompatibleDiagnostics, EAnimLangDiagCategory::Type, TEXT("incompatible exact Unreal types")));
 	return true;
 }
 

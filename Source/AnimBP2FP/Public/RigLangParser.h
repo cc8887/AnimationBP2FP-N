@@ -10,6 +10,7 @@ struct ANIMBP2FP_API FRigLangParseError
 {
 	FString Message;
 	FAnimLangSourceLoc Location;
+	bool bWarning = false;
 
 	FString ToString() const
 	{

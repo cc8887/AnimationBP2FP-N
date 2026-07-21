@@ -23,6 +23,12 @@ public class AnimBP2FPEditor : ModuleRules
 			"UnrealEd",            // Editor framework
 			"AnimGraph",           // Animation graph nodes
 			"BlueprintGraph",      // Blueprint graph base
+			"AnimationCore",
+			"ControlRig",
+			"ControlRigDeveloper",
+			"ControlRigEditor",
+			"RigVM",
+			"RigVMDeveloper",
 			"Slate",               // UI framework
 			"SlateCore",
 			"EditorStyle",

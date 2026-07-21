@@ -30,6 +30,7 @@ public class AnimBP2FP : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				"RigVM",
 			}
 		);
 
@@ -53,6 +54,10 @@ public class AnimBP2FP : ModuleRules
 					"UnrealEd",
 					"AssetTools",
 					"AssetRegistry",
+					"AnimationCore",
+					"ControlRig",
+					"ControlRigDeveloper",
+					"RigVMDeveloper",
 					"Slate",
 					"SlateCore",
 				}
