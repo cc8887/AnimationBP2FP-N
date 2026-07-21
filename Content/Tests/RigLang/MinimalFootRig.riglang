@@ -1,0 +1,93 @@
+(rig-module
+  :asset "/Game/Blueprints/ControlRigs/CR_MinimalFootRig"
+  :class "/Script/ControlRig.ControlRigBlueprint"
+  :version 1
+  :content-hash "fixture-content-hash")
+
+(import-rig
+  :asset "/Game/Blueprints/ControlRigs/CR_SharedTrace"
+  :alias SharedTrace
+  :content-hash "shared-trace-hash")
+
+(rig-hierarchy
+  (bone
+    :id "bone-root"
+    :name "root"
+    :parent ""
+    :initial-transform "(Rotation=(X=0,Y=0,Z=0,W=1),Translation=(X=0,Y=0,Z=0),Scale3D=(X=1,Y=1,Z=1))")
+  (control
+    :id "control-foot-ik"
+    :name "Foot IK"
+    :parent "root"
+    :control-type Transform
+    :settings (control-settings :shape "Box" :limits [true false])))
+
+(rig-variables
+  (variable
+    :id "variable-ground-normal"
+    :name "GroundNormal"
+    :access public-input
+    :cpp-type "FVector"
+    :cpp-type-object "/Script/CoreUObject.Vector"
+    :container-type "None"
+    :default "(X=0.0,Y=0.0,Z=1.0)"
+    :execute-context false))
+
+(define-rig-function "UpdateFoot"
+  :id "function-update-foot"
+  :visibility internal
+  :return-cpp-type "void"
+  (rig-unit
+    :id "node-trace"
+    :guid "11111111-1111-1111-1111-111111111111"
+    :class "/Script/ControlRig.RigUnit_SphereTraceByTraceChannel"
+    :method "Execute"
+    :event ""
+    :injected false
+    :coverage exact
+    (pin
+      :path "ExecuteContext"
+      :direction io
+      :cpp-type "FControlRigExecuteContext"
+      :cpp-type-object "/Script/ControlRig.ControlRigExecuteContext"
+      :container-type "None"
+      :default ""
+      :execute-context true)
+    (pin
+      :path "Start"
+      :direction input
+      :cpp-type "FVector"
+      :cpp-type-object "/Script/CoreUObject.Vector"
+      :container-type "None"
+      :default "(X=0.0,Y=0.0,Z=0.0)"
+      :execute-context false
+      (pin
+        :path "Start.X"
+        :direction input
+        :cpp-type "double"
+        :cpp-type-object ""
+        :container-type "None"
+        :default "0.0"
+        :execute-context false)))
+  (rig-call
+    :id "node-apply"
+    :guid "22222222-2222-2222-2222-222222222222"
+    :function "SharedTrace.ApplyFootOffset"
+    :class "/Script/ControlRig.RigVMFunction_ApplyFootOffset"
+    :method "ApplyFootOffset"
+    :event "Forwards Solve"
+    :injected true
+    :coverage reflected
+    (pin
+      :path "ExecuteContext"
+      :direction io
+      :cpp-type "FControlRigExecuteContext"
+      :cpp-type-object "/Script/ControlRig.ControlRigExecuteContext"
+      :container-type "None"
+      :default ""
+      :execute-context true))
+  (rig-link :from "node-trace.ExecuteContext" :to "node-apply.ExecuteContext"))
+
+(define-rig-entry "ForwardsSolve"
+  :id "entry-forwards-solve"
+  :event "Forwards Solve")
