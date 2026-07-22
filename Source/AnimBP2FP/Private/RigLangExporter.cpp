@@ -1375,7 +1375,18 @@ FRigLangExportResult FRigLangExporter::Export(
 				}
 				else Function.Inputs.Add(MoveTemp(Argument));
 			}
-			for (const FRigVMExternalVariable& ExternalVariable : LibraryNode->GetExternalVariables())
+			TArray<FRigVMExternalVariable> ExternalVariables = LibraryNode->GetExternalVariables();
+			for (FRigVMExternalVariable& ExternalVariable : ExternalVariables)
+			{
+				const FRigVMExternalVariable* HeaderVariable = Header.ExternalVariables.FindByPredicate(
+					[&ExternalVariable](const FRigVMExternalVariable& Candidate)
+					{
+						return Candidate.GetName() == ExternalVariable.GetName()
+							&& Candidate.GetExtendedCPPType() == ExternalVariable.GetExtendedCPPType();
+					});
+				if (HeaderVariable) ExternalVariable = *HeaderVariable;
+			}
+			for (const FRigVMExternalVariable& ExternalVariable : ExternalVariables)
 			{
 				Function.ExternalVariables.Add(ExportExternalVariable(ExternalVariable));
 			}

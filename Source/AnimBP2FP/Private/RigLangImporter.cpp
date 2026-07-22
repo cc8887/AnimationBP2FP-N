@@ -2,13 +2,38 @@
 
 #include "RigLangImporter.h"
 
+#include "AnimLangTokenizer.h"
 #include "ControlRig.h"
 #include "ControlRigBlueprintFactory.h"
 #include "ControlRigBlueprintLegacy.h"
+#include "EdGraph/RigVMEdGraph.h"
+#include "EdGraph/RigVMEdGraphNode.h"
+#include "EdGraph/RigVMEdGraphSchema.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Kismet2/CompilerResultsLog.h"
 #include "Misc/PackageName.h"
+#include "Misc/AutomationTest.h"
 #include "RigLangExporter.h"
 #include "RigVMCore/RigVMExternalVariable.h"
+#include "RigVMCore/RigVMGraphFunctionDefinition.h"
+#include "RigVMCore/RigVMGraphFunctionHost.h"
+#include "RigVMCore/RigVMGraphFunctionIdentifier.h"
 #include "RigVMEditorAsset.h"
+#include "RigVMModel/RigVMClient.h"
+#include "RigVMModel/RigVMController.h"
+#include "RigVMModel/RigVMFunctionLibrary.h"
+#include "RigVMModel/RigVMGraph.h"
+#include "RigVMModel/RigVMLink.h"
+#include "RigVMModel/RigVMPin.h"
+#include "RigVMModel/Nodes/RigVMCommentNode.h"
+#include "RigVMModel/Nodes/RigVMAggregateNode.h"
+#include "RigVMModel/Nodes/RigVMCollapseNode.h"
+#include "RigVMModel/Nodes/RigVMFunctionReferenceNode.h"
+#include "RigVMModel/Nodes/RigVMInvokeEntryNode.h"
+#include "RigVMModel/Nodes/RigVMLibraryNode.h"
+#include "RigVMModel/Nodes/RigVMRerouteNode.h"
+#include "RigVMModel/Nodes/RigVMUnitNode.h"
+#include "RigVMModel/Nodes/RigVMVariableNode.h"
 #include "Rigs/RigHierarchy.h"
 #include "Rigs/RigHierarchyController.h"
 #include "UObject/Package.h"
@@ -478,6 +503,408 @@ FString HierarchyVariableSemanticSnapshot(
 	}
 	return Copy.ToCanonicalString();
 }
+
+FString UnquoteRigLangProperty(const FString& Value)
+{
+	if (Value.Len() < 2 || Value[0] != TEXT('"') || Value[Value.Len() - 1] != TEXT('"')) return Value;
+	FString Result = Value.Mid(1, Value.Len() - 2);
+	Result.ReplaceInline(TEXT("\\\""), TEXT("\""));
+	Result.ReplaceInline(TEXT("\\n"), TEXT("\n"));
+	Result.ReplaceInline(TEXT("\\r"), TEXT("\r"));
+	Result.ReplaceInline(TEXT("\\t"), TEXT("\t"));
+	Result.ReplaceInline(TEXT("\\\\"), TEXT("\\"));
+	return Result;
+}
+
+bool RestoreAndVerifyVariableRemapping(
+	URigVMController* Controller,
+	URigVMFunctionReferenceNode* Node,
+	const FRigNodeAST& Source,
+	FRigLangImportResult& Result)
+{
+	const FString Encoded = Source.Properties.FindRef(TEXT("variable-remapping"));
+	TArray<FAnimLangToken> Tokens;
+	TArray<FAnimLangLexError> Errors;
+	if (!FAnimLangTokenizer::Tokenize(Encoded.IsEmpty() ? TEXT("()") : Encoded, Tokens, Errors)
+		|| !Errors.IsEmpty())
+	{
+		AddError(Result, FString::Printf(TEXT("Malformed variable remapping on Rig call '%s'"),
+			*Source.StableId), Source.Location);
+		return false;
+	}
+	int32 Index = 0;
+	auto Take = [&Tokens, &Index](const EAnimLangTokenType Type) -> const FAnimLangToken*
+	{
+		if (!Tokens.IsValidIndex(Index) || Tokens[Index].Type != Type) return nullptr;
+		return &Tokens[Index++];
+	};
+	if (!Take(EAnimLangTokenType::LParen)) return false;
+	TMap<FName, FName> Expected;
+	while (Tokens.IsValidIndex(Index) && Tokens[Index].Type == EAnimLangTokenType::LParen)
+	{
+		++Index;
+		const FAnimLangToken* Inner = Take(EAnimLangTokenType::String);
+		const FAnimLangToken* Outer = Take(EAnimLangTokenType::String);
+		URigVMPin* FunctionPin = Inner ? Node->FindRootPinByName(FName(*Inner->Value)) : nullptr;
+		const bool bClosedPair = Take(EAnimLangTokenType::RParen) != nullptr;
+		const FName* ExistingOuter = Inner ? Node->GetVariableMap().Find(FName(*Inner->Value)) : nullptr;
+		const bool bAlreadyBound = ExistingOuter && Outer && *ExistingOuter == FName(*Outer->Value);
+		const bool bBound = Inner && Outer && bClosedPair && FunctionPin
+			&& (bAlreadyBound
+				|| Controller->BindPinToVariable(FunctionPin->GetPinPath(), Outer->Value, false, false));
+		if (!bBound)
+		{
+			TArray<FString> PinNames;
+			for (const URigVMPin* Pin : Node->GetPins()) if (Pin) PinNames.Add(Pin->GetName());
+			TArray<FString> ExternalNames;
+			for (const FRigVMExternalVariable& Variable : Node->GetReferencedFunctionHeader().ExternalVariables)
+				ExternalNames.Add(Variable.GetName().ToString());
+			AddError(Result, FString::Printf(
+				TEXT("Failed variable remapping on Rig call '%s': inner='%s' outer='%s' pin=%s pins=[%s] externals=[%s]"),
+				*Source.StableId, Inner ? *Inner->Value : TEXT("<missing>"),
+				Outer ? *Outer->Value : TEXT("<missing>"), FunctionPin ? TEXT("yes") : TEXT("no"),
+				*FString::Join(PinNames, TEXT(",")), *FString::Join(ExternalNames, TEXT(","))), Source.Location);
+			return false;
+		}
+		Expected.Add(FName(*Inner->Value), FName(*Outer->Value));
+	}
+	if (!Take(EAnimLangTokenType::RParen) || Node->GetVariableMap().OrderIndependentCompareEqual(Expected) == false)
+	{
+		AddError(Result, FString::Printf(TEXT("Variable remapping mismatch on Rig call '%s'"),
+			*Source.StableId), Source.Location);
+		return false;
+	}
+	return true;
+}
+
+FString GraphNameFromAST(const FRigGraphAST& Graph)
+{
+	auto Normalize = [](FString Name)
+	{
+		const FString NamedModelPrefix = FString(FRigVMClient::RigVMModelPrefix) + TEXT(" ");
+		Name.RemoveFromStart(NamedModelPrefix);
+		Name.TrimStartAndEndInline();
+		return Name;
+	};
+	if (const FString* Name = Graph.Properties.Find(TEXT("graph-name")))
+	{
+		const FString Unquoted = UnquoteRigLangProperty(*Name);
+		if (!Unquoted.IsEmpty()) return Normalize(Unquoted);
+	}
+	FString Name = Graph.StableId;
+	int32 Separator = INDEX_NONE;
+	if (Name.FindLastChar(TEXT(':'), Separator)) Name = Name.Mid(Separator + 1);
+	if (Name.FindLastChar(TEXT('.'), Separator)) Name = Name.Mid(Separator + 1);
+	return Normalize(Name);
+}
+
+ERigVMPinDirection ToRigVMPinDirection(const ERigPinDirection Direction)
+{
+	switch (Direction)
+	{
+	case ERigPinDirection::Output: return ERigVMPinDirection::Output;
+	case ERigPinDirection::IO: return ERigVMPinDirection::IO;
+	case ERigPinDirection::Visible: return ERigVMPinDirection::Visible;
+	case ERigPinDirection::Hidden: return ERigVMPinDirection::Hidden;
+	case ERigPinDirection::Invalid: return ERigVMPinDirection::Invalid;
+	default: return ERigVMPinDirection::Input;
+	}
+}
+
+bool RestoreAndVerifyPins(
+	URigVMController* Controller,
+	URigVMNode* Node,
+	const FRigNodeAST& Source,
+	FRigLangImportResult& Result)
+{
+	TFunction<bool(const FRigPinAST&)> Visit = [&](const FRigPinAST& PinAST)
+	{
+		URigVMPin* Pin = Node->FindPin(PinAST.Path);
+		if (!Pin)
+		{
+			AddError(Result, FString::Printf(TEXT("Rig node '%s' is missing pin '%s'"),
+				*Source.StableId, *PinAST.Path), PinAST.Location);
+			return false;
+		}
+		if (Pin->IsWildCard())
+		{
+			FString CPPType = PinAST.Type.CPPType;
+			if (PinAST.Type.ContainerType == TEXT("array") && !IsArrayCPPType(CPPType))
+				CPPType = TEXT("TArray<") + CPPType + TEXT(">");
+			if (!Controller->ResolveWildCardPin(
+				Source.StableId + TEXT(".") + PinAST.Path, CPPType,
+				FName(*PinAST.Type.CPPTypeObject), false, false))
+			{
+				AddError(Result, FString::Printf(TEXT("Failed to resolve wildcard pin '%s.%s'"),
+					*Source.StableId, *PinAST.Path), PinAST.Location);
+				return false;
+			}
+			Pin = Node->FindPin(PinAST.Path);
+		}
+		if (!Pin)
+		{
+			AddError(Result, FString::Printf(TEXT("Rig node '%s' lost pin '%s' after wildcard resolution"),
+				*Source.StableId, *PinAST.Path), PinAST.Location);
+			return false;
+		}
+		if (Pin->GetCPPType() != PinAST.Type.CPPType
+			|| Pin->GetDirection() != ToRigVMPinDirection(PinAST.Direction))
+		{
+			AddError(Result, FString::Printf(TEXT("Rig pin '%s.%s' type or direction mismatch"),
+				*Source.StableId, *PinAST.Path), PinAST.Location);
+			return false;
+		}
+		if (Pin->IsArray())
+		{
+			const FString PinPath = Source.StableId + TEXT(".") + PinAST.Path;
+			if (Pin->GetSubPins().Num() != PinAST.SubPins.Num()
+				&& !Controller->SetArrayPinSize(PinPath, PinAST.SubPins.Num(), TEXT(""), false, false))
+			{
+				AddError(Result, FString::Printf(TEXT("Failed to materialize %d elements for array pin '%s'"),
+					PinAST.SubPins.Num(), *PinPath), PinAST.Location);
+				return false;
+			}
+			Pin = Node->FindPin(PinAST.Path);
+			if (!Pin || Pin->GetSubPins().Num() != PinAST.SubPins.Num())
+			{
+				AddError(Result, FString::Printf(TEXT("Array pin '%s' element count mismatch"), *PinPath), PinAST.Location);
+				return false;
+			}
+		}
+		if (!PinAST.bExecuteContext
+			&& (PinAST.Direction == ERigPinDirection::Input
+				|| PinAST.Direction == ERigPinDirection::IO
+				|| PinAST.Direction == ERigPinDirection::Visible)
+			&& Pin->GetDefaultValue() != PinAST.DefaultValue
+			&& (!Controller->SetPinDefaultValue(
+				Source.StableId + TEXT(".") + PinAST.Path,
+				PinAST.DefaultValue, true, false, false, false, false)
+				|| !(Pin = Node->FindPin(PinAST.Path))
+				|| Pin->GetDefaultValue() != PinAST.DefaultValue))
+		{
+			AddError(Result, FString::Printf(TEXT("Failed to restore default for pin '%s.%s'"),
+				*Source.StableId, *PinAST.Path), PinAST.Location);
+			return false;
+		}
+		for (const FRigPinAST& SubPin : PinAST.SubPins)
+		{
+			if (!Visit(SubPin)) return false;
+		}
+		return true;
+	};
+	for (const FRigPinAST& Pin : Source.Pins)
+	{
+		if (!Visit(Pin)) return false;
+	}
+	return true;
+}
+
+bool RestoreAndVerifyLink(
+	URigVMController* Controller,
+	URigVMGraph* Graph,
+	const FRigLinkAST& Link,
+	FRigLangImportResult& Result)
+{
+	const FString SourcePath = Link.SourceNodeId + TEXT(".") + Link.SourcePinPath;
+	const FString TargetPath = Link.TargetNodeId + TEXT(".") + Link.TargetPinPath;
+	URigVMPin* SourcePin = Graph ? Graph->FindPin(SourcePath) : nullptr;
+	URigVMPin* TargetPin = Graph ? Graph->FindPin(TargetPath) : nullptr;
+	auto ContainsExactLink = [Graph, SourcePin, TargetPin]()
+	{
+		return Graph && Graph->GetLinks().ContainsByPredicate(
+			[SourcePin, TargetPin](const URigVMLink* Candidate)
+			{
+				return Candidate && Candidate->GetSourcePin() == SourcePin
+					&& Candidate->GetTargetPin() == TargetPin;
+			});
+	};
+	if (!Controller || !SourcePin || !TargetPin
+		|| (SourcePin->GetDirection() != ERigVMPinDirection::Output
+			&& SourcePin->GetDirection() != ERigVMPinDirection::IO)
+		|| (TargetPin->GetDirection() != ERigVMPinDirection::Input
+			&& TargetPin->GetDirection() != ERigVMPinDirection::IO)
+		|| SourcePin->GetCPPType() != TargetPin->GetCPPType()
+		|| (!ContainsExactLink() && !Controller->AddLink(SourcePath, TargetPath, false, false))
+		|| !ContainsExactLink())
+	{
+		AddError(Result, FString::Printf(TEXT("Failed to restore Rig link '%s -> %s'"),
+			*SourcePath, *TargetPath), Link.Location);
+		return false;
+	}
+	return true;
+}
+
+FString GraphSemanticSnapshot(const FRigModuleAST& Value, const FRigModuleAST& SourceIdentity)
+{
+	FRigModuleAST Copy = Value;
+	Copy.Header = FRigModuleHeaderAST();
+	Copy.Hierarchy.Reset();
+	Copy.Variables.Reset();
+
+	TSet<FString> SourceGraphTokens;
+	TSet<FString> SourceFallbackGraphTokens;
+	TSet<FString> SourceNodeKeys;
+	TSet<FString> SourceFallbackNodeKeys;
+	TSet<FString> SourceLocalKeys;
+	TMap<FString, FString> SourceVisibleLocalTokens;
+	TSet<FString> SourceInterfaceKeys;
+	TSet<FString> SourceFunctionNames;
+	TSet<FString> SourceEntryNames;
+	TSet<FString> SourceExternalKeys;
+	for (const FRigGraphAST& Graph : SourceIdentity.Graphs)
+	{
+		const FString Token = Graph.Role + TEXT(":") + GraphNameFromAST(Graph);
+		SourceGraphTokens.Add(Token);
+		if (Graph.Nodes.IsEmpty() || !Graph.Nodes.ContainsByPredicate([](const FRigNodeAST& Node)
+			{
+				FGuid EditorGuid;
+				return !Node.bInjected && FGuid::Parse(Node.Guid, EditorGuid);
+			}))
+		{
+			SourceFallbackGraphTokens.Add(Token);
+		}
+		for (const FRigGraphVariableAST& Variable : Graph.LocalVariables)
+			SourceLocalKeys.Add(Token + TEXT("|") + Variable.Name);
+		for (const FRigNodeAST& Node : Graph.Nodes)
+		{
+			const FString Key = Token + TEXT("|") + Node.StableId;
+			SourceNodeKeys.Add(Key);
+			if (Node.Guid.StartsWith(TEXT("model:"))) SourceFallbackNodeKeys.Add(Key);
+			if (Node.Properties.Contains(TEXT("interface-pin-guids"))) SourceInterfaceKeys.Add(Key);
+		}
+	}
+	TMap<FString, const FRigGraphAST*> SourceGraphsById;
+	for (const FRigGraphAST& Graph : SourceIdentity.Graphs)
+		SourceGraphsById.Add(Graph.StableId, &Graph);
+	for (const FRigGraphAST& Graph : SourceIdentity.Graphs)
+	{
+		const FRigGraphAST* Scope = &Graph;
+		while (Scope && Scope->Role != TEXT("function"))
+			Scope = SourceGraphsById.FindRef(Scope->ParentStableId);
+		if (!Scope) continue;
+		const FString GraphToken = Graph.Role + TEXT(":") + GraphNameFromAST(Graph);
+		const FString ScopeToken = Scope->Role + TEXT(":") + GraphNameFromAST(*Scope);
+		for (const FRigGraphVariableAST& Variable : Scope->LocalVariables)
+			SourceVisibleLocalTokens.Add(GraphToken + TEXT("|") + Variable.Name,
+				ScopeToken + TEXT("|") + Variable.Name);
+	}
+	for (const FRigFunctionAST& Function : SourceIdentity.Functions)
+	{
+		SourceFunctionNames.Add(Function.Name);
+		for (const FRigExternalVariableAST& Variable : Function.ExternalVariables)
+			SourceExternalKeys.Add(Function.Name + TEXT("|") + Variable.Name);
+	}
+	for (const FRigEntryAST& Entry : SourceIdentity.Entries) SourceEntryNames.Add(Entry.Name);
+
+	TMap<FString, FString> GraphIds;
+	for (const FRigGraphAST& Graph : Copy.Graphs)
+	{
+		const FString Token = Graph.Role + TEXT(":") + GraphNameFromAST(Graph);
+		if (SourceGraphTokens.Contains(Token)) GraphIds.Add(Graph.StableId, Token);
+	}
+	auto RemapGraphId = [&GraphIds](FString& Value)
+	{
+		if (const FString* Remapped = GraphIds.Find(Value)) Value = *Remapped;
+	};
+	TMap<FString, FRigFunctionIdentifierAST> LocalFunctionTokens;
+	for (const FRigFunctionAST& Function : Copy.Functions)
+	{
+		if (!SourceFunctionNames.Contains(Function.Name) || !Function.FunctionIdentifier.IsComplete()) continue;
+		FRigFunctionIdentifierAST Token;
+		Token.HostObject = TEXT("$local");
+		Token.LibraryNodePath = Function.Name;
+		LocalFunctionTokens.Add(Function.FunctionIdentifier.ToStableId(), Token);
+	}
+	auto RemapLocalFunction = [&LocalFunctionTokens](FRigFunctionIdentifierAST& Identifier)
+	{
+		if (const FRigFunctionIdentifierAST* Token = LocalFunctionTokens.Find(Identifier.ToStableId()))
+			Identifier = *Token;
+	};
+	for (FRigGraphAST& Graph : Copy.Graphs)
+	{
+		const FString OriginalId = Graph.StableId;
+		const FString OriginalToken = Graph.Role + TEXT(":") + GraphNameFromAST(Graph);
+		if (const FString* GraphToken = GraphIds.Find(OriginalId))
+		{
+			Graph.StableId = *GraphToken;
+			if (SourceFallbackGraphTokens.Contains(*GraphToken))
+				Graph.EditorGuid = TEXT("$fallback-graph-guid:") + *GraphToken;
+		}
+		RemapGraphId(Graph.ParentStableId);
+		for (FRigGraphVariableAST& Variable : Graph.LocalVariables)
+		{
+			const FString Key = Graph.StableId + TEXT("|") + Variable.Name;
+			if (SourceLocalKeys.Contains(Key)) Variable.Guid = TEXT("$generated-local-guid:") + Key;
+		}
+		for (FRigNodeAST& Node : Graph.Nodes)
+		{
+			const FString Key = Graph.StableId + TEXT("|") + Node.StableId;
+			if (SourceFallbackNodeKeys.Contains(Key))
+				Node.Guid = TEXT("$fallback-node-guid:") + Key;
+			RemapGraphId(Node.ContainedGraphStableId);
+			if (SourceInterfaceKeys.Contains(Key)
+				&& Node.Properties.Contains(TEXT("interface-pin-guids")))
+				Node.Properties[TEXT("interface-pin-guids")] = TEXT("$generated-interface-pin-guids:") + Key;
+			if (Node.Kind == ERigNodeKind::Call) RemapLocalFunction(Node.FunctionIdentifier);
+			if (Node.Kind == ERigNodeKind::Variable)
+			{
+				const FString LocalLookupKey = OriginalToken + TEXT("|")
+					+ UnquoteRigLangProperty(Node.Properties.FindRef(TEXT("variable-name")));
+				if (const FString* LocalKey = SourceVisibleLocalTokens.Find(LocalLookupKey))
+					Node.Properties.Add(TEXT("variable-guid"),
+						FString(TEXT("\"$generated-local-guid:")) + *LocalKey + TEXT("\""));
+			}
+			if (SourceNodeKeys.Contains(Key) && Node.bInjected && !Node.InjectionOwnerPin.IsEmpty())
+			{
+				int32 Separator = INDEX_NONE;
+				if (Node.InjectionOwnerPin.FindLastChar(TEXT('|'), Separator))
+					Node.InjectionOwnerPin = Node.InjectionOwnerPin.Mid(Separator + 1);
+			}
+		}
+		Graph.Nodes.Sort([](const FRigNodeAST& A, const FRigNodeAST& B)
+		{
+			return A.StableId < B.StableId;
+		});
+	}
+	for (FRigFunctionAST& Function : Copy.Functions)
+	{
+		if (SourceFunctionNames.Contains(Function.Name))
+		{
+			Function.StableId = TEXT("$function:") + Function.Name;
+			RemapLocalFunction(Function.FunctionIdentifier);
+		}
+		RemapGraphId(Function.GraphStableId);
+		for (FRigFunctionDependencyAST& Dependency : Function.Dependencies)
+		{
+			FRigFunctionIdentifierAST Identifier;
+			Identifier.HostObject = Dependency.HostObject;
+			Identifier.LibraryNodePath = Dependency.LibraryNodePath;
+			RemapLocalFunction(Identifier);
+			Dependency.HostObject = Identifier.HostObject;
+			Dependency.LibraryNodePath = Identifier.LibraryNodePath;
+		}
+		Function.Graph = FRigGraphAST();
+	}
+	for (FRigEntryAST& Entry : Copy.Entries)
+	{
+		if (SourceEntryNames.Contains(Entry.Name)) Entry.StableId = TEXT("$entry:") + Entry.Name;
+		RemapGraphId(Entry.GraphStableId);
+		Entry.Graph = FRigGraphAST();
+	}
+	Copy.Graphs.Sort([](const FRigGraphAST& A, const FRigGraphAST& B)
+	{
+		return A.StableId < B.StableId;
+	});
+	Copy.Functions.Sort([](const FRigFunctionAST& A, const FRigFunctionAST& B)
+	{
+		return A.Name < B.Name;
+	});
+	Copy.Entries.Sort([](const FRigEntryAST& A, const FRigEntryAST& B)
+	{
+		return A.Name < B.Name;
+	});
+	return Copy.ToCanonicalString();
+}
 }
 
 FRigLangImportResult FRigLangImporter::Import(
@@ -784,6 +1211,718 @@ FRigLangImportResult FRigLangImporter::Import(
 		}
 	}
 
+	const bool bHasGraphInventory = !Module.Graphs.IsEmpty();
+	const bool bHasExecutableGraphContent = !Module.Functions.IsEmpty() || !Module.Entries.IsEmpty()
+		|| Module.Graphs.ContainsByPredicate([](const FRigGraphAST& Graph)
+		{
+			return !Graph.Nodes.IsEmpty() || !Graph.Links.IsEmpty() || !Graph.LocalVariables.IsEmpty();
+		});
+	if (bHasGraphInventory)
+	{
+		FKismetEditorUtilities::CompileBlueprint(Result.Blueprint.Get());
+		if (Result.Blueprint->Status == BS_Error)
+		{
+			AddError(Result, TEXT("Rig host variable compilation failed before graph reconstruction"));
+			return AbortImport();
+		}
+		FRigVMClient* Client = Result.Blueprint->URigVMBlueprint::GetRigVMClient();
+		URigVMFunctionLibrary* FunctionLibrary = Result.Blueprint->GetLocalFunctionLibrary();
+		URigVMController* LibraryController = Result.Blueprint->GetOrCreateController(FunctionLibrary);
+		if (!Client || !FunctionLibrary || !LibraryController)
+		{
+			AddError(Result, TEXT("Failed to initialize RigVM graph controllers"));
+			return AbortImport();
+		}
+
+		TMap<FString, URigVMGraph*> GraphsByStableId;
+		TMap<FString, URigVMLibraryNode*> FunctionsByIdentifier;
+		TMap<FString, TMap<FGuid, FGuid>> LocalGuidRemapByGraph;
+		for (const FRigGraphAST& Graph : Module.Graphs)
+		{
+			if (Graph.Role == TEXT("function-library"))
+			{
+				GraphsByStableId.Add(Graph.StableId, FunctionLibrary);
+			}
+		}
+
+		for (const FRigFunctionAST& Function : Module.Functions)
+		{
+			FString FunctionName = Function.Name;
+			if (const FString* ShortName = Function.Properties.Find(TEXT("short-name")))
+				FunctionName = UnquoteRigLangProperty(*ShortName);
+			const bool bMutable = Function.Arguments.ContainsByPredicate(
+				[](const FRigCallableArgumentAST& Argument) { return Argument.bExecuteContext; });
+			URigVMLibraryNode* LibraryNode = LibraryController->AddFunctionToLibrary(
+				FName(*FunctionName), bMutable, FVector2D::ZeroVector, false, false);
+			if (!LibraryNode || !LibraryNode->GetContainedGraph())
+			{
+				AddError(Result, FString::Printf(TEXT("Failed to predeclare Rig function '%s'"), *Function.Name), Function.Location);
+				return AbortImport();
+			}
+			Result.Blueprint->MarkFunctionPublic(FName(*FunctionName), Function.Visibility == TEXT("public"));
+			GraphsByStableId.Add(Function.GraphStableId, LibraryNode->GetContainedGraph());
+			if (!Function.StableId.IsEmpty()) FunctionsByIdentifier.Add(Function.StableId, LibraryNode);
+			if (Function.FunctionIdentifier.IsComplete())
+				FunctionsByIdentifier.Add(Function.FunctionIdentifier.ToStableId(), LibraryNode);
+
+			URigVMController* FunctionController = Result.Blueprint->GetOrCreateController(LibraryNode->GetContainedGraph());
+			for (const FRigCallableArgumentAST& Argument : Function.Arguments)
+			{
+				if (Argument.bExecuteContext) continue;
+				FString CPPType = Argument.Type.CPPType;
+				if (Argument.Type.ContainerType == TEXT("array") && !IsArrayCPPType(CPPType))
+					CPPType = TEXT("TArray<") + CPPType + TEXT(">");
+				const FName AddedPin = FunctionController->AddExposedPin(
+					FName(*Argument.Name), ToRigVMPinDirection(Argument.Direction), CPPType,
+					FName(*Argument.Type.CPPTypeObject), Argument.DefaultValue, false, false, Argument.bInputVariable);
+				if (AddedPin.IsNone())
+				{
+					AddError(Result, FString::Printf(TEXT("Failed to add argument '%s' to function '%s'"),
+						*Argument.Name, *Function.Name), Argument.Location);
+					return AbortImport();
+				}
+			}
+			const FRigGraphAST* FunctionGraphAST = Module.Graphs.FindByPredicate(
+				[&Function](const FRigGraphAST& Graph)
+				{
+					return Graph.StableId == Function.GraphStableId && Graph.Role == TEXT("function");
+				});
+			if (!FunctionGraphAST)
+			{
+				AddError(Result, FString::Printf(TEXT("Missing graph for function '%s'"),
+					*Function.Name), Function.Location);
+				return AbortImport();
+			}
+			for (const FRigGraphVariableAST& Variable : FunctionGraphAST->LocalVariables)
+			{
+				FString CPPType = Variable.Type.CPPType;
+				if (Variable.Type.ContainerType == TEXT("array") && !IsArrayCPPType(CPPType))
+					CPPType = TEXT("TArray<") + CPPType + TEXT(">");
+				UObject* TypeObject = Variable.Type.CPPTypeObject.IsEmpty()
+					? nullptr : LoadObject<UObject>(nullptr, *Variable.Type.CPPTypeObject);
+				const FRigVMGraphVariableDescription Added = FunctionController->AddLocalVariable(
+					FName(*Variable.Name), CPPType, TypeObject, Variable.DefaultValue, false, false);
+				FGuid SourceGuid;
+				if (Added.Name != FName(*Variable.Name) || !Added.Guid.IsValid()
+					|| !FGuid::Parse(Variable.Guid, SourceGuid))
+				{
+					AddError(Result, FString::Printf(TEXT("Failed exact local variable '%s'"),
+						*Variable.Name), Variable.Location);
+					return AbortImport();
+				}
+				LocalGuidRemapByGraph.FindOrAdd(FunctionGraphAST->StableId).Add(SourceGuid, Added.Guid);
+			}
+			const FRigGraphAST* LibraryGraphAST = Module.Graphs.FindByPredicate(
+				[](const FRigGraphAST& Graph) { return Graph.Role == TEXT("function-library"); });
+			const FRigNodeAST* DeclarationAST = LibraryGraphAST
+				? LibraryGraphAST->Nodes.FindByPredicate([&Function](const FRigNodeAST& Candidate)
+				{
+					return Candidate.Kind == ERigNodeKind::Collapse
+						&& Candidate.ContainedGraphStableId == Function.GraphStableId;
+				}) : nullptr;
+			if (!DeclarationAST
+				|| !RestoreAndVerifyPins(LibraryController, LibraryNode, *DeclarationAST, Result))
+			{
+				AddError(Result, FString::Printf(TEXT("Failed exact function-library declaration '%s'"),
+					*Function.Name), Function.Location);
+				return AbortImport();
+			}
+		}
+
+		URigVMGraph* DefaultGraph = Client->GetDefaultModel();
+		for (const FRigGraphAST& Graph : Module.Graphs)
+		{
+			if (Graph.Role != TEXT("root")) continue;
+			const FString GraphName = GraphNameFromAST(Graph);
+			URigVMGraph* TargetGraph = nullptr;
+			if (DefaultGraph && DefaultGraph->GetGraphName() == GraphName)
+				TargetGraph = DefaultGraph;
+			else
+				TargetGraph = Client->AddModel(FName(*GraphName), false);
+			if (!TargetGraph)
+			{
+				AddError(Result, FString::Printf(TEXT("Failed to create Rig graph '%s'"), *GraphName), Graph.Location);
+				return AbortImport();
+			}
+			if (TargetGraph->GetGraphName() != GraphName)
+			{
+				AddError(Result, FString::Printf(TEXT("Rig graph name mismatch: expected '%s', got '%s'"),
+					*GraphName, *TargetGraph->GetGraphName()), Graph.Location);
+				return AbortImport();
+			}
+			GraphsByStableId.Add(Graph.StableId, TargetGraph);
+		}
+
+		TFunction<bool(const FRigGraphAST&, URigVMGraph*, URigVMController*, const FString&, bool, TArray<FName>*)> BuildGraphRecursive;
+		TFunction<URigVMNode*(const FRigNodeAST&, const FRigGraphAST&, URigVMGraph*, URigVMController*, const FString&)> CreateTypedNode;
+		TFunction<void(const FRigGraphAST&, URigVMGraph*)> RebindContainedGraphs;
+
+		RebindContainedGraphs = [&Module, &GraphsByStableId, &RebindContainedGraphs](
+			const FRigGraphAST& GraphAST, URigVMGraph* ActualGraph)
+		{
+			if (!ActualGraph) return;
+			GraphsByStableId.Add(GraphAST.StableId, ActualGraph);
+			for (const FRigNodeAST& NodeAST : GraphAST.Nodes)
+			{
+				if (NodeAST.ContainedGraphStableId.IsEmpty()) continue;
+				URigVMCollapseNode* CollapseNode = Cast<URigVMCollapseNode>(
+					ActualGraph->FindNodeByName(FName(*NodeAST.StableId)));
+				if (!CollapseNode || !CollapseNode->GetContainedGraph()) continue;
+				GraphsByStableId.Add(NodeAST.ContainedGraphStableId, CollapseNode->GetContainedGraph());
+				if (const FRigGraphAST* ChildAST = Module.Graphs.FindByPredicate(
+					[&NodeAST](const FRigGraphAST& Candidate)
+					{
+						return Candidate.StableId == NodeAST.ContainedGraphStableId;
+					}))
+				{
+					RebindContainedGraphs(*ChildAST, CollapseNode->GetContainedGraph());
+				}
+			}
+		};
+
+		CreateTypedNode = [&Module, &Result, &FunctionsByIdentifier, &GraphsByStableId,
+			&LocalGuidRemapByGraph, &BuildGraphRecursive, &RebindContainedGraphs](
+				const FRigNodeAST& NodeAST, const FRigGraphAST& OwnerAST,
+				URigVMGraph* TargetGraph, URigVMController* Controller,
+				const FString& OwningLocalScopeStableId) -> URigVMNode*
+		{
+			URigVMNode* Node = nullptr;
+			switch (NodeAST.Kind)
+			{
+			case ERigNodeKind::Entry:
+			case ERigNodeKind::Return:
+				Node = TargetGraph->FindNodeByName(FName(*NodeAST.StableId));
+				break;
+			case ERigNodeKind::Unit:
+			{
+				const FString StructPath = UnquoteRigLangProperty(
+					NodeAST.Properties.FindRef(TEXT("script-struct")));
+				UScriptStruct* ScriptStruct = StructPath.IsEmpty()
+					? nullptr : LoadObject<UScriptStruct>(nullptr, *StructPath);
+				if (StructPath.Contains(TEXT("RigVMFunction_ControlFlowBranch")))
+					Node = Controller->AddBranchNode(FVector2D::ZeroVector, NodeAST.StableId, false, false);
+				else if (ScriptStruct)
+					Node = Controller->AddUnitNode(ScriptStruct, FName(*NodeAST.MethodName),
+						FVector2D::ZeroVector, NodeAST.StableId, false, false);
+				break;
+			}
+			case ERigNodeKind::Dispatch:
+			{
+				const FString DispatchStruct = UnquoteRigLangProperty(
+					NodeAST.Properties.FindRef(TEXT("dispatch-script-struct")));
+				const FRigPinAST* ResolvedPin = NodeAST.Pins.IsEmpty() ? nullptr : &NodeAST.Pins.Last();
+				if (ResolvedPin && DispatchStruct.Contains(TEXT("RigVMDispatch_If")))
+					Node = Controller->AddIfNode(ResolvedPin->Type.CPPType,
+						FName(*ResolvedPin->Type.CPPTypeObject), FVector2D::ZeroVector,
+						NodeAST.StableId, false, false);
+				else if (ResolvedPin && DispatchStruct.Contains(TEXT("RigVMDispatch_Select")))
+					Node = Controller->AddSelectNode(ResolvedPin->Type.CPPType,
+						FName(*ResolvedPin->Type.CPPTypeObject), FVector2D::ZeroVector,
+						NodeAST.StableId, false, false);
+				else if (ResolvedPin && DispatchStruct.Contains(TEXT("RigVMDispatch_MakeStruct")))
+					Node = Controller->AddMakeStructNode(ResolvedPin->Type.CPPType,
+						FName(*ResolvedPin->Type.CPPTypeObject), ResolvedPin->DefaultValue,
+						FVector2D::ZeroVector, NodeAST.StableId, false);
+				else
+				{
+					const FString Notation = UnquoteRigLangProperty(
+						NodeAST.Properties.FindRef(TEXT("template-notation")));
+					if (!Notation.IsEmpty()) Node = Controller->AddTemplateNode(
+						FName(*Notation), FVector2D::ZeroVector, NodeAST.StableId, false, false);
+				}
+				break;
+			}
+			case ERigNodeKind::Collapse:
+			{
+				const FRigGraphAST* ContainedAST = Module.Graphs.FindByPredicate(
+					[&NodeAST](const FRigGraphAST& Candidate)
+					{
+						return Candidate.StableId == NodeAST.ContainedGraphStableId
+							&& Candidate.Role == TEXT("node-contained");
+					});
+				if (!ContainedAST)
+				{
+					AddError(Result, FString::Printf(TEXT("Collapse '%s' has no contained graph '%s'"),
+						*NodeAST.StableId, *NodeAST.ContainedGraphStableId), NodeAST.Location);
+					return nullptr;
+				}
+				TArray<FName> InnerNames;
+				if (!BuildGraphRecursive(*ContainedAST, TargetGraph, Controller,
+					OwningLocalScopeStableId, true, &InnerNames))
+					return nullptr;
+				URigVMCollapseNode* CollapseNode = InnerNames.IsEmpty() ? nullptr
+					: Controller->CollapseNodes(InnerNames, NodeAST.StableId, false, false, false);
+				if (!CollapseNode || !CollapseNode->GetContainedGraph()) return nullptr;
+				GraphsByStableId.Add(NodeAST.ContainedGraphStableId, CollapseNode->GetContainedGraph());
+				URigVMController* ContainedController = Result.Blueprint->GetOrCreateController(
+					CollapseNode->GetContainedGraph());
+				for (const FRigPinAST& PinAST : NodeAST.Pins)
+				{
+					if (CollapseNode->FindPin(PinAST.Path)) continue;
+					FString CPPType = PinAST.Type.CPPType;
+					if (PinAST.Type.ContainerType == TEXT("array") && !IsArrayCPPType(CPPType))
+						CPPType = TEXT("TArray<") + CPPType + TEXT(">");
+					if (!ContainedController || ContainedController->AddExposedPin(
+						FName(*PinAST.Path), ToRigVMPinDirection(PinAST.Direction), CPPType,
+						FName(*PinAST.Type.CPPTypeObject), PinAST.DefaultValue, false, false).IsNone())
+						return nullptr;
+				}
+				for (const FRigLinkAST& Link : ContainedAST->Links)
+					if (!RestoreAndVerifyLink(ContainedController,
+						CollapseNode->GetContainedGraph(), Link, Result)) return nullptr;
+				RebindContainedGraphs(*ContainedAST, CollapseNode->GetContainedGraph());
+				Node = CollapseNode;
+				break;
+			}
+			case ERigNodeKind::Aggregate:
+			{
+				const FRigGraphAST* ContainedAST = Module.Graphs.FindByPredicate(
+					[&NodeAST](const FRigGraphAST& Candidate)
+					{
+						return Candidate.StableId == NodeAST.ContainedGraphStableId;
+					});
+				FString FirstInnerName = UnquoteRigLangProperty(
+					NodeAST.Properties.FindRef(TEXT("first-inner-node")));
+				int32 Separator = INDEX_NONE;
+				if (FirstInnerName.FindLastChar(TEXT('|'), Separator))
+					FirstInnerName = FirstInnerName.Mid(Separator + 1);
+				const FRigNodeAST* FirstInner = ContainedAST ? ContainedAST->Nodes.FindByPredicate(
+					[&FirstInnerName](const FRigNodeAST& Candidate)
+					{
+						return Candidate.StableId == FirstInnerName && Candidate.Kind == ERigNodeKind::Unit;
+					}) : nullptr;
+				UScriptStruct* ScriptStruct = FirstInner ? LoadObject<UScriptStruct>(nullptr,
+					*UnquoteRigLangProperty(FirstInner->Properties.FindRef(TEXT("script-struct")))) : nullptr;
+				URigVMUnitNode* Seed = ScriptStruct ? Controller->AddUnitNode(
+					ScriptStruct, FName(*FirstInner->MethodName), FVector2D::ZeroVector,
+					NodeAST.StableId, false, false) : nullptr;
+				if (Seed)
+				{
+					const bool bInputAggregate = NodeAST.Properties.FindRef(TEXT("input-aggregate")) == TEXT("true");
+					TArray<const FRigPinAST*> AggregatePins;
+					for (const FRigPinAST& Pin : NodeAST.Pins)
+						if ((bInputAggregate && Pin.Direction == ERigPinDirection::Input)
+							|| (!bInputAggregate && Pin.Direction == ERigPinDirection::Output))
+							AggregatePins.Add(&Pin);
+					for (int32 PinIndex = 2; PinIndex < AggregatePins.Num(); ++PinIndex)
+						if (Controller->AddAggregatePin(NodeAST.StableId, AggregatePins[PinIndex]->Path,
+							AggregatePins[PinIndex]->DefaultValue, false, false).IsEmpty()) Seed = nullptr;
+					Node = Seed ? TargetGraph->FindNodeByName(FName(*NodeAST.StableId)) : nullptr;
+				}
+				break;
+			}
+			case ERigNodeKind::Variable:
+			{
+				const FString VariableName = UnquoteRigLangProperty(NodeAST.Properties.FindRef(TEXT("variable-name")));
+				const FString CPPType = UnquoteRigLangProperty(NodeAST.Properties.FindRef(TEXT("variable-cpp-type")));
+				const FString ObjectPath = UnquoteRigLangProperty(NodeAST.Properties.FindRef(TEXT("variable-cpp-type-object")));
+				URigVMVariableNode* VariableNode = Controller->AddVariableNode(
+					FName(*VariableName), CPPType,
+					ObjectPath.IsEmpty() ? nullptr : LoadObject<UObject>(nullptr, *ObjectPath),
+					NodeAST.Properties.FindRef(TEXT("getter")) == TEXT("true"),
+					UnquoteRigLangProperty(NodeAST.Properties.FindRef(TEXT("variable-default"))),
+					FVector2D::ZeroVector, NodeAST.StableId, false, false);
+				FGuid VariableGuid;
+				if (VariableNode && FGuid::Parse(
+					UnquoteRigLangProperty(NodeAST.Properties.FindRef(TEXT("variable-guid"))), VariableGuid))
+				{
+					if (const FGuid* GeneratedGuid = LocalGuidRemapByGraph.FindOrAdd(
+						OwningLocalScopeStableId).Find(VariableGuid))
+						VariableGuid = *GeneratedGuid;
+					Controller->RefreshVariableNode(FName(*NodeAST.StableId), VariableGuid,
+						FName(*VariableName), CPPType,
+						ObjectPath.IsEmpty() ? nullptr : LoadObject<UObject>(nullptr, *ObjectPath), false, false);
+					if (VariableNode->GetVariableGuid() != VariableGuid) VariableNode = nullptr;
+				}
+				Node = VariableNode;
+				break;
+			}
+			case ERigNodeKind::Call:
+			{
+				if (!NodeAST.FunctionIdentifier.IsComplete()) return nullptr;
+				URigVMLibraryNode* Referenced = FunctionsByIdentifier.FindRef(
+					NodeAST.FunctionIdentifier.ToStableId());
+				if (Referenced) Node = Controller->AddFunctionReferenceNode(
+					Referenced, FVector2D::ZeroVector, NodeAST.StableId, false, false);
+				else
+				{
+					const FRigVMGraphFunctionIdentifier Identifier(
+						FSoftObjectPath(NodeAST.FunctionIdentifier.HostObject),
+						NodeAST.FunctionIdentifier.LibraryNodePath);
+					const FRigVMGraphFunctionHeader Header =
+						FRigVMGraphFunctionHeader::FindGraphFunctionHeader(Identifier);
+					if (Header.IsValid() && Header.LibraryPointer == Identifier)
+						Node = Controller->AddFunctionReferenceNodeFromDescription(
+							Header, FVector2D::ZeroVector, NodeAST.StableId, false, false);
+				}
+				break;
+			}
+			case ERigNodeKind::InvokeEntry:
+				Node = Controller->AddInvokeEntryNode(FName(*UnquoteRigLangProperty(
+					NodeAST.Properties.FindRef(TEXT("entry-name")))), FVector2D::ZeroVector,
+					NodeAST.StableId, false, false);
+				break;
+			case ERigNodeKind::Comment:
+				Node = Controller->AddCommentNode(
+					UnquoteRigLangProperty(NodeAST.Properties.FindRef(TEXT("comment-text"))),
+					FVector2D::ZeroVector, FVector2D(400.0, 300.0), FLinearColor::Black,
+					NodeAST.StableId, false, false);
+				break;
+			case ERigNodeKind::Reroute:
+			{
+				const FRigPinAST* ValuePin = NodeAST.Pins.FindByPredicate(
+					[](const FRigPinAST& Pin) { return Pin.Path == TEXT("Value"); });
+				if (ValuePin)
+				{
+					FString CPPType = ValuePin->Type.CPPType;
+					if (ValuePin->Type.ContainerType == TEXT("array") && !IsArrayCPPType(CPPType))
+						CPPType = TEXT("TArray<") + CPPType + TEXT(">");
+					Node = Controller->AddFreeRerouteNode(CPPType,
+						FName(*ValuePin->Type.CPPTypeObject),
+						NodeAST.Properties.FindRef(TEXT("literal")) == TEXT("true"), NAME_None,
+						ValuePin->DefaultValue, FVector2D::ZeroVector, NodeAST.StableId, false);
+				}
+				break;
+			}
+			default:
+				break;
+			}
+			return Node;
+		};
+
+		BuildGraphRecursive = [&Module, &Result, &GraphsByStableId, &LocalGuidRemapByGraph,
+			&CreateTypedNode, &RebindContainedGraphs](
+			const FRigGraphAST& GraphAST, URigVMGraph* TargetGraph, URigVMController* Controller,
+			const FString& InOwningLocalScopeStableId, const bool bPreparingCollapse,
+			TArray<FName>* BuiltNames) -> bool
+		{
+			if (!TargetGraph || !Controller) return false;
+			const FString OwningLocalScopeStableId = GraphAST.Role == TEXT("function")
+				? GraphAST.StableId : InOwningLocalScopeStableId;
+			TArray<const FRigNodeAST*> OrderedNodes;
+			for (const FRigNodeAST& NodeAST : GraphAST.Nodes) OrderedNodes.Add(&NodeAST);
+			OrderedNodes.StableSort([](const FRigNodeAST& A, const FRigNodeAST& B)
+			{
+				if (A.bInjected != B.bInjected) return !A.bInjected;
+				if (!A.bInjected) return A.StableId < B.StableId;
+				if (A.InjectionOwnerPin != B.InjectionOwnerPin)
+					return A.InjectionOwnerPin < B.InjectionOwnerPin;
+				return A.InjectionOrder < B.InjectionOrder;
+			});
+			for (const FRigNodeAST* NodeAST : OrderedNodes)
+			{
+				if (NodeAST->bInjected) continue;
+				if (bPreparingCollapse && (NodeAST->Kind == ERigNodeKind::Entry
+					|| NodeAST->Kind == ERigNodeKind::Return)) continue;
+				URigVMNode* Node = CreateTypedNode(*NodeAST, GraphAST, TargetGraph, Controller,
+					OwningLocalScopeStableId);
+				if (!Node)
+				{
+					AddError(Result, FString::Printf(TEXT("Failed exact reconstruction of Rig node '%s'"),
+						*NodeAST->StableId), NodeAST->Location);
+					return false;
+				}
+				if (NodeAST->Kind == ERigNodeKind::Call
+					&& !RestoreAndVerifyVariableRemapping(Controller,
+						CastChecked<URigVMFunctionReferenceNode>(Node), *NodeAST, Result)) return false;
+				if (!RestoreAndVerifyPins(Controller, Node, *NodeAST, Result)) return false;
+				if (!NodeAST->ContainedGraphStableId.IsEmpty())
+				{
+					if (URigVMCollapseNode* ContainedNode = Cast<URigVMCollapseNode>(Node))
+						if (ContainedNode->GetContainedGraph())
+						{
+							GraphsByStableId.Add(NodeAST->ContainedGraphStableId,
+								ContainedNode->GetContainedGraph());
+							if (const FRigGraphAST* ContainedAST = Module.Graphs.FindByPredicate(
+								[NodeAST](const FRigGraphAST& Candidate)
+								{
+									return Candidate.StableId == NodeAST->ContainedGraphStableId;
+								}))
+								RebindContainedGraphs(*ContainedAST, ContainedNode->GetContainedGraph());
+						}
+				}
+				if (BuiltNames) BuiltNames->Add(FName(*NodeAST->StableId));
+			}
+			for (const FRigNodeAST* NodeAST : OrderedNodes)
+			{
+				if (!NodeAST->bInjected) continue;
+				FString OwnerPin = NodeAST->InjectionOwnerPin;
+				for (const FRigNodeAST& OwnerCandidate : GraphAST.Nodes)
+				{
+					if (OwnerCandidate.bInjected) continue;
+					const FString Prefix = OwnerCandidate.StableId + TEXT(".");
+					const int32 PrefixIndex = OwnerPin.Find(
+						Prefix, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+					if (PrefixIndex != INDEX_NONE) { OwnerPin = OwnerPin.Mid(PrefixIndex); break; }
+				}
+				URigVMInjectionInfo* Injection = nullptr;
+				if (URigVMPin* Owner = TargetGraph->FindPin(OwnerPin))
+					for (URigVMInjectionInfo* Candidate : Owner->GetInjectedNodes())
+						if (Candidate && Candidate->Node
+							&& Candidate->Node->GetName() == NodeAST->StableId
+							&& Candidate->bInjectedAsInput == NodeAST->bInjectedAsInput)
+						{
+							Injection = Candidate;
+							break;
+						}
+				if (!Injection)
+				{
+					UScriptStruct* ScriptStruct = LoadObject<UScriptStruct>(nullptr,
+						*UnquoteRigLangProperty(NodeAST->Properties.FindRef(TEXT("script-struct"))));
+					if (ScriptStruct) Injection = Controller->AddInjectedNode(
+						OwnerPin, NodeAST->bInjectedAsInput, ScriptStruct,
+						FName(*NodeAST->MethodName), FName(*NodeAST->InjectionInputPin),
+						FName(*NodeAST->InjectionOutputPin), NodeAST->StableId, false, false);
+				}
+				if (!Injection || !Injection->Node
+					|| !RestoreAndVerifyPins(Controller, Injection->Node, *NodeAST, Result)) return false;
+			}
+			for (const FRigLinkAST& Link : GraphAST.Links)
+			{
+				if (bPreparingCollapse
+					&& (Link.SourceNodeId == TEXT("Entry") || Link.TargetNodeId == TEXT("Return"))) continue;
+				if (!RestoreAndVerifyLink(Controller, TargetGraph, Link, Result)) return false;
+			}
+			return true;
+		};
+
+		TArray<const FRigGraphAST*> GraphBuildOrder;
+		for (const FRigGraphAST& Graph : Module.Graphs) GraphBuildOrder.Add(&Graph);
+		GraphBuildOrder.Sort([](const FRigGraphAST& A, const FRigGraphAST& B)
+		{
+			auto Priority = [](const FString& Role)
+			{
+				if (Role == TEXT("function")) return 0;
+				if (Role == TEXT("root")) return 1;
+				if (Role == TEXT("function-library")) return 2;
+				return 3;
+			};
+			const int32 APriority = Priority(A.Role);
+			const int32 BPriority = Priority(B.Role);
+			return APriority == BPriority ? A.StableId < B.StableId : APriority < BPriority;
+		});
+		bool bCompiledFunctionDefinitions = false;
+		for (const FRigGraphAST* GraphPtr : GraphBuildOrder)
+		{
+			const FRigGraphAST& Graph = *GraphPtr;
+			if (!bCompiledFunctionDefinitions && Graph.Role == TEXT("root"))
+			{
+				Result.Blueprint->RecompileVM();
+				bCompiledFunctionDefinitions = true;
+			}
+			URigVMGraph* const* TargetGraphPtr = GraphsByStableId.Find(Graph.StableId);
+			if (!TargetGraphPtr || !*TargetGraphPtr)
+			{
+				if (Graph.Role == TEXT("node-contained")) continue;
+				AddError(Result, FString::Printf(TEXT("No owner graph for '%s'"), *Graph.StableId), Graph.Location);
+				return AbortImport();
+			}
+			URigVMGraph* TargetGraph = *TargetGraphPtr;
+			URigVMController* GraphController = Result.Blueprint->GetOrCreateController(TargetGraph);
+			if (!GraphController)
+			{
+				AddError(Result, FString::Printf(TEXT("No controller for Rig graph '%s'"), *Graph.StableId), Graph.Location);
+				return AbortImport();
+			}
+			if (Graph.Role == TEXT("function-library")) continue;
+			if (Graph.Role == TEXT("node-contained")) continue;
+			if (!BuildGraphRecursive(Graph, TargetGraph, GraphController, FString(), false, nullptr))
+				return AbortImport();
+		}
+
+		TMap<const URigVMGraph*, URigVMEdGraph*> EditorGraphsByModel;
+		auto FindEditorGraphForModel = [&Result, &EditorGraphsByModel](const URigVMGraph* Model) -> URigVMEdGraph*
+		{
+			if (URigVMEdGraph** Existing = EditorGraphsByModel.Find(Model)) return *Existing;
+			TArray<UEdGraph*> EditorGraphs;
+			Result.Blueprint->GetAllGraphs(EditorGraphs);
+			for (UEdGraph* Candidate : EditorGraphs)
+			{
+				URigVMEdGraph* RigGraph = Cast<URigVMEdGraph>(Candidate);
+				if (RigGraph && RigGraph->GetModel() == Model)
+				{
+					EditorGraphsByModel.Add(Model, RigGraph);
+					return RigGraph;
+				}
+			}
+			return nullptr;
+		};
+		TFunction<URigVMEdGraph*(URigVMGraph*)> EnsureEditorGraphForModel;
+		EnsureEditorGraphForModel = [&Result, &EditorGraphsByModel, &FindEditorGraphForModel,
+			&EnsureEditorGraphForModel](URigVMGraph* Model) -> URigVMEdGraph*
+		{
+			if (!Model) return nullptr;
+			if (URigVMEdGraph* Existing = FindEditorGraphForModel(Model)) return Existing;
+			URigVMGraph* ParentModel = Model->GetParentGraph();
+			URigVMEdGraph* ParentEditor = EnsureEditorGraphForModel(ParentModel);
+			URigVMCollapseNode* OwnerNode = Cast<URigVMCollapseNode>(Model->GetOuter());
+			if (!ParentEditor || !OwnerNode) return nullptr;
+			URigVMEdGraph* EditorGraph = NewObject<URigVMEdGraph>(ParentEditor, URigVMEdGraph::StaticClass(),
+				*OwnerNode->GetEditorSubGraphName(), RF_Transactional);
+			EditorGraph->Schema = URigVMEdGraphSchema::StaticClass();
+			EditorGraph->bAllowRenaming = true;
+			EditorGraph->bEditable = !OwnerNode->IsA<URigVMAggregateNode>();
+			EditorGraph->bAllowDeletion = true;
+			EditorGraph->ModelNodePath = Model->GetNodePath();
+			EditorGraph->bIsFunctionDefinition = false;
+			ParentEditor->SubGraphs.Add(EditorGraph);
+			EditorGraph->InitializeFromAsset(Result.Blueprint.Get());
+			EditorGraphsByModel.Add(Model, EditorGraph);
+			if (URigVMController* SyncController = Result.Blueprint->GetOrCreateController(Model))
+				SyncController->ResendAllNotifications();
+			return EditorGraph;
+		};
+		for (const FRigGraphAST& Graph : Module.Graphs)
+		{
+			URigVMGraph* const* ModelGraphPtr = GraphsByStableId.Find(Graph.StableId);
+			URigVMEdGraph* EditorGraph = ModelGraphPtr ? FindEditorGraphForModel(*ModelGraphPtr) : nullptr;
+			FGuid SourceGraphGuid;
+			if (!EditorGraph || !FGuid::Parse(Graph.EditorGuid, SourceGraphGuid)) continue;
+			for (URigVMNode* ModelNode : (*ModelGraphPtr)->GetNodes())
+			{
+				if (ModelNode && !EditorGraph->FindNodeForModelNodeName(ModelNode->GetFName()))
+					EditorGraph->HandleModifiedEvent(ERigVMGraphNotifType::NodeAdded, *ModelGraphPtr, ModelNode);
+			}
+			EditorGraph->GraphGuid = SourceGraphGuid;
+			for (const FRigNodeAST& NodeAST : Graph.Nodes)
+			{
+				if (NodeAST.bInjected) continue;
+				FGuid SourceNodeGuid;
+				UEdGraphNode* EditorNode = EditorGraph->FindNodeForModelNodeName(FName(*NodeAST.StableId));
+				if (!EditorNode)
+				{
+					for (UEdGraphNode* Candidate : EditorGraph->Nodes)
+					{
+						if (Candidate && Candidate->GetFName() == FName(*NodeAST.StableId))
+						{
+							EditorNode = Candidate;
+							break;
+						}
+					}
+				}
+				if (EditorNode && FGuid::Parse(NodeAST.Guid, SourceNodeGuid)) EditorNode->NodeGuid = SourceNodeGuid;
+			}
+		}
+
+		Result.Blueprint->RecompileVM();
+		const FCompilerResultsLog& CompileLog =
+			static_cast<IRigVMEditorAssetInterface*>(Result.Blueprint.Get())->GetCompileLog();
+		if (CompileLog.NumErrors > 0 || (Options.bStrict && CompileLog.NumWarnings > 0))
+		{
+			AddError(Result, FString::Printf(
+				TEXT("RigVM compilation produced %d errors and %d warnings%s"),
+				CompileLog.NumErrors, CompileLog.NumWarnings,
+				Options.bStrict ? TEXT(" in strict mode") : TEXT("")));
+			return AbortImport();
+		}
+		TScriptInterface<IRigVMGraphFunctionHost> FunctionHost =
+			static_cast<IRigVMEditorAssetInterface*>(Result.Blueprint.Get())
+				->GetRigVMClientHost()->GetRigVMGraphFunctionHost();
+		FRigVMGraphFunctionStore* FunctionStore = FunctionHost
+			? FunctionHost->GetRigVMGraphFunctionStore() : nullptr;
+		if (!FunctionStore && Module.Functions.ContainsByPredicate(
+			[](const FRigFunctionAST& Function) { return !Function.ExternalVariables.IsEmpty(); }))
+		{
+			AddError(Result, TEXT("Cannot restore Rig function external-variable identities"));
+			return AbortImport();
+		}
+		for (const FRigFunctionAST& Function : Module.Functions)
+		{
+			if (Function.ExternalVariables.IsEmpty()) continue;
+			FString FunctionName = Function.Name;
+			if (const FString* ShortName = Function.Properties.Find(TEXT("short-name")))
+				FunctionName = UnquoteRigLangProperty(*ShortName);
+			FRigVMGraphFunctionData* FunctionData = FunctionStore
+				? FunctionStore->FindFunctionByName(FName(*FunctionName)) : nullptr;
+			if (!FunctionData)
+			{
+				AddError(Result, FString::Printf(TEXT("Cannot restore external variables for Rig function '%s'"),
+					*Function.Name), Function.Location);
+				return AbortImport();
+			}
+			TArray<FRigVMExternalVariable> ExactExternalVariables;
+			for (const FRigExternalVariableAST& Variable : Function.ExternalVariables)
+			{
+				FGuid Guid;
+				if (!FGuid::Parse(Variable.Guid, Guid))
+				{
+					AddError(Result, FString::Printf(TEXT("Invalid external-variable Guid '%s' for '%s.%s'"),
+						*Variable.Guid, *Function.Name, *Variable.Name), Variable.Location);
+					return AbortImport();
+				}
+				FString CPPType = Variable.Type.CPPType;
+				if (Variable.Type.ContainerType == TEXT("array") && !IsArrayCPPType(CPPType))
+					CPPType = TEXT("TArray<") + CPPType + TEXT(">");
+				UObject* TypeObject = Variable.Type.CPPTypeObject.IsEmpty()
+					? nullptr : LoadObject<UObject>(nullptr, *Variable.Type.CPPTypeObject);
+				ExactExternalVariables.Add(FRigVMExternalVariable::Make(
+					Guid, FName(*Variable.Name), CPPType, TypeObject, Variable.bPublic, Variable.bReadOnly));
+			}
+			FunctionData->Header.ExternalVariables = MoveTemp(ExactExternalVariables);
+		}
+		for (int32 SyncPass = 0; SyncPass < 3; ++SyncPass)
+		{
+			for (const FRigGraphAST& Graph : Module.Graphs)
+			{
+				URigVMGraph* const* ModelGraphPtr = GraphsByStableId.Find(Graph.StableId);
+				URigVMEdGraph* EditorGraph = ModelGraphPtr ? FindEditorGraphForModel(*ModelGraphPtr) : nullptr;
+				if (!EditorGraph && ModelGraphPtr && Graph.Role == TEXT("node-contained"))
+					EditorGraph = EnsureEditorGraphForModel(*ModelGraphPtr);
+				if (!EditorGraph) continue;
+				for (URigVMNode* ModelNode : (*ModelGraphPtr)->GetNodes())
+				{
+					if (ModelNode && !EditorGraph->FindNodeForModelNodeName(ModelNode->GetFName()))
+						EditorGraph->HandleModifiedEvent(ERigVMGraphNotifType::NodeAdded, *ModelGraphPtr, ModelNode);
+				}
+			}
+		}
+		for (const FRigGraphAST& Graph : Module.Graphs)
+		{
+			URigVMGraph* const* ModelGraphPtr = GraphsByStableId.Find(Graph.StableId);
+			URigVMEdGraph* EditorGraph = ModelGraphPtr ? FindEditorGraphForModel(*ModelGraphPtr) : nullptr;
+			FGuid SourceGraphGuid;
+			const bool bHasSourceEditorNode = Graph.Nodes.ContainsByPredicate([](const FRigNodeAST& Node)
+			{
+				FGuid EditorGuid;
+				return !Node.bInjected && FGuid::Parse(Node.Guid, EditorGuid);
+			});
+			if (!EditorGraph && !bHasSourceEditorNode) continue;
+			if (!EditorGraph || !FGuid::Parse(Graph.EditorGuid, SourceGraphGuid))
+			{
+				AddError(Result, FString::Printf(TEXT("Cannot restore editor graph identity for '%s'"),
+					*Graph.StableId), Graph.Location);
+				return AbortImport();
+			}
+			EditorGraph->GraphGuid = SourceGraphGuid;
+			for (const FRigNodeAST& NodeAST : Graph.Nodes)
+			{
+				if (NodeAST.bInjected) continue;
+				FGuid SourceNodeGuid;
+				if (!FGuid::Parse(NodeAST.Guid, SourceNodeGuid)) continue;
+				UEdGraphNode* EditorNode = EditorGraph->FindNodeForModelNodeName(FName(*NodeAST.StableId));
+				if (!EditorNode)
+				{
+					for (UEdGraphNode* Candidate : EditorGraph->Nodes)
+					{
+						if (Candidate && Candidate->GetFName() == FName(*NodeAST.StableId))
+						{
+							EditorNode = Candidate;
+							break;
+						}
+					}
+				}
+				if (!EditorNode)
+				{
+					AddError(Result, FString::Printf(TEXT("Cannot restore editor node identity for '%s.%s'"),
+						*Graph.StableId, *NodeAST.StableId), NodeAST.Location);
+					return AbortImport();
+				}
+				EditorNode->NodeGuid = SourceNodeGuid;
+			}
+		}
+		Result.bCompiled = bHasExecutableGraphContent;
+	}
+
 	TSet<FString> GeneratedIdentityVariables;
 	for (const FRigVariableAST& Variable : Module.Variables)
 	{
@@ -810,6 +1949,92 @@ FRigLangImportResult FRigLangImporter::Import(
 			*ActualSnapshot.Mid(FMath::Max(0, Difference - 40), 160).Replace(TEXT("\n"), TEXT(" "))));
 		return AbortImport();
 	}
-	Result.bCompiled = false;
+	if (bHasGraphInventory)
+	{
+		const FString ExpectedGraph = GraphSemanticSnapshot(Module, Module);
+		const FString ActualGraph = GraphSemanticSnapshot(*ReExport.Module, Module);
+		if (ExpectedGraph != ActualGraph)
+		{
+			int32 Difference = 0;
+			while (Difference < ExpectedGraph.Len() && Difference < ActualGraph.Len()
+				&& ExpectedGraph[Difference] == ActualGraph[Difference]) ++Difference;
+			AddError(Result, FString::Printf(
+				TEXT("Rig graph immediate re-export semantic mismatch at %d; expected '%s', actual '%s'"),
+				Difference,
+				*ExpectedGraph.Mid(FMath::Max(0, Difference - 40), 160).Replace(TEXT("\n"), TEXT(" ")),
+				*ActualGraph.Mid(FMath::Max(0, Difference - 40), 160).Replace(TEXT("\n"), TEXT(" "))));
+			return AbortImport();
+		}
+	}
+	if (!bHasExecutableGraphContent) Result.bCompiled = false;
 	return Result;
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FRigLangInheritedLocalSemanticSnapshotTest,
+	"AnimBP2FP.RigLang.Importer.InheritedLocalSemanticSnapshot",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FRigLangInheritedLocalSemanticSnapshotTest::RunTest(const FString& Parameters)
+{
+	auto MakeModule = [](const FString& Prefix, const FString& LocalGuid)
+	{
+		FRigModuleAST Module;
+		FRigGraphAST FunctionGraph;
+		FunctionGraph.StableId = Prefix + TEXT("-function");
+		FunctionGraph.Role = TEXT("function");
+		FunctionGraph.Properties.Add(TEXT("graph-name"), TEXT("\"PublicScale\""));
+		FRigGraphVariableAST Local;
+		Local.Name = TEXT("FunctionLocal");
+		Local.Guid = LocalGuid;
+		Local.Type.CPPType = TEXT("float");
+		FunctionGraph.LocalVariables.Add(Local);
+		FRigNodeAST Outer;
+		Outer.StableId = TEXT("OuterCollapse");
+		Outer.Guid = TEXT("model:") + Prefix + TEXT("-outer");
+		Outer.Kind = ERigNodeKind::Collapse;
+		Outer.ContainedGraphStableId = Prefix + TEXT("-outer-graph");
+		FunctionGraph.Nodes.Add(Outer);
+
+		FRigGraphAST OuterGraph;
+		OuterGraph.StableId = Prefix + TEXT("-outer-graph");
+		OuterGraph.ParentStableId = FunctionGraph.StableId;
+		OuterGraph.Role = TEXT("node-contained");
+		OuterGraph.Properties.Add(TEXT("graph-name"), TEXT("\"OuterContained\""));
+		FRigNodeAST Inner;
+		Inner.StableId = TEXT("InnerCollapse");
+		Inner.Guid = TEXT("model:") + Prefix + TEXT("-inner");
+		Inner.Kind = ERigNodeKind::Collapse;
+		Inner.ContainedGraphStableId = Prefix + TEXT("-inner-graph");
+		OuterGraph.Nodes.Add(Inner);
+
+		FRigGraphAST InnerGraph;
+		InnerGraph.StableId = Prefix + TEXT("-inner-graph");
+		InnerGraph.ParentStableId = OuterGraph.StableId;
+		InnerGraph.Role = TEXT("node-contained");
+		InnerGraph.Properties.Add(TEXT("graph-name"), TEXT("\"InnerContained\""));
+		FRigNodeAST Getter;
+		Getter.StableId = TEXT("ReadNestedFunctionLocal");
+		Getter.Guid = TEXT("model:") + Prefix + TEXT("-getter");
+		Getter.Kind = ERigNodeKind::Variable;
+		Getter.Properties.Add(TEXT("variable-name"), TEXT("\"FunctionLocal\""));
+		Getter.Properties.Add(TEXT("variable-guid"), TEXT("\"") + LocalGuid + TEXT("\""));
+		InnerGraph.Nodes.Add(Getter);
+
+		Module.Graphs = {FunctionGraph, OuterGraph, InnerGraph};
+		return Module;
+	};
+
+	const FRigModuleAST Source = MakeModule(
+		TEXT("source"), TEXT("11111111-1111-1111-1111-111111111111"));
+	const FRigModuleAST Imported = MakeModule(
+		TEXT("imported"), TEXT("22222222-2222-2222-2222-222222222222"));
+	const FString Expected = GraphSemanticSnapshot(Source, Source);
+	const FString Actual = GraphSemanticSnapshot(Imported, Source);
+	TestEqual(TEXT("contained local references use the ancestor function local token"), Actual, Expected);
+	TestTrue(TEXT("snapshot contains the ancestor generated-local token"),
+		Actual.Contains(TEXT("$generated-local-guid:function:PublicScale|FunctionLocal")));
+	return true;
+}
+#endif
