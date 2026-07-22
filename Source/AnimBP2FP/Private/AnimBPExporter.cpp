@@ -1505,6 +1505,13 @@ FString FAnimBPExporter::Export(UAnimBlueprint* AnimBlueprint)
 
 TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBlueprint)
 {
+	return ExportToAST(AnimBlueprint, nullptr);
+}
+
+TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(
+	UAnimBlueprint* AnimBlueprint,
+	TMap<FString, FRigLangExportResult>* OutRigModules)
+{
 	if (!AnimBlueprint)
 	{
 		UE_LOG(LogAnimBP2FP, Error, TEXT("[INTERNAL] ExportToAST: AnimBlueprint is null"));
@@ -1731,6 +1738,10 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBluep
 
 	GActiveHelperExportContext = PreviousHelperContext;
 	GActiveRigExportContext = PreviousRigExportContext;
+	if (OutRigModules)
+	{
+		*OutRigModules = RigExportContext.ModulesByAsset;
+	}
 	NormalizeRigImportAliases(ResultAST);
 	if (RigExportContext.bFatal)
 	{
@@ -1742,16 +1753,27 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBluep
 
 FString FAnimBPExporter::ExportWithOptions(UAnimBlueprint* AnimBlueprint, const FExportOptions& Options)
 {
+	TMap<FString, FRigLangExportResult> IgnoredRigModules;
+	return ExportWithOptions(AnimBlueprint, Options, IgnoredRigModules);
+}
+
+FString FAnimBPExporter::ExportWithOptions(
+	UAnimBlueprint* AnimBlueprint,
+	const FExportOptions& Options,
+	TMap<FString, FRigLangExportResult>& OutRigModules,
+	TSharedPtr<FAnimGraphAST>* OutAST)
+{
 	if (!AnimBlueprint)
 	{
 		return TEXT("; Error: Null AnimBlueprint");
 	}
 
-	TSharedPtr<FAnimGraphAST> AST = ExportToAST(AnimBlueprint);
+	TSharedPtr<FAnimGraphAST> AST = ExportToAST(AnimBlueprint, &OutRigModules);
 	if (!AST.IsValid())
 	{
 		return TEXT("; Error: Failed to export AST");
 	}
+	if (OutAST) *OutAST = AST;
 
 	return ASTToString(AST, Options);
 }

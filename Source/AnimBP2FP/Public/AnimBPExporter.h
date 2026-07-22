@@ -5,6 +5,7 @@
 
 #include "CoreMinimal.h"
 #include "AnimLangAST.h"
+#include "RigLangExporter.h"
 
 // 注意：FAnimBPExporter 是编辑器专用功能，仅用于编辑器构建
 // 非编辑器构建时，此类不可用
@@ -33,6 +34,9 @@ public:
 	 * @return AST representation
 	 */
 	static TSharedPtr<FAnimGraphAST> ExportToAST(UAnimBlueprint* AnimBlueprint);
+	static TSharedPtr<FAnimGraphAST> ExportToAST(
+		UAnimBlueprint* AnimBlueprint,
+		TMap<FString, FRigLangExportResult>* OutRigModules);
 	
 	/**
 	 * Export with options
@@ -46,6 +50,11 @@ public:
 	};
 	
 	static FString ExportWithOptions(UAnimBlueprint* AnimBlueprint, const FExportOptions& Options);
+	static FString ExportWithOptions(
+		UAnimBlueprint* AnimBlueprint,
+		const FExportOptions& Options,
+		TMap<FString, FRigLangExportResult>& OutRigModules,
+		TSharedPtr<FAnimGraphAST>* OutAST = nullptr);
 
 	// ---------------------------------------------------------------
 	// EventGraph export via BlueprintLisp
