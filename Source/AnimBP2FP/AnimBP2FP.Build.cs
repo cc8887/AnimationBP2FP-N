@@ -57,6 +57,7 @@ public class AnimBP2FP : ModuleRules
 					"AnimationCore",
 					"ControlRig",
 					"ControlRigDeveloper",
+					"ControlRigEditor",
 					"RigVMDeveloper",
 					"Slate",
 					"SlateCore",
