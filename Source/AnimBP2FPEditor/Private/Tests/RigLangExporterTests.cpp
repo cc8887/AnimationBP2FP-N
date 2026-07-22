@@ -1149,12 +1149,17 @@ bool FRigLangExporterRealAssetTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Variable visibility exports"), ExportedVariable->Access,
 			SourceVariable.bPublic ? ERigVariableAccess::PublicInput : ERigVariableAccess::Internal);
 		TestEqual(TEXT("Variable CPP type exports"), ExportedVariable->Type.CPPType, SourceVariable.CPPType);
+		FAnimLispTypeRef ExpectedVariableType;
+		ExpectedVariableType.CPPType = SourceVariable.CPPType;
+		ExpectedVariableType.CPPTypeObject = SourceVariable.CPPTypeObject
+			? SourceVariable.CPPTypeObject->GetPathName()
+			: SourceVariable.CPPTypeObjectPath.ToString();
+		ExpectedVariableType.ContainerType = SourceVariable.ToExternalVariable().IsArray() ? TEXT("array") : TEXT("");
+		ExpectedVariableType.Canonicalize();
 		TestEqual(TEXT("Variable CPP type object exports"), ExportedVariable->Type.CPPTypeObject,
-			SourceVariable.CPPTypeObject
-				? SourceVariable.CPPTypeObject->GetPathName()
-				: SourceVariable.CPPTypeObjectPath.ToString());
+			ExpectedVariableType.CPPTypeObject);
 		TestEqual(TEXT("Variable array container exports"), ExportedVariable->Type.ContainerType,
-			SourceVariable.ToExternalVariable().IsArray() ? FString(TEXT("array")) : FString());
+			ExpectedVariableType.ContainerType);
 		TestEqual(TEXT("Variable default exports"), ExportedVariable->DefaultValue, SourceVariable.DefaultValue);
 	}
 	int32 BoneCount = 0, ControlCount = 0, NullCount = 0, CurveCount = 0;
@@ -1393,10 +1398,16 @@ bool FRigLangExporterRealAssetTest::RunTest(const FString& Parameters)
 				SourceLocal.Guid.ToString(EGuidFormats::DigitsWithHyphensLower));
 			TestEqual(TEXT("Graph local name is exact"), Local.Name, SourceLocal.Name.ToString());
 			TestEqual(TEXT("Graph local CPP type is exact"), Local.Type.CPPType, SourceLocal.CPPType);
+			FAnimLispTypeRef ExpectedLocalType;
+			ExpectedLocalType.CPPType = SourceLocal.CPPType;
+			ExpectedLocalType.CPPTypeObject = SourceLocal.CPPTypeObject
+				? SourceLocal.CPPTypeObject->GetPathName() : SourceLocal.CPPTypeObjectPath.ToString();
+			ExpectedLocalType.ContainerType = SourceLocal.ToExternalVariable().IsArray() ? TEXT("array") : TEXT("");
+			ExpectedLocalType.Canonicalize();
 			TestEqual(TEXT("Graph local object type is exact"), Local.Type.CPPTypeObject,
-				SourceLocal.CPPTypeObject ? SourceLocal.CPPTypeObject->GetPathName() : SourceLocal.CPPTypeObjectPath.ToString());
+				ExpectedLocalType.CPPTypeObject);
 			TestEqual(TEXT("Graph local array shape is exact"), Local.Type.ContainerType,
-				SourceLocal.ToExternalVariable().IsArray() ? FString(TEXT("array")) : FString());
+				ExpectedLocalType.ContainerType);
 			TestEqual(TEXT("Graph local default is exact"), Local.DefaultValue, SourceLocal.DefaultValue);
 			TestEqual(TEXT("Graph local CPP type object path field is exact"),
 				Local.CPPTypeObjectPath, SourceLocal.CPPTypeObjectPath.ToString());

@@ -476,6 +476,7 @@ FRigCallableArgumentAST ExportArgument(const FRigVMGraphFunctionArgument& Source
 	Result.Type.CPPType = Source.CPPType.ToString();
 	Result.Type.CPPTypeObject = Source.CPPTypeObject.ToSoftObjectPath().ToString();
 	Result.Type.ContainerType = Source.bIsArray ? TEXT("array") : FString();
+	Result.Type.Canonicalize();
 	Result.DefaultValue = Source.DefaultValue;
 	Result.bExecuteContext = Source.IsExecuteContext();
 	Result.bConstant = Source.bIsConst;
@@ -494,6 +495,7 @@ FRigCallableArgumentAST ExportArgument(const URigVMPin* Source)
 		Result.Type.CPPTypeObject = TypeObject->GetPathName();
 	}
 	Result.Type.ContainerType = Source->IsArray() ? TEXT("array") : FString();
+	Result.Type.Canonicalize();
 	Result.DefaultValue = Source->GetDefaultValue();
 	Result.bExecuteContext = Source->IsExecuteContext();
 	return Result;
@@ -510,6 +512,7 @@ FRigGraphVariableAST ExportLocalVariable(const FRigVMGraphVariableDescription& S
 		: Source.CPPTypeObjectPath.ToString();
 	Result.CPPTypeObjectPath = Source.CPPTypeObjectPath.ToString();
 	Result.Type.ContainerType = Source.ToExternalVariable().IsArray() ? TEXT("array") : FString();
+	Result.Type.Canonicalize();
 	Result.DefaultValue = Source.DefaultValue;
 	FTextStringHelper::WriteToBuffer(Result.Category, Source.Category);
 	FTextStringHelper::WriteToBuffer(Result.Tooltip, Source.Tooltip);
@@ -530,6 +533,7 @@ FRigExternalVariableAST ExportExternalVariable(const FRigVMExternalVariable& Sou
 		? Source.GetCPPTypeObject()->GetPathName()
 		: FString();
 	Result.Type.ContainerType = Source.IsArray() ? TEXT("array") : FString();
+	Result.Type.Canonicalize();
 	Result.bPublic = Source.IsPublic();
 	Result.bReadOnly = Source.IsReadOnly();
 	return Result;
@@ -562,6 +566,7 @@ FRigPinAST ExportPin(const URigVMPin* Pin, const FString& ModelId, FRigLangExpor
 		Result.Type.CPPTypeObject = TypeObject->GetPathName();
 	}
 	Result.Type.ContainerType = Pin->IsArray() ? TEXT("array") : FString();
+	Result.Type.Canonicalize();
 	Result.DefaultValue = Pin->GetDefaultValue();
 	Result.bExecuteContext = Pin->IsExecuteContext();
 	const FString PinId = PinCoverageId(Pin, ModelId);
@@ -1224,6 +1229,7 @@ FRigLangExportResult FRigLangExporter::Export(
 		Variable.Type.ContainerType = SourceVariable.ToExternalVariable().IsArray()
 			? TEXT("array")
 			: FString();
+		Variable.Type.Canonicalize();
 		Variable.DefaultValue = SourceVariable.DefaultValue;
 		Result.Module->Variables.Add(MoveTemp(Variable));
 	}

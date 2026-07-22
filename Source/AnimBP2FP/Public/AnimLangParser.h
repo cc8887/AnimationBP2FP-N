@@ -15,10 +15,13 @@ struct ANIMBP2FP_API FAnimLangParseError
 	FString Message;
 	int32 Line;
 	int32 Column;
+	bool bWarning = false;
+	FString Code;
+	FAnimLangSourceLoc Location;
 	
 	FString ToString() const
 	{
-		return FString::Printf(TEXT("Parse error at %d:%d: %s"), Line, Column, *Message);
+		return FString::Printf(TEXT("%s at %d:%d: %s"), bWarning ? TEXT("Parse warning") : TEXT("Parse error"), Line, Column, *Message);
 	}
 };
 
@@ -91,12 +94,21 @@ private:
 	// Error handling
 	void Error(const FString& Message);
 	void ErrorAt(const FAnimLangToken& Token, const FString& Message);
+	void ErrorAtLocation(const FAnimLangSourceLoc& Location, const FString& Message);
+	void WarningAt(const FAnimLangToken& Token, const FString& Code, const FString& Message);
+	void WarningAtLocation(const FAnimLangSourceLoc& Location, const FString& Code, const FString& Message);
 	void Synchronize();  // Skip to next meaningful position after error
 	
 	// Parsing rules
 	TSharedPtr<FAnimGraphAST> ParseProgram();
 	void ParseTopLevel(TSharedPtr<FAnimGraphAST> AST);
 	void ParseVariables(TSharedPtr<FAnimGraphAST> AST);
+	void ParseRigImport(TSharedPtr<FAnimGraphAST> AST);
+	bool ParseRigReference(FString& OutAlias);
+	bool ParseRigEntryReference(FString& OutAlias, FString& OutEntryName);
+	void ParseRigInputs(FAnimRigNodeBinding& Binding);
+	void MigrateLegacyRigBindings(const TSharedPtr<FAnimGraphAST>& AST);
+	void ValidateRigBindings(const TSharedPtr<FAnimGraphAST>& AST);
 	FVariableDef ParseVarDef();
 	void ParseHelpers(TSharedPtr<FAnimGraphAST> AST);
 	FHelperGraphDef ParseHelperGraphDef();

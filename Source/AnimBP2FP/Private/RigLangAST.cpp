@@ -40,16 +40,7 @@ bool RigFunctionHostMatchesModule(const FString& HostObject, const FString& Modu
 
 FString RigFunctionStableRuntimeSymbol(const FString& Value)
 {
-	FString Result;
-	for (const TCHAR Character : Value)
-	{
-		if (FChar::IsAlnum(Character) || Character == TEXT('_'))
-		{
-			Result.AppendChar(Character);
-		}
-	}
-	if (!Result.IsEmpty() && FChar::IsDigit(Result[0])) Result = TEXT("_") + Result;
-	return Result;
+	return AnimLispStableRuntimeSymbol(Value);
 }
 
 FString RigFunctionSymbolFromLibraryNodePath(const FString& LibraryNodePath)

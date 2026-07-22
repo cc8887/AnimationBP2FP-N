@@ -80,6 +80,37 @@ FString FAnimNodeAST::ToString(int32 Indent) const
 		Result += FString::Printf(TEXT(" :node-class %s"), *EscapeQuotedStringForDSL(NodeClassPath));
 	}
 	Result += FString::Printf(TEXT(" :coverage %s"), CoverageToAnimLangString(Coverage));
+	if (RigBinding.IsSet())
+	{
+		const FAnimRigNodeBinding& Binding = RigBinding.GetValue();
+		Result += FString::Printf(TEXT(" :library (rig-ref %s)"), *Binding.ImportAlias);
+		if (!Binding.EntryName.IsEmpty())
+		{
+			Result += FString::Printf(TEXT(" :entry (rig-entry %s/%s)"),
+				*Binding.ImportAlias, *Binding.EntryName);
+		}
+		Result += TEXT(" :inputs (");
+		TArray<FAnimRigInputBinding> SortedInputs = Binding.Inputs;
+		SortedInputs.Sort([](const FAnimRigInputBinding& A, const FAnimRigInputBinding& B)
+		{
+			return A.RigInputName < B.RigInputName;
+		});
+		for (int32 Index = 0; Index < SortedInputs.Num(); ++Index)
+		{
+			if (Index > 0) Result += TEXT(" ");
+			const FAnimRigInputBinding& Input = SortedInputs[Index];
+			Result += FString::Printf(TEXT("(%s"), *Input.RigInputName);
+			if (!Input.ResolvedType.CPPType.IsEmpty())
+			{
+				Result += FString::Printf(TEXT(" :cpp-type %s :cpp-type-object %s :container-type %s"),
+					*EscapeQuotedStringForDSL(Input.ResolvedType.CPPType),
+					*EscapeQuotedStringForDSL(Input.ResolvedType.CPPTypeObject),
+					*EscapeQuotedStringForDSL(Input.ResolvedType.ContainerType));
+			}
+			Result += TEXT(" ") + Input.ValueExpression + TEXT(")");
+		}
+		Result += TEXT(")");
+	}
 	
 	// Add properties (non-pose parameters) in a stable order. TMap iteration
 	// depends on hash allocation history, which must not affect canonical DSL.
@@ -88,6 +119,13 @@ FString FAnimNodeAST::ToString(int32 Indent) const
 	PropertyKeys.Sort();
 	for (const FString& PropertyKey : PropertyKeys)
 	{
+		if (RigBinding.IsSet()
+			&& (PropertyKey == TEXT("library") || PropertyKey == TEXT("entry") || PropertyKey == TEXT("inputs")
+				|| PropertyKey == TEXT("control-rig-asset-reference")
+				|| PropertyKey == TEXT("exposed-input-pins")))
+		{
+			continue;
+		}
 		const FString& PropertyValue = Properties.FindChecked(PropertyKey);
 		// If the value is a quoted string, re-escape internal quotes for correct DSL output
 		FString OutputValue = PropertyValue;
@@ -501,6 +539,25 @@ FString FAnimDependency::ToString(int32 Indent) const
 
 // ========== FAnimGraphAST ==========
 
+void FAnimGraphAST::VisitNodes(TFunctionRef<void(const TSharedPtr<FAnimNodeAST>&)> Visitor) const
+{
+	TFunction<void(const TSharedPtr<FAnimNodeAST>&)> VisitTree;
+	VisitTree = [&Visitor, &VisitTree](const TSharedPtr<FAnimNodeAST>& Node)
+	{
+		if (!Node.IsValid()) return;
+		Visitor(Node);
+		for (const FNamedChild& Child : Node->Children) VisitTree(Child.Node);
+	};
+
+	VisitTree(RootNode);
+	for (const FCachedPoseDef& Definition : Defines) VisitTree(Definition.Body);
+	for (const FAnimationLayerDef& Layer : AnimationLayers)
+	{
+		VisitTree(Layer.RootNode);
+		for (const FCachedPoseDef& Definition : Layer.Defines) VisitTree(Definition.Body);
+	}
+}
+
 FString FAnimGraphAST::ToString() const
 {
 	FString Result = FString::Printf(TEXT("(anim-blueprint \"%s\"\n"), *Name);
@@ -514,6 +571,25 @@ FString FAnimGraphAST::ToString() const
 	if (!Metadata.RootMotionMode.IsEmpty())
 	{
 		Result += FString::Printf(TEXT("  (metadata :root-motion-mode %s)\n"), *EscapeQuotedStringForDSL(Metadata.RootMotionMode));
+	}
+
+	if (!RigImports.IsEmpty())
+	{
+		TArray<FAnimLispImport> SortedImports = RigImports;
+		SortedImports.Sort([](const FAnimLispImport& A, const FAnimLispImport& B)
+		{
+			return A.Alias < B.Alias;
+		});
+		for (const FAnimLispImport& Import : SortedImports)
+		{
+			Result += FString::Printf(TEXT("  (import-rig :asset %s :as %s"),
+				*EscapeQuotedStringForDSL(Import.Target.AssetPath), *Import.Alias);
+			if (!Import.ExpectedHash.IsEmpty())
+			{
+				Result += FString::Printf(TEXT(" :expected-hash %s"), *EscapeQuotedStringForDSL(Import.ExpectedHash));
+			}
+			Result += TEXT(")\n");
+		}
 	}
 
 	if (!Dependencies.IsEmpty())

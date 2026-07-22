@@ -40,6 +40,7 @@ struct ANIMBP2FP_API FAnimLispModuleId
 };
 
 ANIMBP2FP_API uint32 GetTypeHash(const FAnimLispModuleId& ModuleId);
+ANIMBP2FP_API FString AnimLispStableRuntimeSymbol(const FString& Value);
 
 struct ANIMBP2FP_API FAnimLispImport
 {
@@ -56,6 +57,7 @@ struct ANIMBP2FP_API FAnimLispTypeRef
 	FString CPPTypeObject;
 	FString ContainerType;
 
+	void Canonicalize();
 	bool operator==(const FAnimLispTypeRef& Other) const;
 	bool operator!=(const FAnimLispTypeRef& Other) const;
 };

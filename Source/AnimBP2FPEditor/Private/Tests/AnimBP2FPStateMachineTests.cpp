@@ -308,4 +308,69 @@ bool FAnimBP2FPStateMachineTopologyAndPosesRoundTrip::RunTest(const FString& Par
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimBP2FPStateMachineNestedControlRigFailurePropagates,
+	"AnimBP2FP.StateMachine.NestedControlRigFailurePropagates",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FAnimBP2FPStateMachineNestedControlRigFailurePropagates::RunTest(const FString& Parameters)
+{
+	using namespace AnimBP2FPStateMachineTests;
+	UAnimBlueprint* StateSource = LoadObject<UAnimBlueprint>(nullptr,
+		TEXT("/Game/Blueprints/SandboxCharacter_CMC_ABP.SandboxCharacter_CMC_ABP"));
+	UAnimBlueprint* RigSource = LoadObject<UAnimBlueprint>(nullptr,
+		TEXT("/Game/Blueprints/SandboxCharacter_Mover_ABP.SandboxCharacter_Mover_ABP"));
+	TestNotNull(TEXT("state-machine fixture loads"), StateSource);
+	TestNotNull(TEXT("typed Control Rig fixture loads"), RigSource);
+	if (!StateSource || !RigSource) return false;
+
+	const TSharedPtr<FAnimGraphAST> StateAST = FAnimBPExporter::ExportToAST(StateSource);
+	const TSharedPtr<FAnimGraphAST> RigAST = FAnimBPExporter::ExportToAST(RigSource);
+	TestTrue(TEXT("both fixtures export"), StateAST.IsValid() && RigAST.IsValid());
+	if (!StateAST.IsValid() || !RigAST.IsValid()) return false;
+	TSharedPtr<FAnimNodeAST> StateMachine = FindStateMachineAST(StateAST->RootNode, TEXT("State Controller"));
+	TSharedPtr<FAnimNodeAST> InvalidRigNode;
+	RigAST->VisitNodes([&InvalidRigNode](const TSharedPtr<FAnimNodeAST>& Node)
+	{
+		if (!InvalidRigNode.IsValid() && Node->NodeType == TEXT("control-rig") && Node->RigBinding.IsSet())
+		{
+			InvalidRigNode = Node;
+		}
+	});
+	TestTrue(TEXT("fixtures provide a state machine and typed Control Rig"),
+		StateMachine.IsValid() && InvalidRigNode.IsValid());
+	if (!StateMachine.IsValid() || !InvalidRigNode.IsValid()) return false;
+	InvalidRigNode->RigBinding.GetValue().EntryName = TEXT("MissingNestedEntry");
+	const FString ChildId = TEXT("state-nested-rig");
+	StateMachine->Children.Reset();
+	FNamedChild& NestedStateChild = StateMachine->Children.AddDefaulted_GetRef();
+	NestedStateChild.PinName = ChildId;
+	NestedStateChild.Node = InvalidRigNode;
+	StateMachine->Properties.Add(TEXT("name"), TEXT("\"Nested Rig State Machine\""));
+	StateMachine->Properties.Add(TEXT("initial"), TEXT("\"Nested Rig State\""));
+	StateMachine->Properties.Add(TEXT("state-nodes"), FString::Printf(
+		TEXT("[(state :name \"Nested Rig State\" :child \"%s\")]"), *ChildId));
+	StateMachine->Properties.Add(TEXT("transitions"), TEXT("[]"));
+	TSharedPtr<FAnimGraphAST> MinimalAST = MakeShared<FAnimGraphAST>();
+	MinimalAST->Name = TEXT("ABP_StateMachineNestedRigFailure");
+	MinimalAST->SkeletonPath = StateAST->SkeletonPath;
+	MinimalAST->Variables = StateAST->Variables;
+	MinimalAST->RigImports = RigAST->RigImports;
+	MinimalAST->RootNode = StateMachine;
+	UAnimBlueprint* Destination = Cast<UAnimBlueprint>(FKismetEditorUtilities::CreateBlueprint(
+		StateSource->ParentClass, GetTransientPackage(), TEXT("ABP_StateMachineNestedRigFailure"), BPTYPE_Normal,
+		UAnimBlueprint::StaticClass(), UAnimBlueprintGeneratedClass::StaticClass(),
+		FName(TEXT("AnimBP2FPStateMachineNestedRigFailureTest"))));
+	TestNotNull(TEXT("nested failure destination is created"), Destination);
+	if (!Destination) return false;
+	Destination->TargetSkeleton = StateSource->TargetSkeleton;
+	AddExpectedErrorPlain(TEXT("[UNSUPPORTED:ControlRigEntry] Entry 'MissingNestedEntry'"),
+		EAutomationExpectedErrorFlags::Contains, 1);
+	const FAnimBPImporter::FUpdateResult Result =
+		FAnimBPImporter::UpdateBlueprintDetailed(Destination, MinimalAST->ToString());
+	for (const FString& Warning : Result.Warnings) AddInfo(TEXT("nested import: ") + Warning);
+	TestFalse(TEXT("state-machine nested typed Control Rig failure reaches UpdateResult"), Result.bSuccess);
+	return true;
+}
+
 #endif

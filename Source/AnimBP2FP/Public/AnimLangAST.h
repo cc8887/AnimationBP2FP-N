@@ -5,6 +5,7 @@
 
 #include "CoreMinimal.h"
 #include "Animation/AnimationAsset.h"
+#include "AnimLispModule.h"
 
 /**
  * Pin type枚举 - 对应 UE 的引脚类型
@@ -78,6 +79,22 @@ struct FNamedChild
 	TSharedPtr<struct FAnimNodeAST> Node;
 };
 
+struct ANIMBP2FP_API FAnimRigInputBinding
+{
+	FString RigInputName;
+	FString ValueExpression;
+	FAnimLispTypeRef ResolvedType;
+	FAnimLangSourceLoc Location;
+};
+
+struct ANIMBP2FP_API FAnimRigNodeBinding
+{
+	FAnimLispModuleId RigModule;
+	FString ImportAlias;
+	FString EntryName;
+	TArray<FAnimRigInputBinding> Inputs;
+};
+
 enum class EAnimNodeCoverage : uint8
 {
 	Exact,
@@ -96,9 +113,11 @@ struct ANIMBP2FP_API FAnimNodeAST
 	FString NodeType;  // "sequence-player", "blend", "state-machine", etc.
 	FString NodeId;    // Stable ID for incremental update (maps to UE NodeGuid)
 	FString NodeClassPath;  // Exact editor-node UClass path used by reflected fallback import
+	FAnimLangSourceLoc Location;
 	EAnimNodeCoverage Coverage = EAnimNodeCoverage::Exact;
 	TMap<FString, FString> Properties;  // Non-pose parameters (float, bool, int, enum, etc.)
 	TArray<FNamedChild> Children;  // Pose inputs with pin names
+	TOptional<FAnimRigNodeBinding> RigBinding;
 	
 	virtual FString ToString(int32 Indent = 0) const;
 	
@@ -320,6 +339,7 @@ struct ANIMBP2FP_API FAnimGraphAST
 	FString Name;
 	FString SkeletonPath;       // Target skeleton asset path (e.g. "/Game/Mannequin/Skeleton")
 	FAnimBlueprintMetadata Metadata;
+	TArray<FAnimLispImport> RigImports;
 	TArray<FAnimDependency> Dependencies;
 	TArray<FString> ImplementedInterfaces;  // Asset paths of AnimLayerInterfaces implemented by the BP
 	TArray<FVariableDef> Variables;
@@ -330,6 +350,7 @@ struct ANIMBP2FP_API FAnimGraphAST
 	TArray<FCachedPoseDef> Defines;  // (define ...) 块 — SaveCachedPose 节点
 	TSharedPtr<FAnimNodeAST> RootNode;
 
+	void VisitNodes(TFunctionRef<void(const TSharedPtr<FAnimNodeAST>&)> Visitor) const;
 	FString ToString() const;
 	
 	// S-expression output

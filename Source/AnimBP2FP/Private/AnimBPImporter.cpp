@@ -46,8 +46,11 @@
 #include "K2Node_AnimGetter.h"
 #include "AnimGraphNode_LinkedInputPose.h"
 #include "AnimGraphNode_IdentityPose.h"
+#include "AnimGraphNode_ControlRig.h"
+#include "ControlRigBlueprintLegacy.h"
 #include "AnimationGraph.h"
 #include "AnimLangTokenizer.h"
+#include "RigLangExporter.h"
 
 #include "Animation/AnimClassInterface.h"
 #include "Animation/AnimLayerInterface.h"
@@ -69,6 +72,39 @@
 #include "Framework/Application/SlateApplication.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogAnimBPImporter, Log, All);
+
+static FAnimLispTypeRef IMP_RigInputTypeFromPin(const FEdGraphPinType& PinType)
+{
+	FAnimLispTypeRef Result;
+	const UObject* TypeObject = PinType.PinSubCategoryObject.Get();
+	if (PinType.PinCategory == UEdGraphSchema_K2::PC_Boolean) Result.CPPType = TEXT("bool");
+	else if (PinType.PinCategory == UEdGraphSchema_K2::PC_Int) Result.CPPType = TEXT("int32");
+	else if (PinType.PinCategory == UEdGraphSchema_K2::PC_Int64) Result.CPPType = TEXT("int64");
+	else if (PinType.PinCategory == UEdGraphSchema_K2::PC_Real)
+		Result.CPPType = PinType.PinSubCategory == UEdGraphSchema_K2::PC_Double ? TEXT("double") : TEXT("float");
+	else if (const UScriptStruct* Struct = Cast<UScriptStruct>(TypeObject)) Result.CPPType = Struct->GetStructCPPName();
+	else Result.CPPType = PinType.PinCategory.ToString();
+	Result.CPPTypeObject = TypeObject ? TypeObject->GetPathName() : FString();
+	switch (PinType.ContainerType)
+	{
+	case EPinContainerType::Array: Result.ContainerType = TEXT("array"); break;
+	case EPinContainerType::Set: Result.ContainerType = TEXT("set"); break;
+	case EPinContainerType::Map: Result.ContainerType = TEXT("map"); break;
+	default: break;
+	}
+	Result.Canonicalize();
+	return Result;
+}
+
+namespace
+{
+	struct FImporterRigValidationContext
+	{
+		TMap<FString, FRigLangExportResult> ModulesByAsset;
+	};
+
+	thread_local FImporterRigValidationContext* GActiveImporterRigValidationContext = nullptr;
+}
 
 // Helper: strip surrounding double quotes from a string
 static FString StripQuotes(const FString& Input)
@@ -1021,6 +1057,82 @@ namespace
 		}
 		return bChanged;
 	}
+
+	static bool ConfigureTypedCustomPinVisibility(
+		UAnimGraphNode_ControlRig* Node,
+		const TSet<FName>& PublicInputProperties,
+		const TSet<FName>& BoundInputProperties,
+		FString& OutError)
+	{
+		FArrayProperty* ArrayProperty = Node
+			? FindFProperty<FArrayProperty>(Node->GetClass(), TEXT("CustomPinProperties"))
+			: nullptr;
+		FStructProperty* ElementProperty = ArrayProperty ? CastField<FStructProperty>(ArrayProperty->Inner) : nullptr;
+		FNameProperty* NameProperty = ElementProperty && ElementProperty->Struct
+			? FindFProperty<FNameProperty>(ElementProperty->Struct, TEXT("PropertyName"))
+			: nullptr;
+		FBoolProperty* ShowProperty = ElementProperty && ElementProperty->Struct
+			? FindFProperty<FBoolProperty>(ElementProperty->Struct, TEXT("bShowPin"))
+			: nullptr;
+		if (!ArrayProperty || !NameProperty || !ShowProperty)
+		{
+			OutError = TEXT("Control Rig node has no readable CustomPinProperties schema");
+			return false;
+		}
+
+		TMap<FName, int32> PropertyCounts;
+		FScriptArrayHelper ArrayHelper(ArrayProperty, ArrayProperty->ContainerPtrToValuePtr<void>(Node));
+		for (int32 Index = 0; Index < ArrayHelper.Num(); ++Index)
+		{
+			void* Element = ArrayHelper.GetRawPtr(Index);
+			const FName PropertyName = NameProperty->GetPropertyValue_InContainer(Element);
+			if (!PublicInputProperties.Contains(PropertyName)) continue;
+			if (++PropertyCounts.FindOrAdd(PropertyName) != 1)
+			{
+				OutError = FString::Printf(TEXT("Control Rig CustomPinProperties contains duplicate exact input '%s'"), *PropertyName.ToString());
+				return false;
+			}
+			ShowProperty->SetPropertyValue_InContainer(Element, BoundInputProperties.Contains(PropertyName));
+		}
+		for (const FName BoundProperty : BoundInputProperties)
+		{
+			if (PropertyCounts.FindRef(BoundProperty) != 1)
+			{
+				OutError = FString::Printf(TEXT("Control Rig binding has no unique exact CustomPinProperty '%s'"), *BoundProperty.ToString());
+				return false;
+			}
+		}
+
+		Node->ReconstructNode();
+
+		TSet<FName> VisibleInputProperties;
+		PropertyCounts.Reset();
+		FScriptArrayHelper ReconstructedArray(
+			ArrayProperty, ArrayProperty->ContainerPtrToValuePtr<void>(Node));
+		for (int32 Index = 0; Index < ReconstructedArray.Num(); ++Index)
+		{
+			void* Element = ReconstructedArray.GetRawPtr(Index);
+			const FName PropertyName = NameProperty->GetPropertyValue_InContainer(Element);
+			if (!PublicInputProperties.Contains(PropertyName)) continue;
+			if (++PropertyCounts.FindOrAdd(PropertyName) != 1)
+			{
+				OutError = FString::Printf(TEXT("Control Rig CustomPinProperties reconstruct produced duplicate exact input '%s'"), *PropertyName.ToString());
+				return false;
+			}
+			if (ShowProperty->GetPropertyValue_InContainer(Element))
+			{
+				VisibleInputProperties.Add(PropertyName);
+			}
+		}
+		if (VisibleInputProperties.Num() != BoundInputProperties.Num()
+			|| !VisibleInputProperties.Includes(BoundInputProperties)
+			|| !BoundInputProperties.Includes(VisibleInputProperties))
+		{
+			OutError = TEXT("Control Rig visible typed inputs do not exactly match the binding set");
+			return false;
+		}
+		return true;
+	}
 }
 
 // ========== Name Conversion Helpers ==========
@@ -1179,7 +1291,7 @@ UEdGraphPin* FAnimBPImporter::FindInputPosePin(UAnimGraphNode_Base* Node, const 
 			Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
 		{
 			FString PinNameStr = Pin->PinName.ToString();
-			
+
 			// Try exact CamelCase match
 			if (PinNameStr == CamelPinName)
 			{
@@ -1270,7 +1382,7 @@ bool FAnimBPImporter::SetNodeProperty(UAnimGraphNode_Base* Node, const FString& 
 			Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Struct)
 		{
 			FString PinNameStr = Pin->PinName.ToString();
-			
+
 			// Exact CamelCase match
 			if (PinNameStr == CamelKey)
 			{
@@ -2528,7 +2640,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 	{
 		UAnimSequence* Seq = nullptr;
 		FString SearchPath;
-		
+
 		// Priority 1: :sequence (asset "...") — full path
 		const FString* SeqAsset = NodeAST->Properties.Find(TEXT("sequence"));
 		if (SeqAsset && SeqAsset->StartsWith(TEXT("(asset ")))
@@ -2902,10 +3014,150 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 	}
 
 	// Custom-property nodes such as Control Rig derive their input pins from a target asset.
-	// Restore that asset first, then the authored exposure set, before importing pin values.
-	if (const FString* RigReference = NodeAST->Properties.Find(TEXT("control-rig-asset-reference")))
+	// Restore typed module identity first; the reflected string remains a legacy fallback.
+	bool bRestoredTypedRig = false;
+	TMap<FString, FString> TypedRigInputPropertyNames;
+	if (NodeAST->RigBinding.IsSet())
 	{
-		if (SetNodeProperty(NewNode, TEXT("control-rig-asset-reference"), *RigReference))
+		const FAnimRigNodeBinding& Binding = NodeAST->RigBinding.GetValue();
+		const FString AssetPath = Binding.RigModule.AssetPath;
+		const FString ObjectPath = AssetPath + TEXT(".") + FPaths::GetBaseFilename(AssetPath);
+		if (UAnimGraphNode_ControlRig* ControlRigNode = Cast<UAnimGraphNode_ControlRig>(NewNode))
+		{
+			if (UControlRigBlueprint* RigBlueprint = LoadObject<UControlRigBlueprint>(nullptr, *ObjectPath))
+			{
+				UClass* RigClass = RigBlueprint->GeneratedClass.Get();
+				if (RigClass && RigClass->IsChildOf(UControlRig::StaticClass()))
+				{
+					const FControlRigAssetStrongReference RigReference(RigBlueprint);
+					FRigLangExportResult UncachedRigExport;
+					FRigLangExportResult* CachedRigExport = GActiveImporterRigValidationContext
+						? GActiveImporterRigValidationContext->ModulesByAsset.Find(AssetPath) : nullptr;
+					if (!CachedRigExport)
+					{
+						UncachedRigExport = FRigLangExporter::Export(RigBlueprint);
+						CachedRigExport = GActiveImporterRigValidationContext
+							? &GActiveImporterRigValidationContext->ModulesByAsset.Add(AssetPath, MoveTemp(UncachedRigExport))
+							: &UncachedRigExport;
+					}
+					const FRigLangExportResult& RigExport = *CachedRigExport;
+					if (!RigExport.bSuccess || !RigExport.Module.IsValid())
+					{
+						UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:ControlRigModule] Failed to inspect Rig module '%s'"), *AssetPath);
+						Graph->RemoveNode(NewNode);
+						return nullptr;
+					}
+					const TArray<FName>& SupportedEvents = RigReference.GetSupportedEvents();
+					const int32 MatchingEntries = RigExport.Module->Entries.FilterByPredicate(
+						[&Binding, &SupportedEvents](const FRigEntryAST& Entry)
+						{
+							return Entry.Name == Binding.EntryName
+								&& !Entry.EventName.Contains(TEXT("Construction"), ESearchCase::IgnoreCase)
+								&& SupportedEvents.Contains(FName(*Entry.EventName));
+						}).Num();
+					if (MatchingEntries != 1)
+					{
+						UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:ControlRigEntry] Entry '%s' is not one unique supported public Rig entry"), *Binding.EntryName);
+						Graph->RemoveNode(NewNode);
+						return nullptr;
+					}
+					FString SerializedReference;
+					FControlRigAssetStrongReference::StaticStruct()->ExportText(
+						SerializedReference, &RigReference, nullptr, nullptr, PPF_None, nullptr);
+					TSet<FName> PublicInputProperties;
+					for (const FRigVariableAST& Variable : RigExport.Module->Variables)
+					{
+						if (Variable.Access != ERigVariableAccess::PublicInput) continue;
+						const FName PropertyName(*Variable.Name);
+						if (PublicInputProperties.Contains(PropertyName))
+						{
+							UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:ControlRigInput] Public Rig inputs collide on exact property '%s'"), *Variable.Name);
+							Graph->RemoveNode(NewNode);
+							return nullptr;
+						}
+						PublicInputProperties.Add(PropertyName);
+					}
+					TSet<FName> BoundInputProperties;
+					for (const FAnimRigInputBinding& Input : Binding.Inputs)
+					{
+						TArray<const FRigVariableAST*> Variables;
+						for (const FRigVariableAST& Variable : RigExport.Module->Variables)
+						{
+							if (Variable.Access == ERigVariableAccess::PublicInput
+								&& AnimLispStableRuntimeSymbol(Variable.Name) == Input.RigInputName)
+							{
+								Variables.Add(&Variable);
+							}
+						}
+						if (Variables.Num() != 1 || Variables[0]->Type != Input.ResolvedType)
+						{
+							UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:ControlRigInput] Input '%s' has no unique exact public Rig variable/type"), *Input.RigInputName);
+							Graph->RemoveNode(NewNode);
+							return nullptr;
+						}
+						const FName PropertyName(*Variables[0]->Name);
+						if (TypedRigInputPropertyNames.Contains(Input.RigInputName)
+							|| BoundInputProperties.Contains(PropertyName))
+						{
+							UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:ControlRigInput] Input '%s' collides on exact binding property '%s'"),
+								*Input.RigInputName, *PropertyName.ToString());
+							Graph->RemoveNode(NewNode);
+							return nullptr;
+						}
+						TypedRigInputPropertyNames.Add(Input.RigInputName, Variables[0]->Name);
+						BoundInputProperties.Add(PropertyName);
+					}
+					if (SetNodeProperty(NewNode, TEXT("control-rig-asset-reference"), SerializedReference))
+					{
+						NewNode->ReconstructNode();
+						FString VisibilityError;
+						if (!ConfigureTypedCustomPinVisibility(
+							ControlRigNode, PublicInputProperties, BoundInputProperties, VisibilityError))
+						{
+							UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:ControlRigInputVisibility] %s"), *VisibilityError);
+							Graph->RemoveNode(NewNode);
+							return nullptr;
+						}
+						for (const FAnimRigInputBinding& Input : Binding.Inputs)
+						{
+							const FString& PropertyName = TypedRigInputPropertyNames.FindChecked(Input.RigInputName);
+							UEdGraphPin* ExactPin = nullptr;
+							int32 ExactPinCount = 0;
+							for (UEdGraphPin* CandidatePin : ControlRigNode->Pins)
+							{
+								if (CandidatePin && CandidatePin->Direction == EGPD_Input
+									&& CandidatePin->PinName == FName(*PropertyName))
+								{
+									ExactPin = CandidatePin;
+									++ExactPinCount;
+								}
+							}
+							FProperty* PinProperty = ExactPin ? ControlRigNode->GetPinProperty(ExactPin->GetFName()) : nullptr;
+							if (ExactPinCount != 1 || !PinProperty || PinProperty->GetFName() != ExactPin->PinName
+								|| IMP_RigInputTypeFromPin(ExactPin->PinType) != Input.ResolvedType)
+							{
+								UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:ControlRigInput] Input '%s' has no exact target pin/property/type"), *Input.RigInputName);
+								Graph->RemoveNode(NewNode);
+								return nullptr;
+							}
+						}
+						bRestoredTypedRig = true;
+					}
+				}
+			}
+		}
+		if (!bRestoredTypedRig)
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:ControlRigModule] Failed to restore typed Rig module '%s' for node '%s'"),
+				*Binding.RigModule.AssetPath, *NodeType);
+			Graph->RemoveNode(NewNode);
+			return nullptr;
+		}
+	}
+	if (!NodeAST->RigBinding.IsSet())
+	{
+		if (const FString* RigReference = NodeAST->Properties.Find(TEXT("control-rig-asset-reference"));
+			RigReference && SetNodeProperty(NewNode, TEXT("control-rig-asset-reference"), *RigReference))
 		{
 			NewNode->ReconstructNode();
 
@@ -2977,12 +3229,165 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		NewNode->ReconstructNode();
 	}
 
-	// Set non-pose properties via pins
+	auto ApplyInputValue = [&](const FString& PropertyName, const FString& PropertyValue,
+		const FAnimLispTypeRef* ResolvedType) -> bool
+	{
+		auto FindExactTargetPin = [&]() -> UEdGraphPin*
+		{
+			UEdGraphPin* Match = nullptr;
+			for (UEdGraphPin* Pin : NewNode->Pins)
+			{
+				if (Pin && Pin->Direction == EGPD_Input && Pin->PinName == FName(*PropertyName))
+				{
+					if (Match) return nullptr;
+					Match = Pin;
+				}
+			}
+			return Match;
+		};
+		if (ConnectPropertyBinding(Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForGraph(Graph)),
+			Graph, NewNode, PropertyName, PropertyValue, HelperGraphs))
+		{
+			if (ResolvedType && PropertyValue.StartsWith(TEXT("(bind-path ")))
+			{
+				const TMap<FName, FAnimGraphNodePropertyBinding>* PropertyBindings = GetMutablePropertyBindingMap(NewNode);
+				const FAnimGraphNodePropertyBinding* Binding = PropertyBindings
+					? PropertyBindings->Find(FName(*PropertyName)) : nullptr;
+				return Binding && Binding->bIsBound && !Binding->PropertyPath.IsEmpty();
+			}
+			return true;
+		}
+
+		if (PropertyValue.StartsWith(TEXT("(pin-default ")))
+		{
+			const FLispParseResult ParsedDefault = FLispParser::Parse(PropertyValue);
+			UEdGraphPin* TargetPin = ResolvedType ? FindExactTargetPin() : FindInputValuePin(NewNode, PropertyName);
+			if (!ParsedDefault.bSuccess || ParsedDefault.Nodes.Num() != 1 || !ParsedDefault.Nodes[0].IsValid()
+				|| ParsedDefault.Nodes[0]->GetFormName() != TEXT("pin-default")
+				|| ParsedDefault.Nodes[0]->Num() != 2 || !TargetPin)
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:RigPinDefault] Node '%s' property ':%s' has invalid pin-default metadata or no target pin"),
+					*NodeType, *PropertyName);
+				return false;
+			}
+			FString DefaultValue = StripQuotes(ParsedDefault.Nodes[0]->Get(1)->ToString(false, 0));
+			const bool bBoolType = (ResolvedType && ResolvedType->CPPType == TEXT("bool"))
+				|| TargetPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Boolean;
+			if (bBoolType)
+			{
+				if (!DefaultValue.Equals(TEXT("true"), ESearchCase::IgnoreCase)
+					&& !DefaultValue.Equals(TEXT("false"), ESearchCase::IgnoreCase))
+				{
+					UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:RigPinDefault] Node '%s' bool property ':%s' has invalid default '%s'"),
+						*NodeType, *PropertyName, *DefaultValue);
+					return false;
+				}
+				DefaultValue = DefaultValue.Equals(TEXT("true"), ESearchCase::IgnoreCase)
+					? TEXT("True") : TEXT("False");
+			}
+			if (TargetPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Int
+				|| TargetPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Int64)
+			{
+				int64 ParsedInteger = 0;
+				if (!LexTryParseString(ParsedInteger, *DefaultValue))
+				{
+					UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:RigPinDefault] Node '%s' numeric property ':%s' has invalid default '%s'"),
+						*NodeType, *PropertyName, *DefaultValue);
+					return false;
+				}
+			}
+			else if (TargetPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Real)
+			{
+				double ParsedReal = 0.0;
+				if (!LexTryParseString(ParsedReal, *DefaultValue))
+				{
+					UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:RigPinDefault] Node '%s' numeric property ':%s' has invalid default '%s'"),
+						*NodeType, *PropertyName, *DefaultValue);
+					return false;
+				}
+			}
+			const UEdGraphSchema* Schema = Graph->GetSchema();
+			if (!Schema || !Schema->IsPinDefaultValid(TargetPin, DefaultValue, nullptr, FText::GetEmpty()).IsEmpty())
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:RigPinDefault] Node '%s' property ':%s' default is not valid for the exact target pin"),
+					*NodeType, *PropertyName);
+				return false;
+			}
+			Schema->TrySetDefaultValue(*TargetPin, DefaultValue);
+			if (TargetPin->DefaultValue != DefaultValue)
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:RigPinDefault] Node '%s' property ':%s' default failed read-back verification"),
+					*NodeType, *PropertyName);
+				return false;
+			}
+			return true;
+		}
+
+		if (PropertyValue.StartsWith(TEXT("(value-expr ")))
+		{
+			const FLispParseResult ParsedValue = FLispParser::Parse(PropertyValue);
+			UEdGraphPin* TargetPin = ResolvedType ? FindExactTargetPin() : FindInputValuePin(NewNode, PropertyName);
+			if (!ParsedValue.bSuccess || ParsedValue.Nodes.Num() != 1 || !ParsedValue.Nodes[0].IsValid()
+				|| ParsedValue.Nodes[0]->GetFormName() != TEXT("value-expr") || ParsedValue.Nodes[0]->Num() != 2 || !TargetPin)
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:LinkedPureExpression] Node '%s' property ':%s' has invalid value-expr metadata or no target pin"),
+					*NodeType, *PropertyName);
+				return false;
+			}
+			const FString ExpressionCode = ParsedValue.Nodes[0]->Get(1)->ToString(false, 0);
+			const FBlueprintLispResult ImportedExpression = FBlueprintLispConverter::ImportPureExpression(Graph, TargetPin, ExpressionCode);
+			if (!ImportedExpression.bSuccess)
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:LinkedPureExpression] Node '%s' property ':%s' import failed: %s"),
+					*NodeType, *PropertyName, *ImportedExpression.Error);
+				return false;
+			}
+			if (TargetPin->LinkedTo.IsEmpty())
+			{
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:LinkedPureExpression] Node '%s' property ':%s' import produced no target connection"),
+					*NodeType, *PropertyName);
+				return false;
+			}
+			return true;
+		}
+
+		if (PropertyValue.StartsWith(TEXT("(var ")) || PropertyValue.StartsWith(TEXT("(ref ")))
+		{
+			UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:EventGraphConnection] Node '%s' property ':%s' = %s — this pin is driven by an EventGraph node, connection cannot be auto-restored; pin will use default value"),
+				*NodeType, *PropertyName, *PropertyValue);
+			return false;
+		}
+
+		if (PropertyValue.StartsWith(TEXT("(asset ")))
+		{
+			FString AssetPath = PropertyValue;
+			AssetPath.RemoveFromStart(TEXT("(asset "));
+			AssetPath.RemoveFromEnd(TEXT(")"));
+			AssetPath = StripQuotes(AssetPath);
+			if (!SetNodeProperty(NewNode, PropertyName, FString::Printf(TEXT("\"%s\""), *AssetPath)))
+			{
+				UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:AssetRef] Node '%s' property ':%s' = %s — asset reference could not be set via property reflection"),
+					*NodeType, *PropertyName, *PropertyValue);
+				return false;
+			}
+			return true;
+		}
+
+		if (!SetNodeProperty(NewNode, PropertyName, PropertyValue))
+		{
+			UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:PropertySet] Node '%s' property ':%s' = %s — could not find matching pin or FProperty"),
+				*NodeType, *PropertyName, *PropertyValue);
+			return false;
+		}
+		return true;
+	};
+
+	// Set non-pose properties via the same binding/default restoration path used by typed Rig inputs.
 	for (const auto& Pair : NodeAST->Properties)
 	{
 		// Skip special properties already handled above
-		if (Pair.Key == TEXT("name") || Pair.Key == TEXT("loop") || 
-			Pair.Key == TEXT("class") || Pair.Key == TEXT("initial") || 
+		if (Pair.Key == TEXT("name") || Pair.Key == TEXT("loop") ||
+			Pair.Key == TEXT("class") || Pair.Key == TEXT("initial") ||
 			Pair.Key == TEXT("transitions") || Pair.Key == TEXT("state-nodes") || Pair.Key == TEXT("layer") ||
 			Pair.Key == TEXT("interface") || Pair.Key == TEXT("bound-enum") ||
 			Pair.Key == TEXT("exposed-input-pins") ||
@@ -2991,7 +3396,12 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		{
 			continue;
 		}
-		
+		if (NodeAST->RigBinding.IsSet()
+			&& Pair.Key == TEXT("control-rig-asset-reference"))
+		{
+			continue;
+		}
+
 		// Skip sequence/blend-space only for nodes that handle them in special branches above
 		if (Pair.Key == TEXT("sequence") && Cast<UAnimGraphNode_SequencePlayer>(NewNode))
 		{
@@ -3002,64 +3412,20 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 			continue;
 		}
 		
-		// (var "...") and legacy (ref "...") values mark EventGraph-driven connections.
-		// These require K2Node_VariableGet/Function nodes in the EventGraph which cannot be auto-reconstructed.
-		// The pin will retain its default value (no connection restored).
-		if (ConnectPropertyBinding(Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForGraph(Graph)), Graph, NewNode, Pair.Key, Pair.Value, HelperGraphs))
+		ApplyInputValue(Pair.Key, Pair.Value, nullptr);
+	}
+	if (NodeAST->RigBinding.IsSet())
+	{
+		for (const FAnimRigInputBinding& Input : NodeAST->RigBinding.GetValue().Inputs)
 		{
-			continue;
-		}
-
-		if (Pair.Value.StartsWith(TEXT("(value-expr ")))
-		{
-			const FLispParseResult ParsedValue = FLispParser::Parse(Pair.Value);
-			UEdGraphPin* TargetPin = FindInputValuePin(NewNode, Pair.Key);
-			if (!ParsedValue.bSuccess || ParsedValue.Nodes.Num() != 1 || !ParsedValue.Nodes[0].IsValid()
-				|| ParsedValue.Nodes[0]->GetFormName() != TEXT("value-expr") || ParsedValue.Nodes[0]->Num() != 2 || !TargetPin)
+			const FString* PropertyName = TypedRigInputPropertyNames.Find(Input.RigInputName);
+			if (!PropertyName || !ApplyInputValue(*PropertyName, Input.ValueExpression, &Input.ResolvedType))
 			{
-				UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:LinkedPureExpression] Node '%s' property ':%s' has invalid value-expr metadata or no target pin"),
-					*NodeType, *Pair.Key);
-				continue;
+				UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:ControlRigInputValue] Failed to restore typed Rig input '%s'"),
+					*Input.RigInputName);
+				Graph->RemoveNode(NewNode);
+				return nullptr;
 			}
-			const FString ExpressionCode = ParsedValue.Nodes[0]->Get(1)->ToString(false, 0);
-			const FBlueprintLispResult ImportedExpression = FBlueprintLispConverter::ImportPureExpression(Graph, TargetPin, ExpressionCode);
-			if (!ImportedExpression.bSuccess)
-			{
-				UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:LinkedPureExpression] Node '%s' property ':%s' import failed: %s"),
-					*NodeType, *Pair.Key, *ImportedExpression.Error);
-			}
-			continue;
-		}
-
-		if (Pair.Value.StartsWith(TEXT("(var ")) || Pair.Value.StartsWith(TEXT("(ref ")))
-		{
-			UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:EventGraphConnection] Node '%s' property ':%s' = %s — this pin is driven by an EventGraph node, connection cannot be auto-restored; pin will use default value"),
-				*NodeType, *Pair.Key, *Pair.Value);
-			continue;
-		}
-		
-		// (asset "...") values need special handling — extract the path and set via SetNodeProperty
-		if (Pair.Value.StartsWith(TEXT("(asset ")))
-		{
-			// Extract path from (asset "path")
-			FString AssetPath = Pair.Value;
-			AssetPath.RemoveFromStart(TEXT("(asset "));
-			AssetPath.RemoveFromEnd(TEXT(")"));
-			AssetPath = StripQuotes(AssetPath);
-			
-			// Try to set as a quoted path so ImportText_Direct can load it
-			if (!SetNodeProperty(NewNode, Pair.Key, FString::Printf(TEXT("\"%s\""), *AssetPath)))
-			{
-				UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:AssetRef] Node '%s' property ':%s' = %s — asset reference could not be set via property reflection"),
-					*NodeType, *Pair.Key, *Pair.Value);
-			}
-			continue;
-		}
-		
-		if (!SetNodeProperty(NewNode, Pair.Key, Pair.Value))
-		{
-			UE_LOG(LogAnimBPImporter, Warning, TEXT("[DEGRADATION:PropertySet] Node '%s' property ':%s' = %s — could not find matching pin or FProperty"),
-				*NodeType, *Pair.Key, *Pair.Value);
 		}
 	}
 
@@ -3101,9 +3467,10 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 	if (NodeType == TEXT("state-machine"))
 	{
 		UAnimGraphNode_StateMachine* SMNode = Cast<UAnimGraphNode_StateMachine>(NewNode);
-		if (SMNode)
+		if (!SMNode || !BuildStateMachine(SMNode, NodeAST, DefineNodes, HelperGraphs))
 		{
-			BuildStateMachine(SMNode, NodeAST, DefineNodes, HelperGraphs);
+			Graph->RemoveNode(NewNode);
+			return nullptr;
 		}
 		// State machine children are managed internally by BuildStateMachine (as UAnimStateNode),
 		// not via pose input pins on the state machine node itself. Skip the generic child-connect loop.
@@ -3450,14 +3817,19 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 			StateNode->OnRenameNode(Spec.Name);
 
 			const TSharedPtr<FAnimNodeAST> StateAnimation = FindStateChild(Spec.ChildId);
-			if (StateAnimation.IsValid() && StateNode->BoundGraph)
+			if (StateAnimation.IsValid())
 			{
+				if (!StateNode->BoundGraph)
+				{
+					return false;
+				}
 				UAnimGraphNode_StateResult* ResultNode = StateNode->GetResultNodeInsideState();
 				UAnimGraphNode_Base* AnimTree = BuildAnimNode(StateAnimation, StateNode->BoundGraph, DefineNodes, HelperGraphs);
-				if (AnimTree && ResultNode)
+				if (!AnimTree || !ResultNode)
 				{
-					ConnectPins(FindOutputPosePin(AnimTree), StateNode->GetPoseSinkPinInsideState());
+					return false;
 				}
+				ConnectPins(FindOutputPosePin(AnimTree), StateNode->GetPoseSinkPinInsideState());
 			}
 			StateNodes.Add(Spec.Name, StateNode);
 			UE_LOG(LogAnimBPImporter, Log, TEXT("Created state: %s"), *Spec.Name);
@@ -3966,6 +4338,9 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr<FAnimGraphAST>& AST)
 {
 	if (!Blueprint || !AST.IsValid()) return false;
+	FImporterRigValidationContext RigValidationContext;
+	TGuardValue<FImporterRigValidationContext*> RigValidationGuard(
+		GActiveImporterRigValidationContext, &RigValidationContext);
 	
 	UEdGraph* AnimGraph = FindAnimGraph(Blueprint);
 	const AnimBP2FPImportLifecycle::FImportLifecycleContext LifecycleContext =
@@ -4276,7 +4651,8 @@ UAnimBlueprint* FAnimBPImporter::Import(const FString& DSLCode, const FString& P
 	TArray<FAnimLangParseError> ParseErrors;
 	TSharedPtr<FAnimGraphAST> AST = FAnimLangParser::Parse(DSLCode, ParseErrors);
 	
-	if (!AST.IsValid() || ParseErrors.Num() > 0)
+	if (!AST.IsValid() || ParseErrors.ContainsByPredicate(
+		[](const FAnimLangParseError& Error) { return !Error.bWarning; }))
 	{
 		if (OutError)
 		{
@@ -4407,6 +4783,9 @@ void FAnimBPImporter::ClearDefines(UAnimBlueprint* Blueprint)
 bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr<FAnimGraphAST>& NewAST)
 {
 	if (!Blueprint || !NewAST.IsValid()) return false;
+	FImporterRigValidationContext RigValidationContext;
+	TGuardValue<FImporterRigValidationContext*> RigValidationGuard(
+		GActiveImporterRigValidationContext, &RigValidationContext);
 	
 	UEdGraph* AnimGraph = FindAnimGraph(Blueprint);
 	const AnimBP2FPImportLifecycle::FImportLifecycleContext LifecycleContext =
@@ -4675,7 +5054,8 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 		// Parse new DSL
 		TArray<FAnimLangParseError> ParseErrors;
 		TSharedPtr<FAnimGraphAST> NewAST = FAnimLangParser::Parse(NewDSLCode, ParseErrors);
-		if (!NewAST.IsValid() || ParseErrors.Num() > 0)
+		if (!NewAST.IsValid() || ParseErrors.ContainsByPredicate(
+			[](const FAnimLangParseError& Error) { return !Error.bWarning; }))
 		{
 			Result.Warnings.Add(TEXT("Failed to parse new DSL code"));
 			return Result;
@@ -4729,7 +5109,8 @@ FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(UAnimBlu
 		Result.Warnings.Add(FString::Printf(TEXT("Parse: %s"), *Err.ToString()));
 	}
 	
-	if (!NewAST.IsValid() || ParseErrors.Num() > 0)
+	if (!NewAST.IsValid() || ParseErrors.ContainsByPredicate(
+		[](const FAnimLangParseError& Error) { return !Error.bWarning; }))
 	{
 		Result.Warnings.Add(TEXT("Failed to parse new DSL code"));
 		return Result;

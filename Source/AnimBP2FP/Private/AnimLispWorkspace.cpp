@@ -45,6 +45,21 @@ struct FWorkspaceBinding
 	FAnimLangSourceLoc Location;
 };
 
+struct FWorkspaceRigInputUse
+{
+	FString QualifiedName;
+	FAnimLispTypeRef ExpectedType;
+	FAnimLangSourceLoc Location;
+};
+
+struct FWorkspaceRigNodeUse
+{
+	FString ImportAlias;
+	FString EntryQualifiedName;
+	FAnimLangSourceLoc Location;
+	TArray<FWorkspaceRigInputUse> Inputs;
+};
+
 struct FWorkspaceModule
 {
 	bool bIndexable = false;
@@ -55,6 +70,7 @@ struct FWorkspaceModule
 	TArray<FAnimLispImport> Imports;
 	TArray<FWorkspaceUse> Uses;
 	TArray<FWorkspaceBinding> Bindings;
+	TArray<FWorkspaceRigNodeUse> RigNodes;
 	TArray<int32> DefinitionIndices;
 	TSharedPtr<FRigModuleAST> Rig;
 	TArray<FRigLangParseError> ParseErrors;
@@ -838,12 +854,13 @@ struct FAnimLispWorkspace::FImpl
 
 		for (const FRigVariableAST& Variable : Rig->Variables)
 		{
+			const FString RuntimeName = AnimLispStableRuntimeSymbol(Variable.Name);
 			const EAnimLispCapability Capability = Variable.Access == ERigVariableAccess::Internal
 				? EAnimLispCapability::DefinitionOnly
 				: EAnimLispCapability::AnimRuntimeReference;
 			const int32 DefinitionIndex = AddDefinition(
 				Module,
-				Variable.Name,
+				RuntimeName,
 				EAnimLispSymbolKind::RigVariable,
 				Capability,
 				Variable.Type,
@@ -892,6 +909,70 @@ struct FAnimLispWorkspace::FImpl
 
 	void ParseAnimSource(const FString& SourceFile, const FString& Source)
 	{
+		FString CanonicalProbeSource = Source;
+		if (!CanonicalProbeSource.IsEmpty() && CanonicalProbeSource[0] == 0xFEFF)
+		{
+			CanonicalProbeSource.RemoveAt(0, 1, EAllowShrinking::No);
+		}
+		TArray<FAnimLangParseError> ProbeErrors;
+		const TArray<FAnimLangToken> ProbeTokens = FAnimLangTokenizer::Tokenize(
+			CanonicalProbeSource, SourceFile, &ProbeErrors);
+		const TArray<FTokenForm> ProbeForms = FindTopLevelForms(ProbeTokens);
+		if (!ProbeForms.IsEmpty() && ProbeForms[0].Head == TEXT("anim-blueprint"))
+		{
+			TArray<FAnimLangParseError> ParseErrors;
+			const TSharedPtr<FAnimGraphAST> AST = FAnimLangParser::Parse(CanonicalProbeSource, ParseErrors);
+			for (const FAnimLangParseError& Error : ParseErrors)
+			{
+				FAnimLangSourceLoc Location = Error.Location;
+				if (Location.SourceFile.IsEmpty()) Location.SourceFile = SourceFile;
+				EarlyDiagnostics.Emplace(
+					Error.bWarning ? EAnimLangDiagSeverity::Warning : EAnimLangDiagSeverity::Error,
+					EAnimLangDiagCategory::Parse, Error.Message, Location);
+			}
+			if (!AST.IsValid() || ParseErrors.ContainsByPredicate(
+				[](const FAnimLangParseError& Error) { return !Error.bWarning; }))
+			{
+				return;
+			}
+
+			FWorkspaceModule& Module = Modules.AddDefaulted_GetRef();
+			Module.bIndexable = true;
+			Module.SourceFile = SourceFile;
+			Module.Id = FAnimLispModuleId::FromAssetPath(
+				SourceFile + TEXT("#") + AST->Name, EAnimLispModuleKind::Anim);
+			Module.Location.SourceFile = SourceFile;
+			Module.Location.Line = 1;
+			Module.Location.Column = 1;
+			Module.Imports = AST->RigImports;
+			for (FAnimLispImport& Import : Module.Imports)
+			{
+				if (Import.Location.SourceFile.IsEmpty()) Import.Location.SourceFile = SourceFile;
+			}
+			AST->VisitNodes([&Module, &SourceFile](const TSharedPtr<FAnimNodeAST>& Node)
+			{
+				if (!Node->RigBinding.IsSet()) return;
+				const FAnimRigNodeBinding& Binding = Node->RigBinding.GetValue();
+				FWorkspaceRigNodeUse& Use = Module.RigNodes.AddDefaulted_GetRef();
+				Use.ImportAlias = Binding.ImportAlias;
+				Use.EntryQualifiedName = Binding.EntryName.IsEmpty()
+					? FString() : Binding.ImportAlias + TEXT("/") + Binding.EntryName;
+				Use.Location = Node->Location;
+				if (Use.Location.SourceFile.IsEmpty()) Use.Location.SourceFile = SourceFile;
+				for (const FAnimRigInputBinding& Input : Binding.Inputs)
+				{
+					FWorkspaceRigInputUse& InputUse = Use.Inputs.AddDefaulted_GetRef();
+					InputUse.QualifiedName = Binding.ImportAlias + TEXT("/") + Input.RigInputName;
+					InputUse.ExpectedType = Input.ResolvedType;
+					InputUse.Location = Input.Location;
+					if (InputUse.Location.SourceFile.IsEmpty()) InputUse.Location.SourceFile = SourceFile;
+				}
+			});
+			ModuleBySource.Add(SourceFile, Modules.Num() - 1);
+			ModuleByIdentity.FindOrAdd(Module.Id.ToString(), Modules.Num() - 1);
+			return;
+		}
+
 		TArray<FAnimLangParseError> TokenErrors;
 		const TArray<FAnimLangToken> Tokens = FAnimLangTokenizer::Tokenize(Source, SourceFile, &TokenErrors);
 		const TArray<FTokenForm> Forms = FindTopLevelForms(Tokens);
@@ -1781,6 +1862,92 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag)
 					Use.Location);
 			}
 		}
+		for (const FWorkspaceRigNodeUse& RigNode : Module.RigNodes)
+		{
+			const FAnimLispImport* Import = Module.Imports.FindByPredicate(
+				[&RigNode](const FAnimLispImport& Candidate) { return Candidate.Alias == RigNode.ImportAlias; });
+			const int32* TargetModuleIndex = Import
+				? Impl->ModuleByIdentity.Find(Import->Target.ToString()) : nullptr;
+			const FWorkspaceModule* TargetModule = TargetModuleIndex && Impl->Modules.IsValidIndex(*TargetModuleIndex)
+				? &Impl->Modules[*TargetModuleIndex] : nullptr;
+			if (!Import || !TargetModule || !TargetModule->Rig.IsValid())
+			{
+				OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Module,
+					FString::Printf(TEXT("Control Rig node has unresolved Rig import alias '%s'"), *RigNode.ImportAlias),
+					RigNode.Location);
+				continue;
+			}
+
+			const FAnimLispDefinition* EntryDefinition = RigNode.EntryQualifiedName.IsEmpty()
+				? nullptr : Impl->Resolve(Module, RigNode.EntryQualifiedName);
+			if (!EntryDefinition || EntryDefinition->Id.Kind != EAnimLispSymbolKind::RigEntry
+				|| EntryDefinition->Capability != EAnimLispCapability::AnimRuntimeReference)
+			{
+				OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Capability,
+					RigNode.EntryQualifiedName.IsEmpty()
+						? TEXT("Control Rig node requires a public Rig entry")
+						: FString::Printf(TEXT("Control Rig entry '%s' is not a public runtime Rig entry"), *RigNode.EntryQualifiedName),
+					RigNode.Location);
+			}
+			else
+			{
+				FAnimLispReference& Reference = Impl->References.AddDefaulted_GetRef();
+				Reference.Target = EntryDefinition->Id;
+				Reference.Location = RigNode.Location;
+			}
+
+			TMap<FString, const FRigVariableAST*> PublicInputs;
+			for (const FRigVariableAST& Variable : TargetModule->Rig->Variables)
+			{
+				if (Variable.Access == ERigVariableAccess::PublicInput)
+				{
+					PublicInputs.Add(AnimLispStableRuntimeSymbol(Variable.Name), &Variable);
+				}
+			}
+			TSet<FString> SeenInputs;
+			for (const FWorkspaceRigInputUse& Input : RigNode.Inputs)
+			{
+				FString Alias;
+				FString InputName;
+				if (!SplitQualifiedName(Input.QualifiedName, Alias, InputName)) InputName = Input.QualifiedName;
+				if (SeenInputs.Contains(InputName))
+				{
+					OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Semantic,
+						FString::Printf(TEXT("Duplicate Control Rig input binding '%s'"), *InputName), Input.Location);
+					continue;
+				}
+				SeenInputs.Add(InputName);
+				const FRigVariableAST* RigVariable = PublicInputs.FindRef(InputName);
+				const FAnimLispDefinition* Definition = Impl->Resolve(Module, Input.QualifiedName);
+				if (!RigVariable || !Definition || Definition->Id.Kind != EAnimLispSymbolKind::RigVariable)
+				{
+					OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Semantic,
+						FString::Printf(TEXT("Unknown or non-public Control Rig input binding '%s'"), *Input.QualifiedName),
+						Input.Location);
+					continue;
+				}
+				if (Input.ExpectedType.CPPType.IsEmpty())
+				{
+					OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Type,
+						FString::Printf(TEXT("Control Rig input binding '%s' has unresolved exact type"), *Input.QualifiedName),
+						Input.Location);
+					continue;
+				}
+				if (Input.ExpectedType != RigVariable->Type)
+				{
+					FAnimLangDiagnostic Diagnostic(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Type,
+						FString::Printf(TEXT("Control Rig input binding '%s' has incompatible exact Unreal type"), *Input.QualifiedName),
+						Input.Location);
+					Diagnostic.AddRelatedLocation(RigVariable->Location, TEXT("Rig public input declared here"));
+					OutDiag.Add(Diagnostic);
+					continue;
+				}
+				FAnimLispReference& Reference = Impl->References.AddDefaulted_GetRef();
+				Reference.Target = Definition->Id;
+				Reference.Location = Input.Location;
+			}
+		}
+
 		for (const FWorkspaceBinding& Binding : Module.Bindings)
 		{
 			const FAnimLispDefinition* AnimDefinition = Impl->Resolve(Module, Binding.AnimVariable);

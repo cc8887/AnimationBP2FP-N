@@ -43,6 +43,68 @@ static FString UnquoteAnimLangValue(FString Value)
 	return Value;
 }
 
+static FString ExtractLegacyRigObjectPath(FString Value)
+{
+	Value = Value.TrimStartAndEnd();
+	if (Value.StartsWith(TEXT("(asset ")))
+	{
+		int32 FirstQuote = INDEX_NONE;
+		int32 LastQuote = INDEX_NONE;
+		if (Value.FindChar(TEXT('"'), FirstQuote) && Value.FindLastChar(TEXT('"'), LastQuote)
+			&& LastQuote > FirstQuote)
+		{
+			Value = Value.Mid(FirstQuote + 1, LastQuote - FirstQuote - 1);
+		}
+	}
+	else
+	{
+		Value = UnquoteAnimLangValue(Value);
+	}
+
+	const int32 ClassQuote = Value.Find(TEXT("'"));
+	if (ClassQuote != INDEX_NONE && Value.EndsWith(TEXT("'")))
+	{
+		Value = Value.Mid(ClassQuote + 1, Value.Len() - ClassQuote - 2);
+	}
+	return Value;
+}
+
+static FString LegacyRigSourceAssetPath(const FString& RawValue)
+{
+	FString ObjectPath = ExtractLegacyRigObjectPath(RawValue);
+	int32 DotIndex = INDEX_NONE;
+	if (ObjectPath.FindChar(TEXT('.'), DotIndex))
+	{
+		ObjectPath = ObjectPath.Left(DotIndex);
+	}
+	else if (ObjectPath.EndsWith(TEXT("_C")))
+	{
+		ObjectPath.LeftChopInline(2, EAllowShrinking::No);
+	}
+	return ObjectPath;
+}
+
+static FString LegacyRigAliasBase(const FString& AssetPath)
+{
+	FString Alias;
+	AssetPath.Split(TEXT("/"), nullptr, &Alias, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+	if (Alias.IsEmpty()) Alias = TEXT("Rig");
+	Alias.RemoveFromStart(TEXT("CR_"), ESearchCase::IgnoreCase);
+	FString SemanticName;
+	if (Alias.Split(TEXT("_"), nullptr, &SemanticName, ESearchCase::CaseSensitive, ESearchDir::FromEnd)
+		&& !SemanticName.IsEmpty())
+	{
+		Alias = SemanticName;
+	}
+	for (TCHAR& Character : Alias)
+	{
+		if (!FChar::IsAlnum(Character) && Character != TEXT('_')) Character = TEXT('_');
+	}
+	if (Alias.IsEmpty()) Alias = TEXT("Rig");
+	if (FChar::IsDigit(Alias[0])) Alias = TEXT("Rig_") + Alias;
+	return Alias;
+}
+
 static bool IsAnimPropertyValueForm(const FString& FormName)
 {
 	return FormName == TEXT("ref")
@@ -143,7 +205,45 @@ void FAnimLangParser::ErrorAt(const FAnimLangToken& Token, const FString& Messag
 	Err.Message = Message;
 	Err.Line = Token.Line;
 	Err.Column = Token.Column;
+	Err.Location = Token.Span;
 	Errors.Add(Err);
+}
+
+void FAnimLangParser::ErrorAtLocation(const FAnimLangSourceLoc& Location, const FString& Message)
+{
+	FAnimLangParseError Error;
+	Error.Message = Message;
+	Error.Line = Location.Line;
+	Error.Column = Location.Column;
+	Error.Location = Location;
+	Errors.Add(MoveTemp(Error));
+}
+
+void FAnimLangParser::WarningAt(const FAnimLangToken& Token, const FString& Code, const FString& Message)
+{
+	FAnimLangParseError Warning;
+	Warning.Message = Message;
+	Warning.Line = Token.Line;
+	Warning.Column = Token.Column;
+	Warning.bWarning = true;
+	Warning.Code = Code;
+	Warning.Location = Token.Span;
+	Errors.Add(MoveTemp(Warning));
+}
+
+void FAnimLangParser::WarningAtLocation(
+	const FAnimLangSourceLoc& Location,
+	const FString& Code,
+	const FString& Message)
+{
+	FAnimLangParseError Warning;
+	Warning.Message = Message;
+	Warning.Line = Location.Line;
+	Warning.Column = Location.Column;
+	Warning.bWarning = true;
+	Warning.Code = Code;
+	Warning.Location = Location;
+	Errors.Add(MoveTemp(Warning));
 }
 
 void FAnimLangParser::Synchronize()
@@ -240,6 +340,8 @@ TSharedPtr<FAnimGraphAST> FAnimLangParser::ParseProgram()
 	}
 	
 	Expect(EAnimLangTokenType::RParen, TEXT("anim-blueprint"));
+	MigrateLegacyRigBindings(AST);
+	ValidateRigBindings(AST);
 	
 	return AST;
 }
@@ -354,6 +456,11 @@ void FAnimLangParser::ParseTopLevel(TSharedPtr<FAnimGraphAST> AST)
 		if (Peek(1).Type == EAnimLangTokenType::Identifier && Peek(1).Value == TEXT("dependencies"))
 		{
 			ParseDependencies(AST);
+			return;
+		}
+		if (Peek(1).Type == EAnimLangTokenType::Identifier && Peek(1).Value == TEXT("import-rig"))
+		{
+			ParseRigImport(AST);
 			return;
 		}
 
@@ -662,6 +769,242 @@ FHelperGraphDef FAnimLangParser::ParseHelperGraphDef()
 
 	Expect(EAnimLangTokenType::RParen, TEXT("helper-graph"));
 	return Helper;
+}
+
+void FAnimLangParser::ParseRigImport(TSharedPtr<FAnimGraphAST> AST)
+{
+	Expect(EAnimLangTokenType::LParen, TEXT("import-rig"));
+	const FAnimLangToken Head = Current();
+	if (!CheckValue(EAnimLangTokenType::Identifier, TEXT("import-rig")))
+	{
+		Error(TEXT("Expected import-rig form"));
+		Synchronize();
+		return;
+	}
+	Advance();
+
+	FString AssetPath;
+	FString Alias;
+	FString ExpectedHash;
+	TSet<FString> SeenFields;
+	while (!IsAtEnd() && !Check(EAnimLangTokenType::RParen))
+	{
+		if (!Check(EAnimLangTokenType::Keyword))
+		{
+			Error(TEXT("Expected import-rig keyword"));
+			Advance();
+			continue;
+		}
+		const FAnimLangToken FieldToken = Advance();
+		FString CanonicalField = FieldToken.Value;
+		if (CanonicalField == TEXT("alias")) CanonicalField = TEXT("as");
+		if (CanonicalField == TEXT("content-hash")) CanonicalField = TEXT("expected-hash");
+		if (SeenFields.Contains(CanonicalField))
+		{
+			ErrorAt(FieldToken, FString::Printf(TEXT("Duplicate import-rig field :%s"), *CanonicalField));
+			ParseValue();
+			continue;
+		}
+		SeenFields.Add(CanonicalField);
+		if (CanonicalField == TEXT("asset"))
+		{
+			if (Check(EAnimLangTokenType::String)) AssetPath = Advance().Value;
+			else ErrorAt(FieldToken, TEXT("import-rig :asset requires a string"));
+		}
+		else if (CanonicalField == TEXT("as"))
+		{
+			if (Check(EAnimLangTokenType::Identifier)) Alias = Advance().Value;
+			else ErrorAt(FieldToken, TEXT("import-rig :as requires an identifier"));
+		}
+		else if (CanonicalField == TEXT("expected-hash"))
+		{
+			if (Check(EAnimLangTokenType::String)) ExpectedHash = Advance().Value;
+			else ErrorAt(FieldToken, TEXT("import-rig :expected-hash requires a string"));
+		}
+		else
+		{
+			ErrorAt(FieldToken, FString::Printf(TEXT("Unsupported import-rig field :%s"), *FieldToken.Value));
+			ParseValue();
+		}
+	}
+	Expect(EAnimLangTokenType::RParen, TEXT("import-rig"));
+	if (AssetPath.IsEmpty()) ErrorAt(Head, TEXT("import-rig requires :asset"));
+	if (Alias.IsEmpty()) ErrorAt(Head, TEXT("import-rig requires :as"));
+	if (SeenFields.Contains(TEXT("expected-hash"))
+		&& (!ExpectedHash.StartsWith(TEXT("sha256:")) || ExpectedHash.Len() <= 7))
+		ErrorAt(Head, TEXT("import-rig :expected-hash must use non-empty sha256: format"));
+	if (AST->RigImports.ContainsByPredicate([&Alias](const FAnimLispImport& Import) { return Import.Alias == Alias; }))
+		ErrorAt(Head, FString::Printf(TEXT("Duplicate Rig import alias '%s'"), *Alias));
+	if (AST->RigImports.ContainsByPredicate([&AssetPath](const FAnimLispImport& Import)
+		{ return Import.Target.AssetPath == AssetPath; }))
+		ErrorAt(Head, FString::Printf(TEXT("Duplicate Rig import asset '%s'"), *AssetPath));
+	if (!AssetPath.IsEmpty() && !Alias.IsEmpty())
+	{
+		FAnimLispImport& Import = AST->RigImports.AddDefaulted_GetRef();
+		Import.Target = FAnimLispModuleId::FromAssetPath(AssetPath, EAnimLispModuleKind::Rig);
+		Import.Alias = Alias;
+		Import.ExpectedHash = ExpectedHash;
+		Import.Location = Head.Span;
+	}
+}
+
+bool FAnimLangParser::ParseRigReference(FString& OutAlias)
+{
+	if (!Expect(EAnimLangTokenType::LParen, TEXT("rig-ref"))) return false;
+	if (!CheckValue(EAnimLangTokenType::Identifier, TEXT("rig-ref")))
+	{
+		Error(TEXT("Expected rig-ref form"));
+		Synchronize();
+		return false;
+	}
+	Advance();
+	if (Check(EAnimLangTokenType::Identifier)) OutAlias = Advance().Value;
+	else Error(TEXT("rig-ref requires an import alias"));
+	return Expect(EAnimLangTokenType::RParen, TEXT("rig-ref"));
+}
+
+bool FAnimLangParser::ParseRigEntryReference(FString& OutAlias, FString& OutEntryName)
+{
+	if (!Expect(EAnimLangTokenType::LParen, TEXT("rig-entry"))) return false;
+	if (!CheckValue(EAnimLangTokenType::Identifier, TEXT("rig-entry")))
+	{
+		Error(TEXT("Expected rig-entry form"));
+		Synchronize();
+		return false;
+	}
+	Advance();
+	if (Check(EAnimLangTokenType::Identifier))
+	{
+		const FAnimLangToken EntryToken = Advance();
+		if (!EntryToken.Value.Split(TEXT("/"), &OutAlias, &OutEntryName)
+			|| OutAlias.IsEmpty() || OutEntryName.IsEmpty() || OutEntryName.Contains(TEXT("/")))
+		{
+			ErrorAt(EntryToken, TEXT("rig-entry requires an alias-qualified Alias/Entry symbol"));
+		}
+	}
+	else Error(TEXT("rig-entry requires an alias-qualified symbol"));
+	return Expect(EAnimLangTokenType::RParen, TEXT("rig-entry"));
+}
+
+void FAnimLangParser::ParseRigInputs(FAnimRigNodeBinding& Binding)
+{
+	if (!Expect(EAnimLangTokenType::LParen, TEXT("control-rig inputs"))) return;
+	while (!IsAtEnd() && !Check(EAnimLangTokenType::RParen))
+	{
+		if (!Expect(EAnimLangTokenType::LParen, TEXT("control-rig input binding"))) break;
+		FAnimRigInputBinding Input;
+		if (Check(EAnimLangTokenType::Identifier))
+		{
+			const FAnimLangToken NameToken = Advance();
+			Input.RigInputName = NameToken.Value;
+			Input.Location = NameToken.Span;
+		}
+		else Error(TEXT("control-rig input binding requires an input name"));
+		TSet<FString> SeenTypeFields;
+		while (Check(EAnimLangTokenType::Keyword))
+		{
+			const FString Key = Advance().Value;
+			if (SeenTypeFields.Contains(Key))
+			{
+				Error(FString::Printf(TEXT("Duplicate control-rig input :%s"), *Key));
+			}
+			else
+			{
+				SeenTypeFields.Add(Key);
+			}
+			if (!Check(EAnimLangTokenType::String))
+			{
+				Error(FString::Printf(TEXT("control-rig input :%s requires a string"), *Key));
+				continue;
+			}
+			const FString Value = Advance().Value;
+			if (Key == TEXT("cpp-type")) Input.ResolvedType.CPPType = Value;
+			else if (Key == TEXT("cpp-type-object")) Input.ResolvedType.CPPTypeObject = Value;
+			else if (Key == TEXT("container-type")) Input.ResolvedType.ContainerType = Value;
+			else Error(FString::Printf(TEXT("Unknown control-rig input type field :%s"), *Key));
+		}
+		Input.ResolvedType.Canonicalize();
+		if (Check(EAnimLangTokenType::LParen)) Input.ValueExpression = ParseRawExpressionText();
+		else Error(TEXT("control-rig input binding requires a structured value expression"));
+		Expect(EAnimLangTokenType::RParen, TEXT("control-rig input binding"));
+		if (Binding.Inputs.ContainsByPredicate([&Input](const FAnimRigInputBinding& Existing)
+			{ return Existing.RigInputName == Input.RigInputName; }))
+		{
+			Error(FString::Printf(TEXT("Duplicate control-rig input '%s'"), *Input.RigInputName));
+		}
+		else if (!Input.RigInputName.IsEmpty()) Binding.Inputs.Add(MoveTemp(Input));
+	}
+	Expect(EAnimLangTokenType::RParen, TEXT("control-rig inputs"));
+}
+
+void FAnimLangParser::ValidateRigBindings(const TSharedPtr<FAnimGraphAST>& AST)
+{
+	AST->VisitNodes([this, &AST](const TSharedPtr<FAnimNodeAST>& Node)
+	{
+		if (Node->RigBinding.IsSet())
+		{
+			FAnimRigNodeBinding& Binding = Node->RigBinding.GetValue();
+			const FAnimLispImport* Import = AST->RigImports.FindByPredicate([&Binding](const FAnimLispImport& Candidate)
+				{ return Candidate.Alias == Binding.ImportAlias; });
+			if (!Import)
+			{
+				Error(FString::Printf(TEXT("Unknown Rig import alias '%s'"), *Binding.ImportAlias));
+			}
+			else if (Import->Target.Kind != EAnimLispModuleKind::Rig)
+			{
+				Error(FString::Printf(TEXT("Import alias '%s' is not a Rig module"), *Binding.ImportAlias));
+			}
+			else Binding.RigModule = Import->Target;
+		}
+	});
+}
+
+void FAnimLangParser::MigrateLegacyRigBindings(const TSharedPtr<FAnimGraphAST>& AST)
+{
+	AST->VisitNodes([this, &AST](const TSharedPtr<FAnimNodeAST>& Node)
+	{
+		const FString* RawReference = Node->Properties.Find(TEXT("control-rig-asset-reference"));
+		if (Node->NodeType == TEXT("control-rig") && Node->RigBinding.IsSet() && RawReference)
+		{
+			ErrorAtLocation(Node->Location,
+				TEXT("control-rig cannot combine typed Rig fields with legacy :control-rig-asset-reference"));
+			return;
+		}
+		if (Node->NodeType == TEXT("control-rig") && !Node->RigBinding.IsSet() && RawReference)
+		{
+			const FString AssetPath = LegacyRigSourceAssetPath(*RawReference);
+			if (!AssetPath.IsEmpty())
+			{
+				FAnimLispImport* Import = AST->RigImports.FindByPredicate([&AssetPath](const FAnimLispImport& Candidate)
+					{ return Candidate.Target.AssetPath == AssetPath; });
+				if (!Import)
+				{
+					const FString AliasBase = LegacyRigAliasBase(AssetPath);
+					FString Alias = AliasBase;
+					int32 Suffix = 2;
+					while (AST->RigImports.ContainsByPredicate([&Alias](const FAnimLispImport& Candidate)
+						{ return Candidate.Alias == Alias; }))
+					{
+						Alias = FString::Printf(TEXT("%s%d"), *AliasBase, Suffix++);
+					}
+					Import = &AST->RigImports.AddDefaulted_GetRef();
+					Import->Target = FAnimLispModuleId::FromAssetPath(AssetPath, EAnimLispModuleKind::Rig);
+					Import->Alias = Alias;
+					Import->Location = Node->Location;
+				}
+
+				Node->RigBinding.Emplace();
+				FAnimRigNodeBinding& Binding = Node->RigBinding.GetValue();
+				Binding.RigModule = Import->Target;
+				Binding.ImportAlias = Import->Alias;
+				Node->Coverage = EAnimNodeCoverage::Lossy;
+				WarningAtLocation(Node->Location, TEXT("legacy-unresolved-rig-entry"),
+					TEXT("Legacy Control Rig reference was migrated, but its public Rig entry remains unresolved"));
+				Node->Properties.Remove(TEXT("control-rig-asset-reference"));
+				Node->Properties.Remove(TEXT("exposed-input-pins"));
+			}
+		}
+	});
 }
 
 void FAnimLangParser::ParseLogicGraphs(TSharedPtr<FAnimGraphAST> AST)
@@ -1153,7 +1496,9 @@ TSharedPtr<FAnimNodeAST> FAnimLangParser::ParseNodeBody()
 	// Node type (identifier)
 	if (Check(EAnimLangTokenType::Identifier))
 	{
-		Node->NodeType = Advance().Value;
+		const FAnimLangToken NodeToken = Advance();
+		Node->NodeType = NodeToken.Value;
+		Node->Location = NodeToken.Span;
 	}
 	else
 	{
@@ -1165,6 +1510,7 @@ TSharedPtr<FAnimNodeAST> FAnimLangParser::ParseNodeBody()
 	}
 	
 	// Parse properties and children until ')'
+	TSet<FString> SeenControlRigFields;
 	while (!IsAtEnd() && !Check(EAnimLangTokenType::RParen))
 	{
 		// :keyword — could be a property (scalar value) or a named child (node expr)
@@ -1172,6 +1518,40 @@ TSharedPtr<FAnimNodeAST> FAnimLangParser::ParseNodeBody()
 		{
 			FString Key = Current().Value;
 			Advance();
+
+			if (Node->NodeType == TEXT("control-rig")
+				&& (Key == TEXT("library") || Key == TEXT("entry") || Key == TEXT("inputs")))
+			{
+				if (SeenControlRigFields.Contains(Key))
+				{
+					Error(FString::Printf(TEXT("Duplicate control-rig :%s"), *Key));
+				}
+				SeenControlRigFields.Add(Key);
+				if (!Node->RigBinding.IsSet()) Node->RigBinding.Emplace();
+				FAnimRigNodeBinding& Binding = Node->RigBinding.GetValue();
+				if (Key == TEXT("library"))
+				{
+					FString LibraryAlias;
+					if (ParseRigReference(LibraryAlias)) Binding.ImportAlias = LibraryAlias;
+				}
+				else if (Key == TEXT("entry"))
+				{
+					FString EntryAlias;
+					FString EntryName;
+					if (ParseRigEntryReference(EntryAlias, EntryName))
+					{
+						if (!Binding.ImportAlias.IsEmpty() && Binding.ImportAlias != EntryAlias)
+							Error(TEXT("control-rig library and entry must use the same Rig import alias"));
+						else if (Binding.ImportAlias.IsEmpty()) Binding.ImportAlias = EntryAlias;
+						Binding.EntryName = EntryName;
+					}
+				}
+				else
+				{
+					ParseRigInputs(Binding);
+				}
+				continue;
+			}
 			
 			// Special case: :node-id — store directly in NodeId field, not Properties
 			if (Key == TEXT("node-id"))
@@ -1303,6 +1683,11 @@ TSharedPtr<FAnimNodeAST> FAnimLangParser::ParseNodeBody()
 	}
 	
 	Expect(EAnimLangTokenType::RParen, FString::Printf(TEXT("node '%s'"), *Node->NodeType));
+	if (Node->NodeType == TEXT("control-rig") && Node->RigBinding.IsSet())
+	{
+		const FAnimRigNodeBinding& Binding = Node->RigBinding.GetValue();
+		if (Binding.ImportAlias.IsEmpty()) Error(TEXT("control-rig requires :library"));
+	}
 	return Node;
 }
 

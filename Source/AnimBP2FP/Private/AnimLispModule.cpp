@@ -3,6 +3,17 @@
 
 #include "AnimLispModule.h"
 
+FString AnimLispStableRuntimeSymbol(const FString& Value)
+{
+	FString Result;
+	for (const TCHAR Character : Value)
+	{
+		if (FChar::IsAlnum(Character) || Character == TEXT('_')) Result.AppendChar(Character);
+	}
+	if (!Result.IsEmpty() && FChar::IsDigit(Result[0])) Result = TEXT("_") + Result;
+	return Result;
+}
+
 namespace
 {
 FString NormalizeAssetPath(const FString& InAssetPath)
@@ -49,11 +60,24 @@ uint32 GetTypeHash(const FAnimLispModuleId& ModuleId)
 	return HashCombine(::GetTypeHash(static_cast<uint8>(ModuleId.Kind)), FCrc::StrCrc32(*ModuleId.AssetPath));
 }
 
+void FAnimLispTypeRef::Canonicalize()
+{
+	CPPType.TrimStartAndEndInline();
+	CPPTypeObject.TrimStartAndEndInline();
+	ContainerType.TrimStartAndEndInline();
+	if (CPPTypeObject.Equals(TEXT("None"), ESearchCase::IgnoreCase)) CPPTypeObject.Reset();
+	if (ContainerType.Equals(TEXT("None"), ESearchCase::IgnoreCase)) ContainerType.Reset();
+}
+
 bool FAnimLispTypeRef::operator==(const FAnimLispTypeRef& Other) const
 {
-	return CPPType == Other.CPPType
-		&& CPPTypeObject == Other.CPPTypeObject
-		&& ContainerType == Other.ContainerType;
+	FAnimLispTypeRef Left = *this;
+	FAnimLispTypeRef Right = Other;
+	Left.Canonicalize();
+	Right.Canonicalize();
+	return Left.CPPType == Right.CPPType
+		&& Left.CPPTypeObject == Right.CPPTypeObject
+		&& Left.ContainerType == Right.ContainerType;
 }
 
 bool FAnimLispTypeRef::operator!=(const FAnimLispTypeRef& Other) const
