@@ -11,6 +11,7 @@
 - **往返验证**：导出 → 解析 → 导出，验证 Exporter ↔ Parser 的无损往返
 - **EventGraph 导出**：通过 BlueprintLisp 将 EventGraph 导出为 BlueprintLisp DSL
 - **Commandlet 无头模式**：支持 `-run=AnimBP2FPExport/Import/RoundTrip` 批量处理
+- **RigVM / Control Rig 模块**：将 Control Rig 导出为 `.riglang`，与 `.animlang` 组成可解析、可 lint、依赖有序的共享模块 bundle
 
 ---
 
@@ -40,11 +41,21 @@ YourProject/
 # 导出所有动画蓝图
 UnrealEditor-Cmd.exe "Project.uproject" -run=AnimBP2FPExport -stdout -nullrhi
 
-# 往返验证
-UnrealEditor-Cmd.exe "Project.uproject" -run=AnimBP2FPRoundTrip -stdout -nullrhi
+# 导出一个 AnimBP 及其引用的 Rig 模块
+UnrealEditor-Cmd.exe "Project.uproject" -run=AnimBP2FPExport \
+  -AssetPath=/Game/Path/ABP_Name -IncludeRigModules -stdout -nullrhi
 
-# 批量导入
-UnrealEditor-Cmd.exe "Project.uproject" -run=AnimBP2FPImport -test -stdout -nullrhi
+# 严格 lint、瞬态往返验证、持久化导入一个 Anim/Rig workspace
+UnrealEditor-Cmd.exe "Project.uproject" -run=AnimLispLint \
+  -Workspace="Project/Saved/BP2DSL/Workspace" -stdout -nullrhi
+UnrealEditor-Cmd.exe "Project.uproject" -run=AnimBP2FPRoundTrip \
+  -Bundle="Project/Saved/BP2DSL/Workspace" -stdout -nullrhi
+UnrealEditor-Cmd.exe "Project.uproject" -run=AnimBP2FPImport \
+  -Bundle="Project/Saved/BP2DSL/Workspace" -OutDir=/Game/Imported -stdout -nullrhi
+
+# 旧版单 .animlang 导入必须显式声明 Legacy；它不提供精确 bundle 保证
+UnrealEditor-Cmd.exe "Project.uproject" -run=AnimBP2FPImport \
+  -Legacy -File="Legacy.animlang" -OutDir=/Game/Imported -stdout -nullrhi
 ```
 
 ### 方式三：Python Bridge（编辑器进程内直调）
@@ -103,6 +114,31 @@ AnimBP2FP 提供以下 AI Skill，位于 `UE-Editor-MCPServer-Skills` 仓库的 
         :false-pose (sequence-player :name "Idle" :loop true))))
 ```
 
+## RigLang 共享模块
+
+`.riglang` 使用 canonical S-expression 表示 Control Rig 的 hierarchy、变量、RigVM 图、函数和公开入口。模块头携带稳定资产身份与语义 hash：
+
+```lisp
+(rig-module :asset "/Game/Rigs/CR_FootPlacement"
+  :class "/Script/ControlRigDeveloper.ControlRigBlueprint"
+  :version 1 :content-hash "sha256:...")
+(define-rig-entry "ForwardsSolve" :id "..." :event "Forwards Solve")
+```
+
+AnimLang 通过带 hash 的 `import-rig` 引入模块，再由 typed Control Rig 节点引用公开入口：
+
+```lisp
+(import-rig :asset "/Game/Rigs/CR_FootPlacement"
+  :as FootPlacement :expected-hash "sha256:...")
+(control-rig :library (rig-ref FootPlacement)
+  :entry (rig-entry FootPlacement/ForwardsSolve)
+  :inputs ((DebugDraw :cpp-type "bool" (pin-default false))))
+```
+
+严格模式会在创建持久化资产前完成模块 hash、依赖 DAG、公开入口和输入类型检查；先编译并语义复核全部 Rig，再编译 Anim，任何失败都会阻止或回滚整组导入。旧格式只有在显式 `-Legacy` 下才能引用既有 Control Rig，并报告 non-exact warning。
+
+Anim 模块只能通过 `rig-entry` 绑定 Rig 的公开执行入口。Anim 中的 `rig-call` 不得调用 Rig 内部函数；内部 `define-rig-function` 只属于 RigVM 模块实现。
+
 ---
 
 ## 项目结构
@@ -126,6 +162,9 @@ AnimBP2FP/
 
 - AnimGraph DSL：`<ProjectDir>/AnimLang/Exported/`
 - EventGraph DSL：`<ProjectDir>/AnimLang/EventGraph/`
+- Anim/Rig workspace：`<ProjectDir>/Saved/BP2DSL/AnimBP/`、`<ProjectDir>/Saved/BP2DSL/Rig/`
+- Bundle manifest：`<ProjectDir>/Saved/BP2DSL/animlisp-bundle.json`
+- Lint report：`<ProjectDir>/Saved/BP2DSL/Diagnostics/animlisp-lint.json`
 
 ---
 
@@ -134,6 +173,8 @@ AnimBP2FP/
 **Export 往返测试**：ALS_AnimBP / CameraBehavior / Bow_AnimBP / Editor / TutorialAnimBP / TutorialTPP 全部 **100% PASS**。
 
 **Import 往返测试**：保真度 74.9%~100%，剩余 diff 主要集中在 EventGraph 变量连接（ref 连接，需 K2Node_VariableGet 支持）。
+
+**RigVM 共享模块**：GASP Mover AnimBP + Foot Placement Control Rig 已通过 strict export、workspace lint、瞬态 round-trip、持久化 bundle import、失败 rollback/retry 与双冷启动确定性 hash 验证。
 
 ---
 
