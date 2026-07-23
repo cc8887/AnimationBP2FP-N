@@ -402,7 +402,7 @@ bool FRigLangHierarchyImportPreflightTest::RunTest(const FString& Parameters)
 	FRigHierarchyMetadataAST& MissingKeys = KeyBone.Metadata.AddDefaulted_GetRef();
 	MissingKeys.Name = TEXT("MissingKeys");
 	MissingKeys.Kind = ERigHierarchyMetadataValueKind::ElementKeyArray;
-	MissingKeys.StringValues = {TEXT("Null(MissingA)"), TEXT("Control(MissingB)")};
+	MissingKeys.StringValues = {TEXT("not-a-rig-element-key")};
 	ExpectRejectedBeforePackage(
 		InvalidElementKeyMetadata, TEXT("/Game/Tests/CR_InvalidElementKeyMetadataImport"), TEXT("invalid element-key metadata"));
 

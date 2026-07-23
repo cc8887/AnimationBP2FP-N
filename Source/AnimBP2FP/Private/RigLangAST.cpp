@@ -669,13 +669,30 @@ FString FRigModuleAST::ToCanonicalString() const
 FString FRigModuleAST::ToCanonicalHashInput() const
 {
 	FRigModuleAST Semantic = *this;
-	auto RemoveComments = [](FRigGraphAST& Graph)
+	auto NormalizeNodeProperties = [](FRigGraphAST& Graph)
 	{
-		Graph.Nodes.RemoveAll([](const FRigNodeAST& Node) { return Node.Kind == ERigNodeKind::Comment; });
+		for (FRigNodeAST& Node : Graph.Nodes)
+		{
+			if (Node.Kind == ERigNodeKind::Comment)
+			{
+				Node.Properties.Remove(TEXT("font-size"));
+				Node.Properties.Remove(TEXT("bubble-visible"));
+				Node.Properties.Remove(TEXT("color-bubble"));
+			}
+			if (Node.Properties.FindRef(TEXT("template-resolved")) == TEXT("false"))
+				Node.Properties.Remove(TEXT("resolved-function"));
+		}
 	};
-	for (FRigGraphAST& Graph : Semantic.Graphs) RemoveComments(Graph);
-	for (FRigFunctionAST& Function : Semantic.Functions) RemoveComments(Function.Graph);
-	for (FRigEntryAST& Entry : Semantic.Entries) RemoveComments(Entry.Graph);
+	for (FRigGraphAST& Graph : Semantic.Graphs) NormalizeNodeProperties(Graph);
+	for (FRigFunctionAST& Function : Semantic.Functions)
+	{
+		NormalizeNodeProperties(Function.Graph);
+		// RigVM recomputes this stale-detection cache from the referenced function's
+		// compilation data. Dependency identity is host + library node path.
+		for (FRigFunctionDependencyAST& Dependency : Function.Dependencies)
+			Dependency.Hash = 0;
+	}
+	for (FRigEntryAST& Entry : Semantic.Entries) NormalizeNodeProperties(Entry.Graph);
 	return BuildCanonical(Semantic, false);
 }
 

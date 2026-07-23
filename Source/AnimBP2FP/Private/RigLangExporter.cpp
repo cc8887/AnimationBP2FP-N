@@ -90,9 +90,54 @@ FString SHA256UTF8(const FString& Text)
 }
 }
 
+namespace
+{
+FString QuoteRigLangValue(const FString& Value);
+}
+
 FString FRigLangExporter::ComputeContentHash(const FString& CanonicalHashInput)
 {
 	return TEXT("sha256:") + SHA256UTF8(CanonicalHashInput);
+}
+
+void FRigLangExporter::CanonicalizeExternalVariableNames(FRigModuleAST& Module)
+{
+	TMap<FGuid, FString> DeclarationNames;
+	TMap<FGuid, int32> DeclarationCounts;
+	for (const FRigVariableAST& Variable : Module.Variables)
+	{
+		FGuid Guid;
+		if (!FGuid::Parse(Variable.StableId, Guid) || !Guid.IsValid()) continue;
+		DeclarationNames.Add(Guid, Variable.Name);
+		DeclarationCounts.FindOrAdd(Guid)++;
+	}
+	auto Unquote = [](const FString& Value)
+	{
+		return Value.Len() >= 2 && Value[0] == TEXT('"') && Value[Value.Len() - 1] == TEXT('"')
+			? Value.Mid(1, Value.Len() - 2) : Value;
+	};
+	auto NormalizeGraph = [&DeclarationNames, &DeclarationCounts, &Unquote](FRigGraphAST& Graph)
+	{
+		for (FRigNodeAST& Node : Graph.Nodes)
+		{
+			if (Node.Kind != ERigNodeKind::Variable
+				|| Node.Properties.FindRef(TEXT("external")) != TEXT("true")) continue;
+			FGuid Guid;
+			if (!FGuid::Parse(Unquote(Node.Properties.FindRef(TEXT("variable-guid"))), Guid)
+				|| !Guid.IsValid() || DeclarationCounts.FindRef(Guid) != 1) continue;
+			const FString* DeclaredName = DeclarationNames.Find(Guid);
+			if (!DeclaredName) continue;
+			Node.Properties.Add(TEXT("variable-name"), QuoteRigLangValue(*DeclaredName));
+			if (FRigPinAST* VariablePin = Node.Pins.FindByPredicate(
+				[](const FRigPinAST& Pin) { return Pin.Path == TEXT("Variable"); }))
+			{
+				VariablePin->DefaultValue = *DeclaredName;
+			}
+		}
+	};
+	for (FRigGraphAST& Graph : Module.Graphs) NormalizeGraph(Graph);
+	for (FRigFunctionAST& Function : Module.Functions) NormalizeGraph(Function.Graph);
+	for (FRigEntryAST& Entry : Module.Entries) NormalizeGraph(Entry.Graph);
 }
 
 FString FRigLangExporter::ComputeDeterministicEditorGuid(
@@ -672,6 +717,7 @@ FRigNodeAST ExportNode(
 			ExternalVariables.Add(TEXT("(") + QuoteRigLangValue(Variable.GetName().ToString()) + TEXT(" ")
 				+ QuoteRigLangValue(Variable.GetExtendedCPPType().ToString()) + TEXT(")"));
 		}
+		ExternalVariables.Sort();
 		Result.Properties.Add(TEXT("external-variables"), TEXT("(") + FString::Join(ExternalVariables, TEXT(" ")) + TEXT(")"));
 	}
 	else if (const URigVMUnitNode* UnitNode = Cast<URigVMUnitNode>(Node))
@@ -721,7 +767,8 @@ FRigNodeAST ExportNode(
 		Result.Properties.Add(TEXT("template-notation"), QuoteRigLangValue(TemplateNode->GetNotation().ToString()));
 		Result.Properties.Add(TEXT("template-resolved"), TemplateNode->IsResolved() ? TEXT("true") : TEXT("false"));
 		Result.Properties.Add(TEXT("resolved-function"), QuoteRigLangValue(
-			TemplateNode->GetResolvedFunction() ? TemplateNode->GetResolvedFunction()->Name : FString()));
+			TemplateNode->IsResolved() && TemplateNode->GetResolvedFunction()
+				? TemplateNode->GetResolvedFunction()->Name : FString()));
 		Result.Properties.Add(TEXT("template-types"), ExportTemplateTypeMap(TemplateNode->GetTemplatePinTypeMap(true, true)));
 	}
 	for (const URigVMPin* Pin : Node->GetPins())
@@ -794,7 +841,7 @@ FRigGraphAST ExportGraph(
 			Coverage.LossyOrUnsupportedNodes.Add(NodeId);
 		FString Reason;
 		if (Exported.Kind == ERigNodeKind::Comment)
-			Reason = TEXT("normalized: editor-only comment excluded from semantic hash");
+			Reason = TEXT("normalized: semantic comment with visual layout normalization");
 		else if (Exported.Coverage == ERigNodeCoverage::Unsupported)
 			Reason = TEXT("unsupported: no typed RigVM reconstruction contract for node subclass");
 		else if (Exported.Coverage == ERigNodeCoverage::Lossy)
@@ -1294,6 +1341,7 @@ FRigLangExportResult FRigLangExporter::Export(
 		{
 			ExportedEventNames.Add(QuoteRigLangValue(EventName.ToString()));
 		}
+		ExportedEventNames.Sort();
 		Graph.Properties.Add(TEXT("event-names"), TEXT("(")
 			+ FString::Join(ExportedEventNames, TEXT(" ")) + TEXT(")"));
 		Result.Module->Graphs.Add(MoveTemp(Graph));
@@ -1390,6 +1438,17 @@ FRigLangExportResult FRigLangExporter::Export(
 			{
 				Function.ExternalVariables.Add(ExportExternalVariable(ExternalVariable));
 			}
+			Function.ExternalVariables.Sort([](const FRigExternalVariableAST& A,
+				const FRigExternalVariableAST& B)
+			{
+				if (A.Name != B.Name) return A.Name < B.Name;
+				if (A.Type.CPPType != B.Type.CPPType) return A.Type.CPPType < B.Type.CPPType;
+				if (A.Type.CPPTypeObject != B.Type.CPPTypeObject)
+					return A.Type.CPPTypeObject < B.Type.CPPTypeObject;
+				if (A.Type.ContainerType != B.Type.ContainerType)
+					return A.Type.ContainerType < B.Type.ContainerType;
+				return A.Guid < B.Guid;
+			});
 			for (const TPair<FRigVMGraphFunctionIdentifier, uint32>& Pair : LibraryNode->GetDependencies())
 			{
 				FRigFunctionDependencyAST& Dependency = Function.Dependencies.AddDefaulted_GetRef();
@@ -1408,6 +1467,7 @@ FRigLangExportResult FRigLangExporter::Export(
 	}
 
 	NormalizeFunctionCallsAndImports(*Result.Module);
+	CanonicalizeExternalVariableNames(*Result.Module);
 
 	Result.Module->Header.ContentHash = ComputeContentHash(Result.Module->ToCanonicalHashInput());
 

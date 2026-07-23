@@ -684,7 +684,7 @@ bool FRigLangExporterCommentHashNormalizationTest::RunTest(const FString& Parame
 	if (!TestNotNull(TEXT("Editor-only comment is created"), Comment)) return false;
 	const FRigLangExportResult After = FRigLangExporter::Export(Blueprint);
 	TestTrue(TEXT("Strict export visits a normalized comment"), After.bSuccess);
-	TestEqual(TEXT("Comment-only edit does not change semantic content hash"),
+	TestNotEqual(TEXT("Comment-only edit changes semantic content hash"),
 		After.Module->Header.ContentHash, Before.Module->Header.ContentHash);
 	TestTrue(TEXT("Canonical display output retains the comment"),
 		After.Module->ToCanonicalString().Contains(TEXT("rig-comment")));
@@ -699,14 +699,20 @@ bool FRigLangExporterCommentHashNormalizationTest::RunTest(const FString& Parame
 	}
 	if (TestNotNull(TEXT("Exported comment AST is available for hash normalization"), ExportedComment))
 	{
+		ExportedComment->Properties[TEXT("font-size")] = TEXT("37");
+		ExportedComment->Properties[TEXT("bubble-visible")] = TEXT("false");
+		ExportedComment->Properties[TEXT("color-bubble")] = TEXT("false");
+		ExportedComment->Properties.Add(TEXT("editor-position"), TEXT("(500 600)"));
+		TestEqual(TEXT("Changing comment layout leaves canonical hash input stable"),
+			After.Module->ToCanonicalHashInput(), HashInputBeforeMutation);
 		ExportedComment->Properties.Add(TEXT("comment-text"), RigLangExporterTests::QuoteValue(TEXT("Changed note")));
 		TestNotEqual(TEXT("Changing only comment content changes display canonical text"),
 			After.Module->ToCanonicalString(), DisplayBeforeMutation);
-		TestEqual(TEXT("Changing only comment content leaves canonical hash input stable"),
+		TestNotEqual(TEXT("Changing comment content changes canonical hash input"),
 			After.Module->ToCanonicalHashInput(), HashInputBeforeMutation);
 	}
-	TestTrue(TEXT("Comment coverage records its normalization reason"),
-		After.Coverage.Reasons.FindRef(Comment->GetPathName()).Contains(TEXT("excluded from semantic hash")));
+	TestTrue(TEXT("Comment coverage records reflected reconstruction"),
+		After.Coverage.Reasons.FindRef(Comment->GetPathName()).Contains(TEXT("semantic comment")));
 	return true;
 }
 
@@ -1093,20 +1099,24 @@ bool FRigLangExporterRealAssetTest::RunTest(const FString& Parameters)
 		}
 		const TArray<FRigVMExternalVariable> SourceExternalVariables = LibraryNode->GetExternalVariables();
 		TestEqual(TEXT("Function external variable count is exact"), Function->ExternalVariables.Num(), SourceExternalVariables.Num());
-		for (int32 VariableIndex = 0; VariableIndex < SourceExternalVariables.Num(); ++VariableIndex)
+		for (const FRigVMExternalVariable& SourceVariable : SourceExternalVariables)
 		{
-			if (!Function->ExternalVariables.IsValidIndex(VariableIndex)) continue;
-			const FRigVMExternalVariable& SourceVariable = SourceExternalVariables[VariableIndex];
-			const FRigExternalVariableAST& Variable = Function->ExternalVariables[VariableIndex];
-			TestEqual(TEXT("External variable GUID is exact"), Variable.Guid, SourceVariable.GetGuid().ToString(EGuidFormats::DigitsWithHyphensLower));
-			TestEqual(TEXT("External variable name is exact"), Variable.Name, SourceVariable.GetName().ToString());
-			TestEqual(TEXT("External variable CPP type is exact"), Variable.Type.CPPType, SourceVariable.GetBaseCPPType().ToString());
-			TestEqual(TEXT("External variable object type is exact"), Variable.Type.CPPTypeObject,
+			const FRigExternalVariableAST* Variable = Function->ExternalVariables.FindByPredicate(
+				[&SourceVariable](const FRigExternalVariableAST& Candidate)
+				{
+					return Candidate.Name == SourceVariable.GetName().ToString()
+						&& Candidate.Type.CPPType == SourceVariable.GetBaseCPPType().ToString();
+				});
+			if (!TestNotNull(TEXT("External variable is found by semantic identity"), Variable)) continue;
+			TestEqual(TEXT("External variable GUID is exact"), Variable->Guid, SourceVariable.GetGuid().ToString(EGuidFormats::DigitsWithHyphensLower));
+			TestEqual(TEXT("External variable name is exact"), Variable->Name, SourceVariable.GetName().ToString());
+			TestEqual(TEXT("External variable CPP type is exact"), Variable->Type.CPPType, SourceVariable.GetBaseCPPType().ToString());
+			TestEqual(TEXT("External variable object type is exact"), Variable->Type.CPPTypeObject,
 				SourceVariable.GetCPPTypeObject() ? SourceVariable.GetCPPTypeObject()->GetPathName() : FString());
-			TestEqual(TEXT("External variable array shape is exact"), Variable.Type.ContainerType,
+			TestEqual(TEXT("External variable array shape is exact"), Variable->Type.ContainerType,
 				SourceVariable.IsArray() ? FString(TEXT("array")) : FString());
-			TestEqual(TEXT("External variable public state is exact"), Variable.bPublic, SourceVariable.IsPublic());
-			TestEqual(TEXT("External variable read-only state is exact"), Variable.bReadOnly, SourceVariable.IsReadOnly());
+			TestEqual(TEXT("External variable public state is exact"), Variable->bPublic, SourceVariable.IsPublic());
+			TestEqual(TEXT("External variable read-only state is exact"), Variable->bReadOnly, SourceVariable.IsReadOnly());
 		}
 		TArray<FRigFunctionDependencyAST> ExpectedDependencies;
 		for (const TPair<FRigVMGraphFunctionIdentifier, uint32>& Pair : LibraryNode->GetDependencies())
@@ -1452,6 +1462,7 @@ bool FRigLangExporterRealAssetTest::RunTest(const FString& Parameters)
 					RigLangExporterTests::StableRuntimeSymbol(EventName.ToString()));
 			}
 		}
+		ExpectedEvents.Sort();
 		TestEqual(TEXT("All model event names export without truncation"),
 			ExportedGraph->Properties.FindRef(TEXT("event-names")),
 			TEXT("(") + FString::Join(ExpectedEvents, TEXT(" ")) + TEXT(")"));
@@ -1500,7 +1511,9 @@ bool FRigLangExporterRealAssetTest::RunTest(const FString& Parameters)
 			case ERigNodeCoverage::Lossy: ExpectedReasonPrefix = TEXT("lossy:"); break;
 			case ERigNodeCoverage::Unsupported: ExpectedReasonPrefix = TEXT("unsupported:"); break;
 			}
-			TestTrue(TEXT("Node coverage enum matches its reason classification"),
+			TestTrue(FString::Printf(
+				TEXT("Node coverage matches reason: node=%s coverage=%d reason=%s"),
+				*SourceNode->GetPathName(), static_cast<int32>(ExportedNode->Coverage), *NodeReason),
 				NodeReason.StartsWith(ExpectedReasonPrefix));
 			if (ExportedNode->Guid.StartsWith(TEXT("model:")))
 			{
@@ -1566,7 +1579,8 @@ bool FRigLangExporterRealAssetTest::RunTest(const FString& Parameters)
 					TemplateNode->IsResolved() ? FString(TEXT("true")) : FString(TEXT("false")));
 				TestEqual(TEXT("Template resolved function reconstructs exactly"),
 					ExportedNode->Properties.FindRef(TEXT("resolved-function")),
-					RigLangExporterTests::QuoteValue(TemplateNode->GetResolvedFunction()
+					RigLangExporterTests::QuoteValue(TemplateNode->IsResolved()
+						&& TemplateNode->GetResolvedFunction()
 						? TemplateNode->GetResolvedFunction()->Name : FString()));
 				TestEqual(TEXT("Template type map reconstructs exactly"),
 					ExportedNode->Properties.FindRef(TEXT("template-types")),
@@ -1619,6 +1633,7 @@ bool FRigLangExporterRealAssetTest::RunTest(const FString& Parameters)
 				for (const FRigVMExternalVariable& Variable : CollapseNode->GetExternalVariables())
 					ExpectedExternalVariables.Add(TEXT("(") + RigLangExporterTests::QuoteValue(Variable.GetName().ToString())
 						+ TEXT(" ") + RigLangExporterTests::QuoteValue(Variable.GetExtendedCPPType().ToString()) + TEXT(")"));
+				ExpectedExternalVariables.Sort();
 				TestEqual(TEXT("Collapse external variables reconstruct exactly"),
 					ExportedNode->Properties.FindRef(TEXT("external-variables")),
 					TEXT("(") + FString::Join(ExpectedExternalVariables, TEXT(" ")) + TEXT(")"));

@@ -8,6 +8,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "RigLangExporter.h"
 #include "RigLangImporter.h"
+#include "RigVMCore/RigVMRegistry.h"
 #include "RigVMFunctions/Math/RigVMFunction_MathFloat.h"
 #include "RigVMFunctions/Math/RigVMFunction_MathVector.h"
 #include "RigVMFunctions/RigVMFunction_String.h"
@@ -19,10 +20,12 @@
 #include "RigVMModel/Nodes/RigVMAggregateNode.h"
 #include "RigVMModel/Nodes/RigVMCollapseNode.h"
 #include "RigVMModel/Nodes/RigVMRerouteNode.h"
+#include "RigVMModel/Nodes/RigVMTemplateNode.h"
 #include "RigVMModel/Nodes/RigVMUnitNode.h"
 #include "RigVMModel/Nodes/RigVMVariableNode.h"
 #include "Units/Execution/RigUnit_BeginExecution.h"
 #include "Units/Execution/RigUnit_PrepareForExecution.h"
+#include "Units/Core/RigUnit_UserData.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -389,6 +392,88 @@ bool FRigLangGraphImportRoundTripTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FRigLangGraphImportColdDynamicDispatchPermutationTest,
+	"AnimBP2FP.RigLang.Importer.ColdDynamicDispatchPermutation",
+	RigLangGraphImportTests::Flags)
+
+bool FRigLangGraphImportColdDynamicDispatchPermutationTest::RunTest(const FString& Parameters)
+{
+	FRigVMDispatchFactory* Factory = FRigVMRegistry::Get().FindOrAddDispatchFactory<FRigDispatch_GetUserData>();
+	if (!TestNotNull(TEXT("user data dispatch factory is registered"), Factory)) return false;
+	const FRigVMTemplate* Template = Factory->GetTemplate();
+	if (!TestNotNull(TEXT("user data dispatch template is registered"), Template)) return false;
+	FRigVMTemplate::FTypeMap Types;
+	Types.Add(TEXT("NameSpace"), RigVMTypeUtils::TypeIndex::FString);
+	Types.Add(TEXT("Path"), RigVMTypeUtils::TypeIndex::FString);
+	Types.Add(TEXT("Default"), RigVMTypeUtils::TypeIndex::FName);
+	Types.Add(TEXT("Result"), RigVMTypeUtils::TypeIndex::FName);
+	Types.Add(TEXT("Found"), RigVMTypeUtils::TypeIndex::Bool);
+	const int32 Permutation = Template->FindPermutation(Types);
+	if (!TestTrue(TEXT("dynamic user data permutation is legal"), Permutation != INDEX_NONE)) return false;
+	const FString ExpectedFunction = Factory->GetPermutationName(Types);
+
+	UControlRigBlueprintFactory* BlueprintFactory = NewObject<UControlRigBlueprintFactory>();
+	BlueprintFactory->ParentClass = UControlRig::StaticClass();
+	UControlRigBlueprint* Blueprint = Cast<UControlRigBlueprint>(BlueprintFactory->FactoryCreateNew(
+		UControlRigBlueprint::StaticClass(), GetTransientPackage(),
+		MakeUniqueObjectName(GetTransientPackage(), UControlRigBlueprint::StaticClass(),
+			TEXT("CR_ColdDynamicDispatch")), RF_Transient, nullptr, GWarn));
+	if (!TestNotNull(TEXT("cold dispatch fixture is created"), Blueprint)) return false;
+	URigVMController* Controller = Blueprint->GetOrCreateController(
+		Blueprint->URigVMBlueprint::GetRigVMClient()->GetDefaultModel());
+	URigVMNode* Node = Controller->AddTemplateNode(
+		Template->GetNotation(), FVector2D::ZeroVector, TEXT("ColdGetUserData"), false, false);
+	if (!TestNotNull(TEXT("untyped dynamic dispatch node is created"), Node)) return false;
+	const bool bWasCold = Template->GetPermutation(Permutation) == nullptr;
+	AddInfo(FString::Printf(TEXT("Cold dynamic dispatch permutation before import: %s"),
+		bWasCold ? TEXT("true") : TEXT("false")));
+
+	FRigNodeAST ColdDispatch;
+	ColdDispatch.Kind = ERigNodeKind::Dispatch;
+	ColdDispatch.StableId = TEXT("ColdGetUserData");
+	ColdDispatch.Guid = TEXT("model:cold-get-user-data");
+	ColdDispatch.ClassPath = TEXT("/Script/RigVMDeveloper.RigVMDispatchNode");
+	ColdDispatch.EventName = TEXT("None");
+	ColdDispatch.Coverage = ERigNodeCoverage::Exact;
+	ColdDispatch.Properties.Add(TEXT("dispatch-factory"),
+		FString::Printf(TEXT("\"%s\""), *Factory->GetFactoryName().ToString()));
+	ColdDispatch.Properties.Add(TEXT("dispatch-script-struct"),
+		TEXT("\"/Script/ControlRig.RigDispatch_GetUserData\""));
+	ColdDispatch.Properties.Add(TEXT("template-notation"),
+		FString::Printf(TEXT("\"%s\""), *Template->GetNotation().ToString()));
+	ColdDispatch.Properties.Add(TEXT("template-resolved"), TEXT("true"));
+	ColdDispatch.Properties.Add(TEXT("resolved-function"),
+		FString::Printf(TEXT("\"%s\""), *ExpectedFunction));
+	auto AddPin = [&ColdDispatch](const TCHAR* Name, ERigPinDirection Direction,
+		const TCHAR* CPPType, const TCHAR* DefaultValue)
+	{
+		FRigPinAST& Pin = ColdDispatch.Pins.AddDefaulted_GetRef();
+		Pin.Path = Name;
+		Pin.Direction = Direction;
+		Pin.Type.CPPType = CPPType;
+		Pin.DefaultValue = DefaultValue;
+	};
+	AddPin(TEXT("NameSpace"), ERigPinDirection::Input, TEXT("FString"), TEXT("\"\""));
+	AddPin(TEXT("Path"), ERigPinDirection::Input, TEXT("FString"), TEXT("\"\""));
+	AddPin(TEXT("Default"), ERigPinDirection::Input, TEXT("FName"), TEXT("None"));
+	AddPin(TEXT("Result"), ERigPinDirection::Output, TEXT("FName"), TEXT("None"));
+	AddPin(TEXT("Found"), ERigPinDirection::Output, TEXT("bool"), TEXT("false"));
+	FRigLangImportResult ImportResult;
+	if (!TestTrue(TEXT("importer resolves a cold dynamic dispatch permutation"),
+		FRigLangImporter::ResolveTemplateNodeForTest(Controller, Node, ColdDispatch, ImportResult)))
+	{
+		AddError(ImportResult.Diagnostics.ToReport());
+		return false;
+	}
+	URigVMTemplateNode* ImportedDispatch = Cast<URigVMTemplateNode>(Node);
+	if (!TestNotNull(TEXT("cold dispatch node is imported"), ImportedDispatch)) return false;
+	const FRigVMFunction* ResolvedFunction = ImportedDispatch->GetResolvedFunction();
+	return TestNotNull(TEXT("cold dispatch function is materialized"), ResolvedFunction)
+		&& TestEqual(TEXT("cold dispatch resolves the expected function"),
+			ResolvedFunction->Name, ExpectedFunction);
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangGraphImportArrayShapeTest,
 	"AnimBP2FP.RigLang.Importer.ArrayShapeRoundTrip",
 	RigLangGraphImportTests::Flags)
@@ -594,6 +679,41 @@ bool FRigLangGraphImportOrdinaryCollapseTest::RunTest(const FString& Parameters)
 	{
 		TestEqual(TEXT("first injection order"), SourceInjections[0]->InjectionOrder, 0);
 		TestEqual(TEXT("second injection order"), SourceInjections[1]->InjectionOrder, 1);
+	}
+	FRigModuleAST WrongPermutation = *Exported.Module;
+	FRigNodeAST* WrongDispatch = nullptr;
+	for (FRigGraphAST& Graph : WrongPermutation.Graphs)
+	{
+		WrongDispatch = Graph.Nodes.FindByPredicate([](const FRigNodeAST& Node)
+		{
+			return Node.Kind == ERigNodeKind::Dispatch
+				&& Node.Pins.ContainsByPredicate([](const FRigPinAST& Pin) { return Pin.Path == TEXT("Array"); })
+				&& Node.Pins.ContainsByPredicate([](const FRigPinAST& Pin) { return Pin.Path == TEXT("Clone"); });
+		});
+		if (WrongDispatch) break;
+	}
+	if (TestNotNull(TEXT("wrong permutation fixture finds a resolved dispatch"), WrongDispatch))
+	{
+		FRigPinAST* WrongClone = WrongDispatch->Pins.FindByPredicate(
+			[](const FRigPinAST& Pin) { return Pin.Path == TEXT("Clone"); });
+		check(WrongClone);
+		WrongClone->Type.CPPType = TEXT("bool");
+		WrongClone->Type.CPPTypeObject.Reset();
+		WrongClone->Type.ContainerType = TEXT("array");
+		WrongPermutation.Header.ContentHash = FRigLangExporter::ComputeContentHash(
+			WrongPermutation.ToCanonicalHashInput());
+		FRigLangImportOptions WrongOptions;
+		WrongOptions.TargetPackage = TEXT("/Engine/Transient/CR_WrongPermutationStaging");
+		WrongOptions.bTransient = true;
+		WrongOptions.bStrict = true;
+		const FRigLangImportResult WrongImport = FRigLangImporter::Import(
+			WrongPermutation, WrongOptions);
+		TestFalse(TEXT("wrong dispatch permutation is rejected"), WrongImport.bCompiled);
+		const FString WrongReport = WrongImport.Diagnostics.ToReport();
+		TestTrue(TEXT("wrong dispatch type-map has an explicit diagnostic"),
+			WrongReport.Contains(TEXT("permutation"), ESearchCase::IgnoreCase)
+			|| WrongReport.Contains(TEXT("wildcard"), ESearchCase::IgnoreCase)
+			|| WrongReport.Contains(TEXT("template"), ESearchCase::IgnoreCase));
 	}
 	FRigLangImportOptions Options;
 	Options.TargetPackage = TEXT("/Engine/Transient/CR_CollapseStaging");

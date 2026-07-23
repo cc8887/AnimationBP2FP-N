@@ -48,6 +48,8 @@ public:
 	static bool ValidateStrictCoverage(
 		const FRigLangExportCoverage& Coverage,
 		TArray<FString>& OutErrors);
+	/** Canonicalizes external variable node display names from unique declaration GUIDs. */
+	static void CanonicalizeExternalVariableNames(FRigModuleAST& Module);
 	/** Resolves typed Rig calls and synthesizes deterministic external Rig imports. */
 	static void NormalizeFunctionCallsAndImports(FRigModuleAST& Module);
 
