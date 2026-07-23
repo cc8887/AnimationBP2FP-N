@@ -46,6 +46,23 @@ static FString UnquoteAnimLangValue(FString Value)
 static FString ExtractLegacyRigObjectPath(FString Value)
 {
 	Value = Value.TrimStartAndEnd();
+	Value.ReplaceInline(TEXT("\\\""), TEXT("\""));
+
+	// Archived BlueprintRigClass values wrap the object path in a generated-class
+	// reference. Select the object path itself rather than the preceding /Script class.
+	const int32 GamePathStart = Value.Find(TEXT("/Game/"));
+	if (GamePathStart != INDEX_NONE)
+	{
+		int32 GamePathEnd = Value.Find(TEXT("'"), ESearchCase::CaseSensitive,
+			ESearchDir::FromStart, GamePathStart);
+		if (GamePathEnd == INDEX_NONE)
+		{
+			GamePathEnd = Value.Find(TEXT("\""), ESearchCase::CaseSensitive,
+				ESearchDir::FromStart, GamePathStart);
+		}
+		if (GamePathEnd == INDEX_NONE) GamePathEnd = Value.Len();
+		return Value.Mid(GamePathStart, GamePathEnd - GamePathStart);
+	}
 	if (Value.StartsWith(TEXT("(asset ")))
 	{
 		int32 FirstQuote = INDEX_NONE;
@@ -991,6 +1008,7 @@ void FAnimLangParser::MigrateLegacyRigBindings(const TSharedPtr<FAnimGraphAST>& 
 					Import->Target = FAnimLispModuleId::FromAssetPath(AssetPath, EAnimLispModuleKind::Rig);
 					Import->Alias = Alias;
 					Import->Location = Node->Location;
+					Import->bLegacyExternal = true;
 				}
 
 				Node->RigBinding.Emplace();

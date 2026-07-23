@@ -7,6 +7,18 @@
 #include "AnimLangDiagnostics.h"
 #include "AnimLispModule.h"
 
+struct FAnimGraphAST;
+struct FRigModuleAST;
+
+struct ANIMBP2FP_API FAnimLispImportPlanEntry
+{
+	FAnimLispModuleId ModuleId;
+	FString SourceFile;
+	FString ContentHash;
+	TSharedPtr<const FAnimGraphAST> AnimAST;
+	TSharedPtr<const FRigModuleAST> RigAST;
+};
+
 struct ANIMBP2FP_API FAnimLispSymbolId
 {
 	FAnimLispModuleId Module;
@@ -53,7 +65,10 @@ public:
 	FAnimLispWorkspace& operator=(const FAnimLispWorkspace&) = delete;
 
 	void AddSource(const FString& Path, const FString& Source);
-	bool Build(FAnimLangDiagnostics& OutDiag);
+	bool Build(FAnimLangDiagnostics& OutDiag, bool bAllowLegacyExternalRigs = false);
+	bool BuildImportPlan(
+		TArray<FAnimLispImportPlanEntry>& OutPlan,
+		FAnimLangDiagnostics& OutDiag) const;
 
 	// The returned pointer is invalidated by the next Build call.
 	const FAnimLispDefinition* FindDefinition(

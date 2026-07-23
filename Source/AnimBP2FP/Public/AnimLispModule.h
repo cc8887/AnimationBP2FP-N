@@ -48,6 +48,8 @@ struct ANIMBP2FP_API FAnimLispImport
 	FString Alias;
 	FString ExpectedHash;
 	FAnimLangSourceLoc Location;
+	/** True only when the parser synthesized this import from an archived asset reference. */
+	bool bLegacyExternal = false;
 };
 
 /** Exact Unreal type identity shared by future Anim and Rig symbols. */

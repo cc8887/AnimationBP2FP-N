@@ -72,6 +72,7 @@ struct FWorkspaceModule
 	TArray<FWorkspaceBinding> Bindings;
 	TArray<FWorkspaceRigNodeUse> RigNodes;
 	TArray<int32> DefinitionIndices;
+	TSharedPtr<FAnimGraphAST> Anim;
 	TSharedPtr<FRigModuleAST> Rig;
 	TArray<FRigLangParseError> ParseErrors;
 };
@@ -737,9 +738,12 @@ struct FAnimLispWorkspace::FImpl
 	TSet<FString> QuarantinedModuleIdentities;
 	TSet<int32> QuarantinedDefinitionIndices;
 	TArray<FAnimLangDiagnostic> EarlyDiagnostics;
+	bool bLastBuildSucceeded = false;
+	bool bAllowLegacyExternalRigs = false;
 
 	void ResetBuild()
 	{
+		bLastBuildSucceeded = false;
 		Modules.Reset();
 		Definitions.Reset();
 		References.Reset();
@@ -945,6 +949,7 @@ struct FAnimLispWorkspace::FImpl
 			Module.Location.Line = 1;
 			Module.Location.Column = 1;
 			Module.Imports = AST->RigImports;
+			Module.Anim = AST;
 			for (FAnimLispImport& Import : Module.Imports)
 			{
 				if (Import.Location.SourceFile.IsEmpty()) Import.Location.SourceFile = SourceFile;
@@ -1384,10 +1389,11 @@ void FAnimLispWorkspace::AddSource(const FString& Path, const FString& Source)
 	Impl->Sources.Add(Path, Source);
 }
 
-bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag)
+bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag, const bool bAllowLegacyExternalRigs)
 {
 	OutDiag.Items.Reset();
 	Impl->ResetBuild();
+	Impl->bAllowLegacyExternalRigs = bAllowLegacyExternalRigs;
 	TArray<FString> SourceFiles;
 	Impl->Sources.GetKeys(SourceFiles);
 	SourceFiles.Sort();
@@ -1552,6 +1558,19 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag)
 			const int32* TargetIndex = Impl->ModuleByIdentity.Find(Import.Target.ToString());
 			if (TargetIndex == nullptr)
 			{
+				if (Impl->bAllowLegacyExternalRigs
+					&& Import.bLegacyExternal
+					&& Import.Target.Kind == EAnimLispModuleKind::Rig
+					&& Import.ExpectedHash.IsEmpty())
+				{
+					OutDiag.Add(
+						EAnimLangDiagSeverity::Warning,
+						EAnimLangDiagCategory::Module,
+						FString::Printf(TEXT("Legacy external Rig module '%s' is not covered by the bundle"),
+							*Import.Target.ToString()),
+						Import.Location);
+					continue;
+				}
 				if (const int32* FailedIndex = Impl->FailedModuleByIdentity.Find(Import.Target.ToString()))
 				{
 					const FWorkspaceModule& Target = Impl->Modules[*FailedIndex];
@@ -1853,7 +1872,19 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag)
 			}
 			else
 			{
-				OutDiag.Add(
+				FString UseAlias;
+				FString UseName;
+				const bool bLegacyExternalUse = Impl->bAllowLegacyExternalRigs
+					&& SplitQualifiedName(Use.QualifiedName, UseAlias, UseName)
+					&& Module.Imports.ContainsByPredicate([&](const FAnimLispImport& Import)
+					{
+						return Import.Alias == UseAlias
+							&& Import.bLegacyExternal
+							&& Import.Target.Kind == EAnimLispModuleKind::Rig
+							&& Import.ExpectedHash.IsEmpty()
+							&& !Impl->ModuleByIdentity.Contains(Import.Target.ToString());
+					});
+				if (!bLegacyExternalUse) OutDiag.Add(
 					EAnimLangDiagSeverity::Error,
 					EAnimLangDiagCategory::Semantic,
 					bRigCall
@@ -1872,7 +1903,13 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag)
 				? &Impl->Modules[*TargetModuleIndex] : nullptr;
 			if (!Import || !TargetModule || !TargetModule->Rig.IsValid())
 			{
-				OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Module,
+				const bool bLegacyExternalRig = Impl->bAllowLegacyExternalRigs
+					&& Import
+					&& Import->bLegacyExternal
+					&& Import->Target.Kind == EAnimLispModuleKind::Rig
+					&& Import->ExpectedHash.IsEmpty()
+					&& !Impl->ModuleByIdentity.Contains(Import->Target.ToString());
+				if (!bLegacyExternalRig) OutDiag.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Module,
 					FString::Printf(TEXT("Control Rig node has unresolved Rig import alias '%s'"), *RigNode.ImportAlias),
 					RigNode.Location);
 				continue;
@@ -2052,7 +2089,85 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag)
 		if (A.Category != B.Category) return static_cast<uint8>(A.Category) < static_cast<uint8>(B.Category);
 		return A.Message < B.Message;
 	});
-	return !OutDiag.HasErrors();
+	Impl->bLastBuildSucceeded = !OutDiag.HasErrors();
+	return Impl->bLastBuildSucceeded;
+}
+
+bool FAnimLispWorkspace::BuildImportPlan(
+	TArray<FAnimLispImportPlanEntry>& OutPlan,
+	FAnimLangDiagnostics& OutDiag) const
+{
+	OutPlan.Reset();
+	if (!Impl->bLastBuildSucceeded)
+	{
+		OutDiag.Add(
+			EAnimLangDiagSeverity::Error,
+			EAnimLangDiagCategory::Module,
+			TEXT("Cannot build an import plan before the workspace passes preflight"));
+		return false;
+	}
+
+	TArray<int32> StableModules;
+	for (int32 ModuleIndex = 0; ModuleIndex < Impl->Modules.Num(); ++ModuleIndex)
+	{
+		const FWorkspaceModule& Module = Impl->Modules[ModuleIndex];
+		if (Module.bIndexable
+			&& !Impl->QuarantinedModuleIdentities.Contains(Module.Id.ToString()))
+		{
+			StableModules.Add(ModuleIndex);
+		}
+	}
+	StableModules.Sort([this](const int32 A, const int32 B)
+	{
+		const FWorkspaceModule& Left = Impl->Modules[A];
+		const FWorkspaceModule& Right = Impl->Modules[B];
+		const FString LeftIdentity = Left.Id.ToString();
+		const FString RightIdentity = Right.Id.ToString();
+		return LeftIdentity != RightIdentity
+			? LeftIdentity < RightIdentity
+			: Left.SourceFile < Right.SourceFile;
+	});
+
+	TArray<uint8> VisitState;
+	VisitState.SetNumZeroed(Impl->Modules.Num());
+	TFunction<void(int32)> Visit = [&](const int32 ModuleIndex)
+	{
+		if (!Impl->Modules.IsValidIndex(ModuleIndex) || VisitState[ModuleIndex] == 2) return;
+		check(VisitState[ModuleIndex] == 0);
+		VisitState[ModuleIndex] = 1;
+
+		TArray<int32> Dependencies;
+		for (const FAnimLispImport& Import : Impl->Modules[ModuleIndex].Imports)
+		{
+			if (const int32* TargetIndex = Impl->ModuleByIdentity.Find(Import.Target.ToString()))
+			{
+				Dependencies.AddUnique(*TargetIndex);
+			}
+		}
+		Dependencies.Sort([this](const int32 A, const int32 B)
+		{
+			return Impl->Modules[A].Id.ToString() < Impl->Modules[B].Id.ToString();
+		});
+		for (const int32 DependencyIndex : Dependencies)
+		{
+			if (VisitState[DependencyIndex] == 0) Visit(DependencyIndex);
+		}
+
+		VisitState[ModuleIndex] = 2;
+		const FWorkspaceModule& Module = Impl->Modules[ModuleIndex];
+		FAnimLispImportPlanEntry& Entry = OutPlan.AddDefaulted_GetRef();
+		Entry.ModuleId = Module.Id;
+		Entry.SourceFile = Module.SourceFile;
+		Entry.ContentHash = Module.ContentHash;
+		Entry.AnimAST = Module.Anim;
+		Entry.RigAST = Module.Rig;
+	};
+
+	for (const int32 ModuleIndex : StableModules)
+	{
+		if (VisitState[ModuleIndex] == 0) Visit(ModuleIndex);
+	}
+	return true;
 }
 
 const FAnimLispDefinition* FAnimLispWorkspace::FindDefinition(

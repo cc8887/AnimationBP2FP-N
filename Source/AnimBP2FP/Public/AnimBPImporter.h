@@ -6,6 +6,7 @@
 #include "CoreMinimal.h"
 #include "AnimLangAST.h"
 #include "AnimBP2FPModule.h"
+#include "AnimLispWorkspace.h"
 
 // 注意：FAnimBPImporter 是编辑器专用功能，仅用于编辑器构建
 // 非编辑器构建时，此类不可用
@@ -13,6 +14,59 @@
 #if WITH_EDITOR
 
 #include "Animation/AnimBlueprint.h"
+
+class UControlRigBlueprint;
+struct FRigModuleAST;
+
+struct ANIMBP2FP_API FAnimBPResolvedRig
+{
+	TObjectPtr<UControlRigBlueprint> Blueprint = nullptr;
+	TSharedPtr<const FRigModuleAST> Module;
+};
+
+struct ANIMBP2FP_API FAnimBPImportContext
+{
+	TMap<FString, FAnimBPResolvedRig> ResolvedRigs;
+	/** Parser-marked external Rig assets verified during Legacy bundle preflight. */
+	TSet<FString> LegacyExternalRigPaths;
+	bool bStrictBundle = true;
+	bool bAllowLegacyRigFallback = false;
+	bool bTransient = true;
+};
+
+enum class EAnimLispBundleImportMode : uint8
+{
+	Strict,
+	Legacy
+};
+
+struct ANIMBP2FP_API FAnimLispBundleSource
+{
+	FString SourceFile;
+	FString Source;
+};
+
+struct ANIMBP2FP_API FAnimLispBundleImportOptions
+{
+	EAnimLispBundleImportMode Mode = EAnimLispBundleImportMode::Strict;
+	FString TargetRoot;
+	/** Promote all-gated staging assets into new persistent packages. Existing targets are never overwritten. */
+	bool bCommitPersistent = false;
+#if WITH_DEV_AUTOMATION_TESTS
+	/** Zero-based package save index used only to exercise persistent rollback. */
+	int32 TestFailSaveIndex = INDEX_NONE;
+#endif
+};
+
+struct ANIMBP2FP_API FAnimLispBundleImportResult
+{
+	bool bSuccess = false;
+	/** True only after persistent target assets begin changing; transient staging does not set this. */
+	bool bMutationStarted = false;
+	FAnimLangDiagnostics Diagnostics;
+	TArray<FAnimLispImportPlanEntry> Plan;
+	TArray<TObjectPtr<UObject>> StagedAssets;
+};
 
 class UAnimGraphNode_Base;
 class UAnimGraphNode_StateMachine;
@@ -28,6 +82,11 @@ class UEdGraphNode;
 class ANIMBP2FP_API FAnimBPImporter
 {
 public:
+	/** Preflight and import a complete Anim/Rig source bundle into staging assets. */
+	static FAnimLispBundleImportResult ImportBundle(
+		const TArray<FAnimLispBundleSource>& Sources,
+		const FAnimLispBundleImportOptions& Options);
+
 	/**
 	 * Import DSL code to create a new Animation Blueprint
 	 * @param DSLCode The AnimLang code
@@ -45,6 +104,11 @@ public:
 	 * @return The created blueprint, or nullptr on failure
 	 */
 	static UAnimBlueprint* ImportFromAST(const TSharedPtr<FAnimGraphAST>& AST, const FString& PackagePath, FString* OutError = nullptr);
+	static UAnimBlueprint* ImportFromAST(
+		const TSharedPtr<FAnimGraphAST>& AST,
+		const FString& PackagePath,
+		const FAnimBPImportContext& Context,
+		FString* OutError = nullptr);
 	
 	/**
 	 * Update existing blueprint from DSL (incremental when possible, full rebuild as fallback)
@@ -110,7 +174,11 @@ private:
 	// ========== Blueprint Creation ==========
 	
 	/** Create an empty Animation Blueprint with the given skeleton */
-	static UAnimBlueprint* CreateEmptyBlueprint(const FString& PackagePath, const FString& BlueprintName, const FString& SkeletonPath);
+	static UAnimBlueprint* CreateEmptyBlueprint(
+		const FString& PackagePath,
+		const FString& BlueprintName,
+		const FString& SkeletonPath,
+		bool bTransient = false);
 	
 	/** Find the AnimGraph (the root UEdGraph) inside the blueprint */
 	static UEdGraph* FindAnimGraph(UAnimBlueprint* Blueprint);

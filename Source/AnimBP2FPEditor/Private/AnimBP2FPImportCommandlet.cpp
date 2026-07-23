@@ -331,10 +331,57 @@ int32 UAnimBP2FPImportCommandlet::Main(const FString& Params)
 	OutDirArg = ParamMap.FindRef(TEXT("outdir"));
 	bTestMode = Switches.Contains(TEXT("test"));
 	bUpdateMode = Switches.Contains(TEXT("update"));
+	const bool bLegacyMode = Switches.Contains(TEXT("legacy"));
+	FString BundleDir = ParamMap.FindRef(TEXT("bundle"));
+	if (BundleDir.IsEmpty()) BundleDir = ParamMap.FindRef(TEXT("workspace"));
 	
 	if (OutDirArg.IsEmpty())
 	{
 		OutDirArg = TEXT("/Game/AnimBP2FP/Imported");
+	}
+
+	if (!BundleDir.IsEmpty())
+	{
+		TArray<FString> BundleFiles;
+		TArray<FString> RigFiles;
+		IFileManager::Get().FindFilesRecursive(BundleFiles, *BundleDir, TEXT("*.animlang"), true, false);
+		IFileManager::Get().FindFilesRecursive(RigFiles, *BundleDir, TEXT("*.riglang"), true, false);
+		BundleFiles.Append(RigFiles);
+		BundleFiles.Sort();
+		TArray<FAnimLispBundleSource> Sources;
+		for (const FString& BundleFile : BundleFiles)
+		{
+			FString Source;
+			if (!FFileHelper::LoadFileToString(Source, *BundleFile))
+			{
+				UE_LOG(LogAnimBPImportCmd, Error, TEXT("Could not read bundle source: %s"), *BundleFile);
+				return 1;
+			}
+			Sources.Add({BundleFile, MoveTemp(Source)});
+		}
+		FAnimLispBundleImportOptions BundleOptions;
+		BundleOptions.Mode = bLegacyMode
+			? EAnimLispBundleImportMode::Legacy : EAnimLispBundleImportMode::Strict;
+		BundleOptions.TargetRoot = OutDirArg;
+		BundleOptions.bCommitPersistent = true;
+		const FAnimLispBundleImportResult BundleResult = FAnimBPImporter::ImportBundle(Sources, BundleOptions);
+		UE_LOG(LogAnimBPImportCmd, Log, TEXT("%s"), *BundleResult.Diagnostics.ToReport());
+		if (!BundleResult.bSuccess)
+		{
+			UE_LOG(LogAnimBPImportCmd, Error, TEXT("Bundle import failed %s persistent target mutation"),
+				BundleResult.bMutationStarted ? TEXT("after") : TEXT("before"));
+			return 1;
+		}
+		UE_LOG(LogAnimBPImportCmd, Log, TEXT("Bundle import committed: %d assets, mode=%s"),
+			BundleResult.StagedAssets.Num(), bLegacyMode ? TEXT("Legacy") : TEXT("Strict"));
+		return 0;
+	}
+
+	if (!bLegacyMode)
+	{
+		UE_LOG(LogAnimBPImportCmd, Error,
+			TEXT("Single-file Anim import is legacy behavior; pass -Legacy explicitly or use -Bundle=<workspace>"));
+		return 1;
 	}
 	
 	// Collect files to process

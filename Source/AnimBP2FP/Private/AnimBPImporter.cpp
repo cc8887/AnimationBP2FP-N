@@ -51,6 +51,8 @@
 #include "AnimationGraph.h"
 #include "AnimLangTokenizer.h"
 #include "RigLangExporter.h"
+#include "RigLangImporter.h"
+#include "AnimLispWorkspace.h"
 
 #include "Animation/AnimClassInterface.h"
 #include "Animation/AnimLayerInterface.h"
@@ -58,17 +60,22 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "BlueprintLispAST.h"
 #include "BlueprintLispConverter.h"
+#include "EdGraphUtilities.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "PackageTools.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
 #include "K2Node_Event.h"
+#include "K2Node_MacroInstance.h"
 #include "Engine/MemberReference.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/StructOnScope.h"
+#include "UObject/SavePackage.h"
+#include "Misc/PackageName.h"
 #include "Framework/Application/SlateApplication.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogAnimBPImporter, Log, All);
@@ -104,6 +111,7 @@ namespace
 	};
 
 	thread_local FImporterRigValidationContext* GActiveImporterRigValidationContext = nullptr;
+	thread_local const FAnimBPImportContext* GActiveAnimImportContext = nullptr;
 }
 
 // Helper: strip surrounding double quotes from a string
@@ -185,7 +193,27 @@ static bool ValidateExternalDependencies(const TArray<FAnimDependency>& Dependen
 			return false;
 		}
 
-		UObject* Object = StaticLoadObject(UObject::StaticClass(), nullptr, *Dependency.ObjectPath);
+		UObject* Object = nullptr;
+		if (Dependency.Role.Equals(TEXT("control-rig"), ESearchCase::IgnoreCase)
+			&& GActiveAnimImportContext)
+		{
+			FString RigAssetPath = Dependency.ObjectPath;
+			int32 DotIndex = INDEX_NONE;
+			if (RigAssetPath.FindChar(TEXT('.'), DotIndex)) RigAssetPath.LeftInline(DotIndex);
+			if (const FAnimBPResolvedRig* ResolvedRig = GActiveAnimImportContext->ResolvedRigs.Find(RigAssetPath))
+			{
+				Object = ResolvedRig->Blueprint.Get();
+			}
+			else if (GActiveAnimImportContext->bAllowLegacyRigFallback
+				&& GActiveAnimImportContext->LegacyExternalRigPaths.Contains(RigAssetPath))
+			{
+				Object = StaticLoadObject(UObject::StaticClass(), nullptr, *Dependency.ObjectPath);
+			}
+		}
+		else
+		{
+			Object = StaticLoadObject(UObject::StaticClass(), nullptr, *Dependency.ObjectPath);
+		}
 		if (!Object)
 		{
 			OutError = FString::Printf(TEXT("Missing dependency '%s' (expected class '%s')"),
@@ -200,6 +228,89 @@ static bool ValidateExternalDependencies(const TArray<FAnimDependency>& Dependen
 		}
 	}
 	return true;
+}
+
+static FString NormalizeComparableAnimEscapes(const FString& Value)
+{
+	FString Result;
+	Result.Reserve(Value.Len());
+	for (int32 Index = 0; Index < Value.Len();)
+	{
+		if (Value[Index] != TEXT('\\'))
+		{
+			Result.AppendChar(Value[Index++]);
+			continue;
+		}
+		const int32 SlashStart = Index;
+		while (Index < Value.Len() && Value[Index] == TEXT('\\')) ++Index;
+		if (Index < Value.Len() && Value[Index] == TEXT('"'))
+		{
+			Result.AppendChar(TEXT('\\'));
+			Result.AppendChar(TEXT('"'));
+			++Index;
+		}
+		else
+		{
+			Result.Append(Value.Mid(SlashStart, Index - SlashStart));
+		}
+	}
+	return Result;
+}
+
+static FString BuildComparableAnimCanonical(
+	const TSharedPtr<FAnimGraphAST>& Candidate,
+	const FAnimGraphAST& Source)
+{
+	if (!Candidate.IsValid()) return FString();
+	Candidate->Name = Source.Name;
+
+	TMap<FString, TSharedPtr<FAnimNodeAST>> SourceNodesById;
+	Source.VisitNodes([&](const TSharedPtr<FAnimNodeAST>& Node)
+	{
+		if (Node.IsValid() && !Node->NodeId.IsEmpty()) SourceNodesById.Add(Node->NodeId, Node);
+	});
+	TMap<FString, FAnimLispModuleId> SourceModuleByStagedPath;
+	TMap<FString, FString> SourceAliasByStagedPath;
+	Candidate->VisitNodes([&](const TSharedPtr<FAnimNodeAST>& Node)
+	{
+		if (!Node.IsValid() || !Node->RigBinding.IsSet()) return;
+		const TSharedPtr<FAnimNodeAST>* SourceNode = SourceNodesById.Find(Node->NodeId);
+		if (!SourceNode || !SourceNode->IsValid() || !(*SourceNode)->RigBinding.IsSet()) return;
+		FAnimRigNodeBinding& Binding = Node->RigBinding.GetValue();
+		const FAnimRigNodeBinding& SourceBinding = (*SourceNode)->RigBinding.GetValue();
+		SourceModuleByStagedPath.Add(Binding.RigModule.AssetPath, SourceBinding.RigModule);
+		SourceAliasByStagedPath.Add(Binding.RigModule.AssetPath, SourceBinding.ImportAlias);
+		Binding.RigModule = SourceBinding.RigModule;
+		Binding.ImportAlias = SourceBinding.ImportAlias;
+	});
+
+	for (FAnimLispImport& Import : Candidate->RigImports)
+	{
+		if (const FAnimLispImport* SourceImport = Source.RigImports.FindByPredicate(
+			[&Import](const FAnimLispImport& Value) { return Value.Alias == Import.Alias; }))
+		{
+			Import = *SourceImport;
+			continue;
+		}
+		const FString StagedPath = Import.Target.AssetPath;
+		if (const FAnimLispModuleId* SourceModule = SourceModuleByStagedPath.Find(StagedPath))
+		{
+			Import.Target = *SourceModule;
+			Import.Alias = SourceAliasByStagedPath.FindRef(StagedPath);
+			if (const FAnimLispImport* SourceImport = Source.RigImports.FindByPredicate(
+				[&Import](const FAnimLispImport& Value)
+				{
+					return Value.Target == Import.Target && Value.Alias == Import.Alias;
+				}))
+			{
+				Import.ExpectedHash = SourceImport->ExpectedHash;
+			}
+		}
+	}
+	// Transient packages have no AssetRegistry dependency records. The manifest was
+	// already preflighted before staging, so restore it as representation-only identity.
+	Candidate->Dependencies = Source.Dependencies;
+	return NormalizeComparableAnimEscapes(Candidate->ToString());
 }
 
 static bool ApplyAnimBlueprintMetadata(UAnimBlueprint* Blueprint, const FAnimBlueprintMetadata& Metadata, FString& OutError)
@@ -1570,7 +1681,11 @@ bool FAnimBPImporter::SetNodeProperty(UAnimGraphNode_Base* Node, const FString& 
 
 // ========== Blueprint Creation ==========
 
-UAnimBlueprint* FAnimBPImporter::CreateEmptyBlueprint(const FString& PackagePath, const FString& BlueprintName, const FString& SkeletonPath)
+UAnimBlueprint* FAnimBPImporter::CreateEmptyBlueprint(
+	const FString& PackagePath,
+	const FString& BlueprintName,
+	const FString& SkeletonPath,
+	const bool bTransient)
 {
 	// Find or load the skeleton
 	USkeleton* Skeleton = nullptr;
@@ -1590,7 +1705,7 @@ UAnimBlueprint* FAnimBPImporter::CreateEmptyBlueprint(const FString& PackagePath
 	
 	// Create the package
 	FString FullPackagePath = PackagePath / BlueprintName;
-	UPackage* Package = CreatePackage(*FullPackagePath);
+	UPackage* Package = bTransient ? GetTransientPackage() : CreatePackage(*FullPackagePath);
 	if (!Package)
 	{
 		UE_LOG(LogAnimBPImporter, Error, TEXT("Failed to create package: %s"), *FullPackagePath);
@@ -1604,8 +1719,10 @@ UAnimBlueprint* FAnimBPImporter::CreateEmptyBlueprint(const FString& PackagePath
 	UObject* CreatedAsset = Factory->FactoryCreateNew(
 		UAnimBlueprint::StaticClass(),
 		Package,
-		FName(*BlueprintName),
-		RF_Public | RF_Standalone,
+		bTransient
+			? MakeUniqueObjectName(Package, UAnimBlueprint::StaticClass(), FName(*BlueprintName))
+			: FName(*BlueprintName),
+		bTransient ? RF_Transient : RF_Public | RF_Standalone,
 		nullptr,
 		GWarn
 	);
@@ -1618,8 +1735,11 @@ UAnimBlueprint* FAnimBPImporter::CreateEmptyBlueprint(const FString& PackagePath
 	}
 	
 	// Notify asset registry
-	FAssetRegistryModule::AssetCreated(AnimBlueprint);
-	Package->MarkPackageDirty();
+	if (!bTransient)
+	{
+		FAssetRegistryModule::AssetCreated(AnimBlueprint);
+		Package->MarkPackageDirty();
+	}
 	
 	UE_LOG(LogAnimBPImporter, Log, TEXT("Created AnimBlueprint: %s (Skeleton: %s)"), 
 		*BlueprintName, Skeleton ? *Skeleton->GetName() : TEXT("none"));
@@ -2153,6 +2273,74 @@ bool FAnimBPImporter::BuildLogicGraphs(UAnimBlueprint* Blueprint, const TArray<F
 			return false;
 		}
 	}
+
+	// call-macro stores a direct graph reference. BlueprintLisp may resolve a private macro
+	// from the source Blueprint because AnimLang intentionally serializes only event/function
+	// logic graphs. Such a cross-package private reference compiles transiently but cannot be
+	// saved, so internalize it in the rebuilt Blueprint and bind every instance to the clone.
+	TMap<TObjectPtr<UEdGraph>, TObjectPtr<UEdGraph>> InternalizedMacros;
+	bool bFoundNewPrivateMacro = false;
+	do
+	{
+		bFoundNewPrivateMacro = false;
+		TArray<UEdGraph*> AllGraphs;
+		Blueprint->GetAllGraphs(AllGraphs);
+		for (UEdGraph* Graph : AllGraphs)
+		{
+			if (!Graph) continue;
+			for (UEdGraphNode* GraphNode : Graph->Nodes)
+			{
+				UK2Node_MacroInstance* MacroNode = Cast<UK2Node_MacroInstance>(GraphNode);
+				UEdGraph* SourceMacro = MacroNode ? MacroNode->GetMacroGraph() : nullptr;
+				if (!SourceMacro || SourceMacro->GetTypedOuter<UBlueprint>() == Blueprint
+					|| SourceMacro->HasAnyFlags(RF_Public))
+				{
+					continue;
+				}
+
+				UEdGraph* TargetMacro = InternalizedMacros.FindRef(SourceMacro);
+				if (!TargetMacro)
+				{
+					if (Blueprint->MacroGraphs.ContainsByPredicate([SourceMacro](const UEdGraph* Candidate)
+					{
+						return Candidate && Candidate->GetFName() == SourceMacro->GetFName();
+					}))
+					{
+						UE_LOG(LogAnimBPImporter, Error,
+							TEXT("[UNSUPPORTED:LogicGraph] Private macro name '%s' resolves to multiple source graphs"),
+							*SourceMacro->GetName());
+						return false;
+					}
+					TargetMacro = FEdGraphUtilities::CloneGraph(SourceMacro, Blueprint);
+					if (!TargetMacro)
+					{
+						UE_LOG(LogAnimBPImporter, Error,
+							TEXT("[UNSUPPORTED:LogicGraph] Failed to internalize private macro '%s'"),
+							*SourceMacro->GetPathName());
+						return false;
+					}
+					TargetMacro->ClearFlags(RF_Transient);
+					FBlueprintEditorUtils::RenameGraph(TargetMacro, SourceMacro->GetName());
+					if (TargetMacro->GetFName() != SourceMacro->GetFName())
+					{
+						UE_LOG(LogAnimBPImporter, Error,
+							TEXT("[UNSUPPORTED:LogicGraph] Internalized macro '%s' was renamed to '%s'"),
+							*SourceMacro->GetName(), *TargetMacro->GetName());
+						return false;
+					}
+					Blueprint->MacroGraphs.Add(TargetMacro);
+					bFoundNewPrivateMacro = true;
+				}
+				InternalizedMacros.Add(SourceMacro, TargetMacro);
+				MacroNode->SetMacroGraph(TargetMacro);
+			}
+		}
+	}
+	while (bFoundNewPrivateMacro);
+	if (!InternalizedMacros.IsEmpty())
+	{
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+	}
 	return true;
 }
 
@@ -2415,7 +2603,15 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		return UseNode;
 	}
 
-	if (NodeAST->Coverage == EAnimNodeCoverage::Lossy || NodeAST->Coverage == EAnimNodeCoverage::Unsupported)
+	const bool bAllowedLegacyRigCoverage = NodeAST->Coverage == EAnimNodeCoverage::Lossy
+		&& NodeType == TEXT("control-rig")
+		&& NodeAST->RigBinding.IsSet()
+		&& GActiveAnimImportContext
+		&& GActiveAnimImportContext->bAllowLegacyRigFallback
+		&& GActiveAnimImportContext->LegacyExternalRigPaths.Contains(
+			NodeAST->RigBinding->RigModule.AssetPath);
+	if ((NodeAST->Coverage == EAnimNodeCoverage::Lossy && !bAllowedLegacyRigCoverage)
+		|| NodeAST->Coverage == EAnimNodeCoverage::Unsupported)
 	{
 		UE_LOG(LogAnimBPImporter, Warning, TEXT("[UNSUPPORTED:NodeCoverage] Node '%s' has non-importable coverage '%s'"),
 			*NodeType, NodeAST->Coverage == EAnimNodeCoverage::Lossy ? TEXT("lossy") : TEXT("unsupported"));
@@ -3024,31 +3220,65 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 		const FString ObjectPath = AssetPath + TEXT(".") + FPaths::GetBaseFilename(AssetPath);
 		if (UAnimGraphNode_ControlRig* ControlRigNode = Cast<UAnimGraphNode_ControlRig>(NewNode))
 		{
-			if (UControlRigBlueprint* RigBlueprint = LoadObject<UControlRigBlueprint>(nullptr, *ObjectPath))
+			const FAnimBPResolvedRig* ResolvedRig = GActiveAnimImportContext
+				? GActiveAnimImportContext->ResolvedRigs.Find(AssetPath) : nullptr;
+			UControlRigBlueprint* RigBlueprint = ResolvedRig
+				? ResolvedRig->Blueprint.Get()
+				: (!GActiveAnimImportContext || GActiveAnimImportContext->bAllowLegacyRigFallback
+					? LoadObject<UControlRigBlueprint>(nullptr, *ObjectPath) : nullptr);
+			if (RigBlueprint)
 			{
 				UClass* RigClass = RigBlueprint->GeneratedClass.Get();
 				if (RigClass && RigClass->IsChildOf(UControlRig::StaticClass()))
 				{
 					const FControlRigAssetStrongReference RigReference(RigBlueprint);
-					FRigLangExportResult UncachedRigExport;
-					FRigLangExportResult* CachedRigExport = GActiveImporterRigValidationContext
-						? GActiveImporterRigValidationContext->ModulesByAsset.Find(AssetPath) : nullptr;
-					if (!CachedRigExport)
+					const bool bLegacyMigratedBinding = GActiveAnimImportContext
+						&& GActiveAnimImportContext->bAllowLegacyRigFallback
+						&& GActiveAnimImportContext->LegacyExternalRigPaths.Contains(AssetPath)
+						&& !ResolvedRig
+						&& NodeAST->Coverage == EAnimNodeCoverage::Lossy
+						&& Binding.EntryName.IsEmpty()
+						&& Binding.Inputs.IsEmpty();
+					if (bLegacyMigratedBinding)
 					{
-						UncachedRigExport = FRigLangExporter::Export(RigBlueprint);
-						CachedRigExport = GActiveImporterRigValidationContext
-							? &GActiveImporterRigValidationContext->ModulesByAsset.Add(AssetPath, MoveTemp(UncachedRigExport))
-							: &UncachedRigExport;
+						FString SerializedReference;
+						FControlRigAssetStrongReference::StaticStruct()->ExportText(
+							SerializedReference, &RigReference, nullptr, nullptr, PPF_None, nullptr);
+						if (SetNodeProperty(NewNode, TEXT("control-rig-asset-reference"), SerializedReference))
+						{
+							NewNode->ReconstructNode();
+							bRestoredTypedRig = true;
+						}
 					}
-					const FRigLangExportResult& RigExport = *CachedRigExport;
-					if (!RigExport.bSuccess || !RigExport.Module.IsValid())
+					if (!bLegacyMigratedBinding)
+					{
+					const FRigModuleAST* RigModule = ResolvedRig && ResolvedRig->Module.IsValid()
+						? ResolvedRig->Module.Get() : nullptr;
+					FRigLangExportResult UncachedRigExport;
+					if (!RigModule)
+					{
+						FRigLangExportResult* CachedRigExport = GActiveImporterRigValidationContext
+							? GActiveImporterRigValidationContext->ModulesByAsset.Find(AssetPath) : nullptr;
+						if (!CachedRigExport)
+						{
+							UncachedRigExport = FRigLangExporter::Export(RigBlueprint);
+							CachedRigExport = GActiveImporterRigValidationContext
+								? &GActiveImporterRigValidationContext->ModulesByAsset.Add(AssetPath, MoveTemp(UncachedRigExport))
+								: &UncachedRigExport;
+						}
+						if (CachedRigExport->bSuccess && CachedRigExport->Module.IsValid())
+						{
+							RigModule = CachedRigExport->Module.Get();
+						}
+					}
+					if (!RigModule)
 					{
 						UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:ControlRigModule] Failed to inspect Rig module '%s'"), *AssetPath);
 						Graph->RemoveNode(NewNode);
 						return nullptr;
 					}
 					const TArray<FName>& SupportedEvents = RigReference.GetSupportedEvents();
-					const int32 MatchingEntries = RigExport.Module->Entries.FilterByPredicate(
+					const int32 MatchingEntries = RigModule->Entries.FilterByPredicate(
 						[&Binding, &SupportedEvents](const FRigEntryAST& Entry)
 						{
 							return Entry.Name == Binding.EntryName
@@ -3065,7 +3295,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 					FControlRigAssetStrongReference::StaticStruct()->ExportText(
 						SerializedReference, &RigReference, nullptr, nullptr, PPF_None, nullptr);
 					TSet<FName> PublicInputProperties;
-					for (const FRigVariableAST& Variable : RigExport.Module->Variables)
+					for (const FRigVariableAST& Variable : RigModule->Variables)
 					{
 						if (Variable.Access != ERigVariableAccess::PublicInput) continue;
 						const FName PropertyName(*Variable.Name);
@@ -3081,7 +3311,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 					for (const FAnimRigInputBinding& Input : Binding.Inputs)
 					{
 						TArray<const FRigVariableAST*> Variables;
-						for (const FRigVariableAST& Variable : RigExport.Module->Variables)
+						for (const FRigVariableAST& Variable : RigModule->Variables)
 						{
 							if (Variable.Access == ERigVariableAccess::PublicInput
 								&& AnimLispStableRuntimeSymbol(Variable.Name) == Input.RigInputName)
@@ -3142,6 +3372,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 							}
 						}
 						bRestoredTypedRig = true;
+					}
 					}
 				}
 			}
@@ -4645,6 +4876,388 @@ bool FAnimBPImporter::CompileBlueprint(UAnimBlueprint* Blueprint, FString* OutEr
 
 // ========== Top-Level API ==========
 
+FAnimLispBundleImportResult FAnimBPImporter::ImportBundle(
+	const TArray<FAnimLispBundleSource>& Sources,
+	const FAnimLispBundleImportOptions& Options)
+{
+	FAnimLispBundleImportResult Result;
+	if (Sources.IsEmpty())
+	{
+		Result.Diagnostics.Add(
+			EAnimLangDiagSeverity::Error,
+			EAnimLangDiagCategory::Module,
+			TEXT("Bundle import requires at least one source module"));
+		return Result;
+	}
+	if (Options.TargetRoot.IsEmpty())
+	{
+		Result.Diagnostics.Add(
+			EAnimLangDiagSeverity::Error,
+			EAnimLangDiagCategory::Import,
+			TEXT("Bundle import requires an explicit target root"));
+		return Result;
+	}
+
+	FAnimLispWorkspace Workspace;
+	for (const FAnimLispBundleSource& Source : Sources)
+	{
+		Workspace.AddSource(Source.SourceFile, Source.Source);
+	}
+	if (!Workspace.Build(Result.Diagnostics, Options.Mode == EAnimLispBundleImportMode::Legacy)
+		|| !Workspace.BuildImportPlan(Result.Plan, Result.Diagnostics))
+	{
+		Result.Plan.Reset();
+		return Result;
+	}
+	TMap<FString, FString> PersistentTargetByModule;
+	if (Options.bCommitPersistent)
+	{
+		if (!Options.TargetRoot.StartsWith(TEXT("/Game/")) && Options.TargetRoot != TEXT("/Game"))
+		{
+			Result.Diagnostics.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Import,
+				TEXT("Persistent bundle target root must be under /Game"));
+			return Result;
+		}
+		TSet<FString> UniqueTargets;
+		for (const FAnimLispImportPlanEntry& Entry : Result.Plan)
+		{
+			const FString AssetName = Entry.ModuleId.Kind == EAnimLispModuleKind::Anim && Entry.AnimAST.IsValid()
+				? Entry.AnimAST->Name : FPaths::GetBaseFilename(Entry.ModuleId.AssetPath);
+			const FString TargetPackage = Options.TargetRoot / AssetName;
+			if (UniqueTargets.Contains(TargetPackage)
+				|| FindPackage(nullptr, *TargetPackage)
+				|| FPackageName::DoesPackageExist(TargetPackage))
+			{
+				Result.Diagnostics.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Import,
+					FString::Printf(TEXT("Persistent bundle target already exists or collides: '%s'"), *TargetPackage));
+				return Result;
+			}
+			UniqueTargets.Add(TargetPackage);
+			PersistentTargetByModule.Add(Entry.ModuleId.ToString(), TargetPackage);
+		}
+	}
+
+	auto IsLegacyAnimEntry = [](const FAnimLispImportPlanEntry& Entry)
+	{
+		if (!Entry.AnimAST.IsValid()) return false;
+		if (Entry.AnimAST->RigImports.ContainsByPredicate(
+			[](const FAnimLispImport& Import) { return Import.bLegacyExternal; })) return true;
+		bool bLegacyControlRig = false;
+		Entry.AnimAST->VisitNodes([&bLegacyControlRig](const TSharedPtr<FAnimNodeAST>& Node)
+		{
+			bLegacyControlRig |= Node.IsValid()
+				&& Node->NodeType == TEXT("control-rig")
+				&& (!Node->RigBinding.IsSet()
+					|| (Node->Coverage == EAnimNodeCoverage::Lossy
+						&& Node->RigBinding->EntryName.IsEmpty()));
+		});
+		return bLegacyControlRig;
+	};
+
+	TSet<FString> VerifiedLegacyExternalRigPaths;
+	for (const FAnimLispImportPlanEntry& Entry : Result.Plan)
+	{
+		if (Entry.ModuleId.Kind != EAnimLispModuleKind::Anim || !Entry.AnimAST.IsValid()) continue;
+		if (!IsLegacyAnimEntry(Entry)) continue;
+		if (Options.Mode == EAnimLispBundleImportMode::Strict)
+		{
+			Result.Diagnostics.Add(
+				EAnimLangDiagSeverity::Error,
+				EAnimLangDiagCategory::Import,
+				FString::Printf(
+					TEXT("Strict bundle rejects legacy Control Rig fallback in '%s'; import-rig and typed binding are required"),
+					*Entry.SourceFile));
+			return Result;
+		}
+		Result.Diagnostics.Add(
+			EAnimLangDiagSeverity::Warning,
+			EAnimLangDiagCategory::RoundTrip,
+			FString::Printf(
+				TEXT("Legacy Control Rig fallback in '%s' has non-exact bundle coverage"),
+				*Entry.SourceFile));
+
+		for (const FAnimLispImport& Import : Entry.AnimAST->RigImports)
+		{
+			if (!Import.bLegacyExternal) continue;
+			const FString ObjectPath = Import.Target.AssetPath + TEXT(".")
+				+ FPaths::GetBaseFilename(Import.Target.AssetPath);
+			if (!LoadObject<UControlRigBlueprint>(nullptr, *ObjectPath))
+			{
+				Result.Diagnostics.Add(
+					EAnimLangDiagSeverity::Error,
+					EAnimLangDiagCategory::Import,
+					FString::Printf(
+						TEXT("Legacy Control Rig fallback target '%s' does not exist or is not a Control Rig Blueprint"),
+						*Import.Target.AssetPath),
+					Import.Location);
+				return Result;
+			}
+			VerifiedLegacyExternalRigPaths.Add(Import.Target.AssetPath);
+		}
+	}
+
+	auto DiscardStagedAssets = [&Result]()
+	{
+		for (UObject* Asset : Result.StagedAssets)
+		{
+			if (!Asset) continue;
+			Asset->ClearFlags(RF_Public | RF_Standalone);
+		}
+		Result.StagedAssets.Reset();
+	};
+
+	FAnimBPImportContext AnimContext;
+	AnimContext.bStrictBundle = Options.Mode == EAnimLispBundleImportMode::Strict;
+	AnimContext.bAllowLegacyRigFallback = Options.Mode == EAnimLispBundleImportMode::Legacy;
+	AnimContext.LegacyExternalRigPaths = MoveTemp(VerifiedLegacyExternalRigPaths);
+	AnimContext.bTransient = true;
+	TArray<FAnimLispModuleId> StagedModuleIds;
+
+	// Every Rig must compile and pass its immediate semantic re-export gate before Anim staging starts.
+	for (const FAnimLispImportPlanEntry& Entry : Result.Plan)
+	{
+		if (Entry.ModuleId.Kind != EAnimLispModuleKind::Rig) continue;
+		if (!Entry.RigAST.IsValid())
+		{
+			Result.Diagnostics.Add(
+				EAnimLangDiagSeverity::Error,
+				EAnimLangDiagCategory::Import,
+				FString::Printf(TEXT("Rig compile gate has no parsed AST for '%s'"), *Entry.ModuleId.ToString()));
+			DiscardStagedAssets();
+			return Result;
+		}
+		FRigLangImportOptions RigOptions;
+		RigOptions.TargetPackage = FString::Printf(
+			TEXT("/Engine/Transient/AnimLispBundle_%s_%s"),
+			*FPaths::GetBaseFilename(Entry.ModuleId.AssetPath),
+			*FGuid::NewGuid().ToString(EGuidFormats::Digits));
+		RigOptions.bTransient = true;
+		RigOptions.bStrict = Options.Mode == EAnimLispBundleImportMode::Strict;
+		FRigLangImportResult RigResult = FRigLangImporter::Import(*Entry.RigAST, RigOptions);
+		Result.Diagnostics.Items.Append(RigResult.Diagnostics.Items);
+		if (!RigResult.Blueprint || !RigResult.bCompiled || RigResult.Diagnostics.HasErrors())
+		{
+			if (RigResult.Blueprint)
+			{
+				RigResult.Blueprint->ClearFlags(RF_Public | RF_Standalone);
+			}
+			Result.Diagnostics.Add(
+				EAnimLangDiagSeverity::Error,
+				EAnimLangDiagCategory::Import,
+				FString::Printf(
+					TEXT("Rig compile/diff gate failed for '%s'"),
+					*Entry.ModuleId.ToString()));
+			DiscardStagedAssets();
+			return Result;
+		}
+		Result.StagedAssets.Add(RigResult.Blueprint.Get());
+		StagedModuleIds.Add(Entry.ModuleId);
+		FAnimBPResolvedRig& ResolvedRig = AnimContext.ResolvedRigs.Add(Entry.ModuleId.AssetPath);
+		ResolvedRig.Blueprint = RigResult.Blueprint.Get();
+		ResolvedRig.Module = Entry.RigAST;
+	}
+
+	for (const FAnimLispImportPlanEntry& Entry : Result.Plan)
+	{
+		if (Entry.ModuleId.Kind != EAnimLispModuleKind::Anim) continue;
+		if (!Entry.AnimAST.IsValid())
+		{
+			Result.Diagnostics.Add(
+				EAnimLangDiagSeverity::Error,
+				EAnimLangDiagCategory::Import,
+				FString::Printf(TEXT("Anim staging has no parsed AST for '%s'"), *Entry.ModuleId.ToString()));
+			DiscardStagedAssets();
+			return Result;
+		}
+		FString AnimError;
+		UAnimBlueprint* AnimBlueprint = ImportFromAST(
+			ConstCastSharedPtr<FAnimGraphAST>(Entry.AnimAST),
+			Options.TargetRoot,
+			AnimContext,
+			&AnimError);
+		if (!AnimBlueprint)
+		{
+			Result.Diagnostics.Add(
+				EAnimLangDiagSeverity::Error,
+				EAnimLangDiagCategory::Import,
+				FString::Printf(TEXT("Anim compile gate failed for '%s': %s"),
+					*Entry.ModuleId.ToString(), *AnimError));
+			DiscardStagedAssets();
+			return Result;
+		}
+		TSharedPtr<FAnimGraphAST> ReexportedAnim = FAnimBPExporter::ExportToAST(AnimBlueprint);
+		const FString ExpectedCanonical = NormalizeComparableAnimEscapes(Entry.AnimAST->ToString());
+		const FString ActualCanonical = BuildComparableAnimCanonical(ReexportedAnim, *Entry.AnimAST);
+		const bool bRequireExactCanonical = Options.Mode == EAnimLispBundleImportMode::Strict
+			|| !IsLegacyAnimEntry(Entry);
+		if (!ReexportedAnim.IsValid() || (bRequireExactCanonical && ActualCanonical != ExpectedCanonical))
+		{
+			int32 Mismatch = 0;
+			const int32 CommonLength = FMath::Min(ActualCanonical.Len(), ExpectedCanonical.Len());
+			while (Mismatch < CommonLength && ActualCanonical[Mismatch] == ExpectedCanonical[Mismatch]) ++Mismatch;
+			Result.Diagnostics.Add(
+				EAnimLangDiagSeverity::Error,
+				EAnimLangDiagCategory::RoundTrip,
+				FString::Printf(
+					TEXT("Anim canonical re-export gate failed for '%s' at %d; expected '%s', actual '%s'"),
+					*Entry.ModuleId.ToString(), Mismatch,
+					*ExpectedCanonical.Mid(FMath::Max(0, Mismatch - 100), 200),
+					*ActualCanonical.Mid(FMath::Max(0, Mismatch - 100), 200)));
+			AnimBlueprint->ClearFlags(RF_Public | RF_Standalone);
+			DiscardStagedAssets();
+			return Result;
+		}
+		Result.StagedAssets.Add(AnimBlueprint);
+		StagedModuleIds.Add(Entry.ModuleId);
+	}
+
+	if (Options.bCommitPersistent)
+	{
+		TArray<TObjectPtr<UObject>> CommittedAssets;
+		FAnimBPImportContext CommittedContext;
+		CommittedContext.bStrictBundle = Options.Mode == EAnimLispBundleImportMode::Strict;
+		CommittedContext.bAllowLegacyRigFallback = Options.Mode == EAnimLispBundleImportMode::Legacy;
+		CommittedContext.LegacyExternalRigPaths = AnimContext.LegacyExternalRigPaths;
+		CommittedContext.bTransient = false;
+		TArray<FString> PersistentPackageNames;
+		PersistentTargetByModule.GenerateValueArray(PersistentPackageNames);
+		PersistentPackageNames.Sort();
+		TArray<FString> PersistentFilenames;
+		for (const FString& PackageName : PersistentPackageNames)
+		{
+			PersistentFilenames.Add(FPackageName::LongPackageNameToFilename(
+				PackageName, FPackageName::GetAssetPackageExtension()));
+		}
+		auto RollbackPersistentAssets = [&]()
+		{
+			TArray<UPackage*> PackagesToUnload;
+			for (const FString& PackageName : PersistentPackageNames)
+			{
+				UPackage* Package = FindPackage(nullptr, *PackageName);
+				if (!Package) continue;
+				Package->SetDirtyFlag(false);
+				PackagesToUnload.Add(Package);
+			}
+			CommittedContext.ResolvedRigs.Reset();
+			CommittedAssets.Reset();
+			FText UnloadError;
+			if (!PackagesToUnload.IsEmpty()
+				&& !UPackageTools::UnloadPackages(PackagesToUnload, UnloadError, true))
+			{
+				for (UPackage* Package : PackagesToUnload)
+				{
+					if (!Package || Package->HasAnyInternalFlags(EInternalObjectFlags::Garbage)) continue;
+					const FString OriginalName = Package->GetName();
+					const FString DiscardedName = FString::Printf(
+						TEXT("/Engine/Transient/AnimLispRollback_%s"),
+						*FGuid::NewGuid().ToString(EGuidFormats::Digits));
+					if (!Package->Rename(*DiscardedName, nullptr,
+						REN_DontCreateRedirectors | REN_NonTransactional | REN_DoNotDirty))
+					{
+						Result.Diagnostics.Add(EAnimLangDiagSeverity::Warning, EAnimLangDiagCategory::Import,
+							FString::Printf(TEXT("Rollback could not release in-memory package identity '%s': %s"),
+								*OriginalName, *UnloadError.ToString()));
+					}
+				}
+			}
+			for (const FString& Filename : PersistentFilenames)
+			{
+				IFileManager::Get().Delete(*Filename, false, true);
+			}
+		};
+		bool bPersistentBuildSucceeded = true;
+		for (const FAnimLispImportPlanEntry& Entry : Result.Plan)
+		{
+			if (Entry.ModuleId.Kind != EAnimLispModuleKind::Rig) continue;
+			const FString* TargetPackage = PersistentTargetByModule.Find(Entry.ModuleId.ToString());
+			if (!TargetPackage || !Entry.RigAST.IsValid()) { bPersistentBuildSucceeded = false; break; }
+			Result.bMutationStarted = true;
+			FRigLangImportOptions RigOptions;
+			RigOptions.TargetPackage = *TargetPackage;
+			RigOptions.bTransient = false;
+			RigOptions.bStrict = Options.Mode == EAnimLispBundleImportMode::Strict;
+			FRigLangImportResult RigResult = FRigLangImporter::Import(*Entry.RigAST, RigOptions);
+			Result.Diagnostics.Items.Append(RigResult.Diagnostics.Items);
+			if (!RigResult.Blueprint || !RigResult.bCompiled || RigResult.Diagnostics.HasErrors())
+			{
+				bPersistentBuildSucceeded = false;
+				break;
+			}
+			CommittedAssets.Add(RigResult.Blueprint.Get());
+			FAnimBPResolvedRig& Resolved = CommittedContext.ResolvedRigs.Add(Entry.ModuleId.AssetPath);
+			Resolved.Blueprint = RigResult.Blueprint.Get();
+			Resolved.Module = Entry.RigAST;
+		}
+		for (const FAnimLispImportPlanEntry& Entry : Result.Plan)
+		{
+			if (!bPersistentBuildSucceeded || Entry.ModuleId.Kind != EAnimLispModuleKind::Anim) continue;
+			Result.bMutationStarted = true;
+			FString AnimError;
+			UAnimBlueprint* AnimBlueprint = ImportFromAST(
+				ConstCastSharedPtr<FAnimGraphAST>(Entry.AnimAST), Options.TargetRoot, CommittedContext, &AnimError);
+			if (!AnimBlueprint)
+			{
+				Result.Diagnostics.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Import,
+					FString::Printf(TEXT("Persistent Anim build failed for '%s': %s"),
+						*Entry.ModuleId.ToString(), *AnimError));
+				bPersistentBuildSucceeded = false;
+				break;
+			}
+			TSharedPtr<FAnimGraphAST> ReexportedAnim = FAnimBPExporter::ExportToAST(AnimBlueprint);
+			const FString ExpectedCanonical = NormalizeComparableAnimEscapes(Entry.AnimAST->ToString());
+			const FString ActualCanonical = BuildComparableAnimCanonical(ReexportedAnim, *Entry.AnimAST);
+			const bool bRequireExactCanonical = Options.Mode == EAnimLispBundleImportMode::Strict
+				|| !IsLegacyAnimEntry(Entry);
+			if (!ReexportedAnim.IsValid() || (bRequireExactCanonical && ActualCanonical != ExpectedCanonical))
+			{
+				Result.Diagnostics.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::RoundTrip,
+					FString::Printf(TEXT("Persistent Anim canonical re-export gate failed for '%s'"),
+						*Entry.ModuleId.ToString()));
+				AnimBlueprint->ClearFlags(RF_Public | RF_Standalone);
+				bPersistentBuildSucceeded = false;
+				break;
+			}
+			CommittedAssets.Add(AnimBlueprint);
+		}
+		if (!bPersistentBuildSucceeded || CommittedAssets.Num() != Result.StagedAssets.Num())
+		{
+			RollbackPersistentAssets();
+			Result.Diagnostics.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Import,
+				TEXT("Persistent bundle rebuild failed before package save"));
+			DiscardStagedAssets();
+			return Result;
+		}
+		for (int32 SaveIndex = 0; SaveIndex < CommittedAssets.Num(); ++SaveIndex)
+		{
+			UObject* Committed = CommittedAssets[SaveIndex];
+			UPackage* Package = Committed ? Committed->GetOutermost() : nullptr;
+			const FString PackageName = Package ? Package->GetName() : FString();
+			const FString Filename = FPackageName::LongPackageNameToFilename(
+				PackageName, FPackageName::GetAssetPackageExtension());
+			FSavePackageArgs SaveArgs;
+			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+			SaveArgs.SaveFlags = SAVE_NoError;
+			bool bInjectSaveFailure = false;
+#if WITH_DEV_AUTOMATION_TESTS
+			bInjectSaveFailure = Options.TestFailSaveIndex == SaveIndex;
+#endif
+			if (bInjectSaveFailure || !Package || !UPackage::SavePackage(Package, Committed, *Filename, SaveArgs))
+			{
+				RollbackPersistentAssets();
+				Result.Diagnostics.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Import,
+					TEXT("Persistent bundle save failed; newly created package files were rolled back"));
+				DiscardStagedAssets();
+				return Result;
+			}
+		}
+		DiscardStagedAssets();
+		Result.StagedAssets = MoveTemp(CommittedAssets);
+	}
+
+	Result.bSuccess = true;
+	return Result;
+}
+
 UAnimBlueprint* FAnimBPImporter::Import(const FString& DSLCode, const FString& PackagePath, FString* OutError)
 {
 	// Parse the DSL
@@ -4668,6 +5281,16 @@ UAnimBlueprint* FAnimBPImporter::Import(const FString& DSLCode, const FString& P
 	return ImportFromAST(AST, PackagePath, OutError);
 }
 
+UAnimBlueprint* FAnimBPImporter::ImportFromAST(
+	const TSharedPtr<FAnimGraphAST>& AST,
+	const FString& PackagePath,
+	const FAnimBPImportContext& Context,
+	FString* OutError)
+{
+	TGuardValue<const FAnimBPImportContext*> ContextGuard(GActiveAnimImportContext, &Context);
+	return ImportFromAST(AST, PackagePath, OutError);
+}
+
 UAnimBlueprint* FAnimBPImporter::ImportFromAST(const TSharedPtr<FAnimGraphAST>& AST, const FString& PackagePath, FString* OutError)
 {
 	if (!AST.IsValid())
@@ -4685,7 +5308,11 @@ UAnimBlueprint* FAnimBPImporter::ImportFromAST(const TSharedPtr<FAnimGraphAST>& 
 	}
 	
 	// Create the blueprint
-	UAnimBlueprint* Blueprint = CreateEmptyBlueprint(PackagePath, AST->Name, AST->SkeletonPath);
+	UAnimBlueprint* Blueprint = CreateEmptyBlueprint(
+		PackagePath,
+		AST->Name,
+		AST->SkeletonPath,
+		GActiveAnimImportContext && GActiveAnimImportContext->bTransient);
 	if (!Blueprint)
 	{
 		if (OutError) *OutError = TEXT("Failed to create empty blueprint");

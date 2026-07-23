@@ -9,7 +9,7 @@
 
 /**
  * Commandlet to run round-trip validation on exported .animlang files
- * Usage: UnrealEditor.exe <project> -run=AnimBP2FPRoundTrip
+ * Usage: UnrealEditor.exe <project> -run=AnimBP2FPRoundTrip -Bundle=<workspace> [-Legacy]
  * 
  * Tests: Export → Parse → ToString → Compare
  * Reads from: <ProjectDir>/AnimLang/Exported/*.animlang

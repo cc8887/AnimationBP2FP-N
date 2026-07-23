@@ -9,7 +9,7 @@
 
 /**
  * Commandlet to import .animlang DSL files into Animation Blueprints
- * Usage: UnrealEditor.exe <project> -run=AnimBP2FPImport [-file=<path>] [-outdir=<package_path>]
+ * Usage: UnrealEditor.exe <project> -run=AnimBP2FPImport -Bundle=<workspace> [-OutDir=<package_path>] [-Legacy]
  * 
  * Options:
  *   -file=<path>        Import a specific .animlang file

@@ -151,4 +151,41 @@ bool FAnimLispCrossFileDiagnosticTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimLispLegacyRigObjectPathMigrationTest,
+	"AnimBP2FP.AnimLisp.Module.LegacyRigObjectPathMigration",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FAnimLispLegacyRigObjectPathMigrationTest::RunTest(const FString& Parameters)
+{
+	FAnimGraphAST SourceAST;
+	SourceAST.Name = TEXT("ABP_LegacyRigReference");
+	SourceAST.RootNode = MakeShared<FAnimNodeAST>();
+	SourceAST.RootNode->NodeType = TEXT("control-rig");
+	SourceAST.RootNode->NodeClassPath = TEXT("/Script/ControlRigDeveloper.AnimGraphNode_ControlRig");
+	SourceAST.RootNode->Coverage = EAnimNodeCoverage::Reflected;
+	SourceAST.RootNode->Properties.Add(
+		TEXT("control-rig-asset-reference"),
+		TEXT("\"(BlueprintRigClass=\\\"/Script/ControlRig.ControlRigBlueprintGeneratedClass'/Game/Blueprints/ControlRigs/CR_Biped_FootPlacement.CR_Biped_FootPlacement_C'\\\")\""));
+
+	TArray<FAnimLangParseError> Errors;
+	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(SourceAST.ToString(), Errors);
+	const bool bHasParseError = Errors.ContainsByPredicate(
+		[](const FAnimLangParseError& Error) { return !Error.bWarning; });
+	TestTrue(TEXT("Archived Control Rig reference parses without errors"), Parsed.IsValid() && !bHasParseError);
+	TestTrue(TEXT("Migration reports unresolved public Rig entry"), Errors.ContainsByPredicate(
+		[](const FAnimLangParseError& Error)
+		{
+			return Error.bWarning && Error.Code == TEXT("legacy-unresolved-rig-entry");
+		}));
+	if (!Parsed.IsValid() || Parsed->RigImports.Num() != 1) return false;
+
+	const FAnimLispImport& Import = Parsed->RigImports[0];
+	TestEqual(TEXT("Generated class reference normalizes to asset path"), Import.Target.AssetPath,
+		FString(TEXT("/Game/Blueprints/ControlRigs/CR_Biped_FootPlacement")));
+	TestTrue(TEXT("Parser marks only synthesized legacy imports"), Import.bLegacyExternal);
+	TestTrue(TEXT("Migrated node has a typed binding"), Parsed->RootNode->RigBinding.IsSet());
+	return true;
+}
+
 #endif
