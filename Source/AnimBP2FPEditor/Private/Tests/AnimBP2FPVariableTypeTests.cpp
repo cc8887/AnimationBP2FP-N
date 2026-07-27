@@ -54,9 +54,14 @@ bool FAnimBP2FPVariableExporterPreservesReadableTypes::RunTest(const FString& Pa
 	ArrayType.ContainerType = EPinContainerType::Array;
 	AddVariable(TEXT("Transforms"), ArrayType);
 
+	FEdGraphPinType GenericStructType;
+	GenericStructType.PinCategory = UEdGraphSchema_K2::PC_Struct;
+	GenericStructType.PinSubCategoryObject = TBaseStructure<FVector2D>::Get();
+	AddVariable(TEXT("CharacterProperties"), GenericStructType);
+
 	const TSharedPtr<FAnimGraphAST> AST = FAnimBPExporter::ExportToAST(Blueprint);
 	TestTrue(TEXT("AST exported"), AST.IsValid());
-	if (!AST.IsValid() || AST->Variables.Num() != 4)
+	if (!AST.IsValid() || AST->Variables.Num() != 5)
 	{
 		return false;
 	}
@@ -65,6 +70,7 @@ bool FAnimBP2FPVariableExporterPreservesReadableTypes::RunTest(const FString& Pa
 	TestEqual(TEXT("vector remains vector"), AST->Variables[1].Type, EPinType::Vector);
 	TestEqual(TEXT("object remains object"), AST->Variables[2].Type, EPinType::Object);
 	TestEqual(TEXT("array element remains transform"), AST->Variables[3].Type, EPinType::Transform);
+	TestEqual(TEXT("generic struct remains struct"), AST->Variables[4].Type, EPinType::Struct);
 	TestEqual(TEXT("object category preserved"), AST->Variables[2].PinCategory, UEdGraphSchema_K2::PC_Object.ToString());
 	TestEqual(TEXT("object class path preserved"), AST->Variables[2].TypeObjectPath, UObject::StaticClass()->GetPathName());
 	TestEqual(TEXT("array container preserved"), AST->Variables[3].ContainerType, FString(TEXT("array")));
@@ -72,15 +78,19 @@ bool FAnimBP2FPVariableExporterPreservesReadableTypes::RunTest(const FString& Pa
 	const FString DSL = AST->ToString();
 	TestFalse(TEXT("DSL omits redundant object pin category"), DSL.Contains(TEXT(":pin-category \"object\"")));
 	TestTrue(TEXT("DSL emits array container"), DSL.Contains(TEXT(":container array")));
+	TestTrue(TEXT("generic struct keeps required category"),
+		DSL.Contains(TEXT("(struct :name \"CharacterProperties\" :pin-category \"struct\"")));
 
 	TArray<FAnimLangParseError> Errors;
 	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(DSL, Errors);
 	TestTrue(TEXT("exact pin metadata parses"), Parsed.IsValid() && Errors.IsEmpty());
-	if (Parsed.IsValid() && Parsed->Variables.Num() == 4)
+	if (Parsed.IsValid() && Parsed->Variables.Num() == 5)
 	{
 		TestEqual(TEXT("object category round-trips"), Parsed->Variables[2].PinCategory, UEdGraphSchema_K2::PC_Object.ToString());
 		TestEqual(TEXT("object path round-trips"), Parsed->Variables[2].TypeObjectPath, UObject::StaticClass()->GetPathName());
 		TestEqual(TEXT("array container round-trips"), Parsed->Variables[3].ContainerType, FString(TEXT("array")));
+		TestEqual(TEXT("generic struct category round-trips"),
+			Parsed->Variables[4].PinCategory, UEdGraphSchema_K2::PC_Struct.ToString());
 	}
 	return true;
 }

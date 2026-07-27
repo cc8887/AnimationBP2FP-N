@@ -318,7 +318,18 @@ FString FVariableDef::ToString() const
 	}
 	
 	FString Result = FString::Printf(TEXT("(%s :name %s"), *TypeStr, *EscapeQuotedStringForDSL(Name));
-	if (!PinCategory.IsEmpty() && !PinCategory.Equals(TypeStr, ESearchCase::IgnoreCase))
+	FString ImpliedPinCategory;
+	switch (Type)
+	{
+	case EPinType::Int: ImpliedPinCategory = TEXT("int"); break;
+	case EPinType::Bool: ImpliedPinCategory = TEXT("bool"); break;
+	case EPinType::Name: ImpliedPinCategory = TEXT("name"); break;
+	case EPinType::Object: ImpliedPinCategory = TEXT("object"); break;
+	default: break;
+	}
+	if (!PinCategory.IsEmpty()
+		&& (ImpliedPinCategory.IsEmpty()
+			|| !PinCategory.Equals(ImpliedPinCategory, ESearchCase::IgnoreCase)))
 	{
 		Result += FString::Printf(TEXT(" :pin-category %s"), *EscapeQuotedStringForDSL(PinCategory));
 	}

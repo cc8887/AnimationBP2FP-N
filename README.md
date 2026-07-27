@@ -114,6 +114,22 @@ AnimBP2FP 提供以下 AI Skill，位于 `UE-Editor-MCPServer-Skills` 仓库的 
         :false-pose (sequence-player :name "Idle" :loop true))))
 ```
 
+### Map 变量
+
+Map 的变量头表示 key 类型，`:container map` 与 `:value-pin-category` 必须显式声明。空的或值为 `None` 的 key/value subcategory 不输出；空 Map 不输出 `:default`。非空默认值使用结构化、按 key 稳定排序的 `entry` 列表：
+
+```lisp
+(name :name "StateCounts"
+  :container map
+  :value-pin-category "int"
+  :default [
+    (entry :key "Idle" :value 1)
+    (entry :key "Run" :value 2)
+  ])
+```
+
+当 key 或 value 需要具体的 struct/class/object 类型时，分别使用 `:type-object` 或 `:value-type-object`。Importer 不从其他资产推断缺失类型；声明不完整、对象无法加载或多个表达式转换成相同 typed key 时，严格导入会失败。
+
 ## RigLang 共享模块
 
 `.riglang` 使用 canonical S-expression 表示 Control Rig 的 hierarchy、变量、RigVM 图、函数和公开入口。模块头携带稳定资产身份与语义 hash：
