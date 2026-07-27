@@ -1711,6 +1711,51 @@ bool FAnimBPImporter::BuildVariables(UAnimBlueprint* Blueprint, const TArray<FVa
 	return true;
 }
 
+bool FAnimBPImporter::ApplyMapVariableDefaults(
+	UAnimBlueprint* Blueprint,
+	const TArray<FVariableDef>& Variables,
+	FString& OutError)
+{
+	const bool bHasMapEntries = Variables.ContainsByPredicate([](const FVariableDef& Variable)
+	{
+		return Variable.ContainerType.Equals(TEXT("map"), ESearchCase::IgnoreCase)
+			&& !Variable.MapEntries.IsEmpty();
+	});
+	if (!bHasMapEntries)
+	{
+		return true;
+	}
+
+	FKismetEditorUtilities::CompileBlueprint(Blueprint,
+		EBlueprintCompileOptions::RegenerateSkeletonOnly
+		| EBlueprintCompileOptions::SkipGarbageCollection
+		| EBlueprintCompileOptions::SkipSave);
+
+	for (const FVariableDef& Variable : Variables)
+	{
+		if (!Variable.ContainerType.Equals(TEXT("map"), ESearchCase::IgnoreCase)
+			|| Variable.MapEntries.IsEmpty())
+		{
+			continue;
+		}
+
+		FString DefaultText;
+		if (!FAnimLangVariableCodec::BuildMapDefaultText(*Blueprint, Variable, DefaultText, OutError))
+		{
+			return false;
+		}
+		const int32 VariableIndex = FBlueprintEditorUtils::FindNewVariableIndex(
+			Blueprint, FName(*Variable.Name));
+		if (VariableIndex == INDEX_NONE)
+		{
+			OutError = FString::Printf(TEXT("map variable '%s' could not be found after skeleton compile"), *Variable.Name);
+			return false;
+		}
+		Blueprint->NewVariables[VariableIndex].DefaultValue = MoveTemp(DefaultText);
+	}
+	return true;
+}
+
 bool FAnimBPImporter::BuildGeneratedVars(UAnimBlueprint* Blueprint, const TArray<FHelperGraphDef>& Helpers)
 {
 	if (!Blueprint || Helpers.Num() == 0) return true;
@@ -4460,7 +4505,10 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 
 // ========== Graph Building ==========
 
-bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr<FAnimGraphAST>& AST)
+bool FAnimBPImporter::BuildAnimGraph(
+	UAnimBlueprint* Blueprint,
+	const TSharedPtr<FAnimGraphAST>& AST,
+	FString* OutError)
 {
 	if (!Blueprint || !AST.IsValid()) return false;
 	FImporterRigValidationContext RigValidationContext;
@@ -4552,6 +4600,13 @@ bool FAnimBPImporter::BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr
 	// Build variables and helper bridges
 	if (!BuildVariables(Blueprint, AST->Variables))
 	{
+		return false;
+	}
+	FString MapDefaultError;
+	if (!ApplyMapVariableDefaults(Blueprint, AST->Variables, MapDefaultError))
+	{
+		UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:VariableDefault] %s"), *MapDefaultError);
+		if (OutError) *OutError = MapDefaultError;
 		return false;
 	}
 	if (!BuildGeneratedVars(Blueprint, AST->HelperGraphs)
@@ -5214,9 +5269,10 @@ UAnimBlueprint* FAnimBPImporter::ImportFromAST(const TSharedPtr<FAnimGraphAST>& 
 	}
 	
 	// Build the animation graph
-	if (!BuildAnimGraph(Blueprint, AST))
+	FString BuildError;
+	if (!BuildAnimGraph(Blueprint, AST, &BuildError))
 	{
-		if (OutError) *OutError = TEXT("Failed to build animation graph");
+		if (OutError) *OutError = BuildError.IsEmpty() ? TEXT("Failed to build animation graph") : BuildError;
 		return nullptr;
 	}
 

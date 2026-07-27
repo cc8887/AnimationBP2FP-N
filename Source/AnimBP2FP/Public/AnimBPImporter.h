@@ -186,10 +186,17 @@ private:
 	// ========== Graph Building ==========
 
 	/** Build the entire animation graph from AST */
-	static bool BuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedPtr<FAnimGraphAST>& AST);
+	static bool BuildAnimGraph(
+		UAnimBlueprint* Blueprint,
+		const TSharedPtr<FAnimGraphAST>& AST,
+		FString* OutError = nullptr);
 
 	/** Build variables from AST definitions */
 	static bool BuildVariables(UAnimBlueprint* Blueprint, const TArray<FVariableDef>& Variables);
+	static bool ApplyMapVariableDefaults(
+		UAnimBlueprint* Blueprint,
+		const TArray<FVariableDef>& Variables,
+		FString& OutError);
 
 	/** Build generated bridge variables for helper graphs */
 	static bool BuildGeneratedVars(UAnimBlueprint* Blueprint, const TArray<FHelperGraphDef>& Helpers);

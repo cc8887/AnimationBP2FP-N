@@ -6,6 +6,7 @@
 #include "Animation/AnimBlueprintGeneratedClass.h"
 #include "Animation/AnimInstance.h"
 #include "AnimBPExporter.h"
+#include "AnimBPImporter.h"
 #include "AnimLangParser.h"
 #include "AnimLangDiffer.h"
 #include "AnimLangParser.h"
@@ -249,6 +250,96 @@ bool FAnimBP2FPVariableCompiledMapExport::RunTest(const FString& Parameters)
 	const FString FirstExport = AST->ToString();
 	const FString SecondExport = FAnimBPExporter::ExportToAST(Blueprint)->ToString();
 	TestEqual(TEXT("map export is deterministic"), SecondExport, FirstExport);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimBP2FPVariableMapDefaultImport,
+	"AnimBP2FP.VariableTypes.MapDefaultImport",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FAnimBP2FPVariableMapDefaultImport::RunTest(const FString& Parameters)
+{
+	auto ImportAndCheck = [this](const FString& Source, const FString& ExpectedValueCategory, const FString& ExpectedValue)
+	{
+		TArray<FAnimLangParseError> ParseErrors;
+		const TSharedPtr<FAnimGraphAST> AST = FAnimLangParser::Parse(Source, ParseErrors);
+		TestTrue(TEXT("map import fixture parses"), AST.IsValid() && ParseErrors.IsEmpty());
+		if (!AST.IsValid())
+		{
+			return false;
+		}
+
+		FAnimBPImportContext Context;
+		Context.bTransient = true;
+		FString ImportError;
+		UAnimBlueprint* Imported = FAnimBPImporter::ImportFromAST(
+			AST, TEXT("/Engine/Transient/AnimBP2FPMapImport"), Context, &ImportError);
+		TestNotNull(TEXT("map fixture imports"), Imported);
+		if (!Imported)
+		{
+			AddError(ImportError);
+			return false;
+		}
+
+		const TSharedPtr<FAnimGraphAST> Exported = FAnimBPExporter::ExportToAST(Imported);
+		TestTrue(TEXT("imported map re-exports"), Exported.IsValid());
+		if (!Exported.IsValid() || Exported->Variables.Num() != 1)
+		{
+			return false;
+		}
+		TestEqual(TEXT("value category round-trips"), Exported->Variables[0].ValuePinCategory, ExpectedValueCategory);
+		TestEqual(TEXT("one map entry round-trips"), Exported->Variables[0].MapEntries.Num(), 1);
+		if (Exported->Variables[0].MapEntries.Num() == 1)
+		{
+			TestEqual(TEXT("map value round-trips"), Exported->Variables[0].MapEntries[0].ValueExpression, ExpectedValue);
+		}
+		return true;
+	};
+
+	const FString IntSource = TEXT(R"ANIM(
+(anim-blueprint "ABP_MapIntImport"
+  :variables [
+    (name :name "Values" :container map :value-pin-category "int"
+      :default [(entry :key "Idle" :value 7)])
+  ])
+)ANIM");
+	ImportAndCheck(IntSource, UEdGraphSchema_K2::PC_Int.ToString(), TEXT("7"));
+
+	const FString ObjectSource = TEXT(R"ANIM(
+(anim-blueprint "ABP_MapObjectImport"
+  :variables [
+    (name :name "Values" :container map :value-pin-category "object"
+      :value-type-object (asset "/Script/CoreUObject.Object")
+      :default [(entry :key "Class" :value (asset "/Script/CoreUObject.Object"))])
+  ])
+)ANIM");
+	ImportAndCheck(
+		ObjectSource,
+		UEdGraphSchema_K2::PC_Object.ToString(),
+		TEXT("(asset \"/Script/CoreUObject.Object\")"));
+
+	const FString DuplicateSource = TEXT(R"ANIM(
+(anim-blueprint "ABP_MapDuplicateImport"
+  :variables [
+    (name :name "Values" :container map :value-pin-category "int"
+      :default [
+        (entry :key "Idle" :value 1)
+        (entry :key (ue-value "Idle") :value 2)
+      ])
+  ])
+)ANIM");
+	TArray<FAnimLangParseError> DuplicateParseErrors;
+	const TSharedPtr<FAnimGraphAST> DuplicateAST = FAnimLangParser::Parse(DuplicateSource, DuplicateParseErrors);
+	TestTrue(TEXT("typed duplicate fixture parses"), DuplicateAST.IsValid() && DuplicateParseErrors.IsEmpty());
+	FAnimBPImportContext Context;
+	Context.bTransient = true;
+	FString DuplicateError;
+	AddExpectedError(TEXT("duplicate typed key"), EAutomationExpectedErrorFlags::Contains, 1);
+	UAnimBlueprint* DuplicateResult = FAnimBPImporter::ImportFromAST(
+		DuplicateAST, TEXT("/Engine/Transient/AnimBP2FPMapDuplicate"), Context, &DuplicateError);
+	TestNull(TEXT("typed duplicate map import fails atomically"), DuplicateResult);
+	TestTrue(TEXT("duplicate error is explicit"), DuplicateError.Contains(TEXT("duplicate typed key")));
 	return true;
 }
 

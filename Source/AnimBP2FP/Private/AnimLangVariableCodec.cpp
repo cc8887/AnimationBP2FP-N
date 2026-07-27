@@ -7,6 +7,7 @@
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
 #include "EdGraphSchema_K2.h"
+#include "Misc/ScopeExit.h"
 #include "UObject/UnrealType.h"
 
 namespace
@@ -73,6 +74,51 @@ namespace
 		Escaped.ReplaceInline(TEXT("\n"), TEXT("\\n"));
 		Escaped.ReplaceInline(TEXT("\r"), TEXT("\\r"));
 		return FString::Printf(TEXT("\"%s\""), *Escaped);
+	}
+
+	bool UnquoteDSLString(const FString& Expression, FString& OutValue)
+	{
+		const FString Trimmed = Expression.TrimStartAndEnd();
+		if (Trimmed.Len() < 2 || Trimmed[0] != TCHAR('"') || Trimmed[Trimmed.Len() - 1] != TCHAR('"'))
+		{
+			return false;
+		}
+
+		OutValue.Reset();
+		for (int32 Index = 1; Index < Trimmed.Len() - 1; ++Index)
+		{
+			TCHAR Character = Trimmed[Index];
+			if (Character != TCHAR('\\'))
+			{
+				OutValue.AppendChar(Character);
+				continue;
+			}
+			if (++Index >= Trimmed.Len() - 1)
+			{
+				return false;
+			}
+			switch (Trimmed[Index])
+			{
+			case TCHAR('\\'): OutValue.AppendChar(TCHAR('\\')); break;
+			case TCHAR('"'): OutValue.AppendChar(TCHAR('"')); break;
+			case TCHAR('n'): OutValue.AppendChar(TCHAR('\n')); break;
+			case TCHAR('r'): OutValue.AppendChar(TCHAR('\r')); break;
+			case TCHAR('t'): OutValue.AppendChar(TCHAR('\t')); break;
+			default: return false;
+			}
+		}
+		return true;
+	}
+
+	bool UnwrapDSLCall(const FString& Expression, const TCHAR* FormName, FString& OutPayload)
+	{
+		const FString Trimmed = Expression.TrimStartAndEnd();
+		const FString Prefix = FString::Printf(TEXT("(%s "), FormName);
+		if (!Trimmed.StartsWith(Prefix) || !Trimmed.EndsWith(TEXT(")")))
+		{
+			return false;
+		}
+		return UnquoteDSLString(Trimmed.Mid(Prefix.Len(), Trimmed.Len() - Prefix.Len() - 1), OutPayload);
 	}
 
 	bool LoadTypeObject(
@@ -284,6 +330,135 @@ bool FAnimLangVariableCodec::ExportMapEntries(
 			: Left.KeyExpression < Right.KeyExpression;
 	});
 	InOutVariable.bHasStructuredMapDefault = !InOutVariable.MapEntries.IsEmpty();
+	return true;
+}
+
+bool FAnimLangVariableCodec::ImportPropertyExpression(
+	const FProperty& Property,
+	const FString& Expression,
+	void* Value,
+	FString& OutError)
+{
+	const FString Trimmed = Expression.TrimStartAndEnd();
+	if (const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(&Property))
+	{
+		if (Trimmed == TEXT("nil"))
+		{
+			ObjectProperty->SetObjectPropertyValue(Value, nullptr);
+			return true;
+		}
+		FString ObjectPath;
+		if (!UnwrapDSLCall(Trimmed, TEXT("asset"), ObjectPath))
+		{
+			OutError = FString::Printf(TEXT("object expression '%s' must be nil or (asset \"...\")"), *Trimmed);
+			return false;
+		}
+		UObject* Object = StaticLoadObject(ObjectProperty->PropertyClass, nullptr, *ObjectPath);
+		if (!Object)
+		{
+			OutError = FString::Printf(
+				TEXT("object '%s' could not be loaded as '%s'"),
+				*ObjectPath,
+				*ObjectProperty->PropertyClass->GetPathName());
+			return false;
+		}
+		ObjectProperty->SetObjectPropertyValue(Value, Object);
+		return true;
+	}
+
+	FString ImportText = Trimmed;
+	FString Unwrapped;
+	if (UnwrapDSLCall(Trimmed, TEXT("ue-value"), Unwrapped))
+	{
+		ImportText = MoveTemp(Unwrapped);
+	}
+	else if (Property.IsA<FNameProperty>() || Property.IsA<FStrProperty>())
+	{
+		if (!UnquoteDSLString(Trimmed, Unwrapped))
+		{
+			OutError = FString::Printf(TEXT("string-like expression '%s' must be quoted"), *Trimmed);
+			return false;
+		}
+		ImportText = MoveTemp(Unwrapped);
+	}
+	else if (Property.IsA<FBoolProperty>())
+	{
+		if (Trimmed.Equals(TEXT("true"), ESearchCase::IgnoreCase)) ImportText = TEXT("True");
+		else if (Trimmed.Equals(TEXT("false"), ESearchCase::IgnoreCase)) ImportText = TEXT("False");
+	}
+
+	const TCHAR* End = Property.ImportText_Direct(*ImportText, Value, nullptr, PPF_None);
+	if (!End || !FString(End).TrimStartAndEnd().IsEmpty())
+	{
+		OutError = FString::Printf(
+			TEXT("expression '%s' is invalid for property type '%s'"),
+			*Trimmed,
+			*Property.GetClass()->GetName());
+		return false;
+	}
+	return true;
+}
+
+bool FAnimLangVariableCodec::BuildMapDefaultText(
+	const UAnimBlueprint& Blueprint,
+	const FVariableDef& Variable,
+	FString& OutDefaultText,
+	FString& OutError)
+{
+	OutDefaultText.Reset();
+	OutError.Reset();
+	const UClass* PropertyOwner = Blueprint.SkeletonGeneratedClass
+		? Blueprint.SkeletonGeneratedClass.Get()
+		: Blueprint.GeneratedClass.Get();
+	const FMapProperty* MapProperty = PropertyOwner
+		? FindFProperty<FMapProperty>(PropertyOwner, FName(*Variable.Name))
+		: nullptr;
+	if (!MapProperty)
+	{
+		OutError = FString::Printf(TEXT("generated map property '%s' could not be found"), *Variable.Name);
+		return false;
+	}
+
+	void* MapStorage = FMemory::Malloc(MapProperty->GetSize(), MapProperty->GetMinAlignment());
+	MapProperty->InitializeValue(MapStorage);
+	ON_SCOPE_EXIT
+	{
+		MapProperty->DestroyValue(MapStorage);
+		FMemory::Free(MapStorage);
+	};
+
+	FScriptMapHelper MapHelper(MapProperty, MapStorage);
+	for (const FMapEntryDef& Entry : Variable.MapEntries)
+	{
+		const int32 NewIndex = MapHelper.AddDefaultValue_Invalid_NeedsRehash();
+		if (!ImportPropertyExpression(*MapProperty->KeyProp, Entry.KeyExpression, MapHelper.GetKeyPtr(NewIndex), OutError))
+		{
+			OutError = FString::Printf(TEXT("map variable '%s' key: %s"), *Variable.Name, *OutError);
+			return false;
+		}
+		if (!ImportPropertyExpression(*MapProperty->ValueProp, Entry.ValueExpression, MapHelper.GetValuePtr(NewIndex), OutError))
+		{
+			OutError = FString::Printf(TEXT("map variable '%s' value: %s"), *Variable.Name, *OutError);
+			return false;
+		}
+
+		for (int32 ExistingIndex = 0; ExistingIndex < NewIndex; ++ExistingIndex)
+		{
+			if (MapHelper.IsValidIndex(ExistingIndex)
+				&& MapProperty->KeyProp->Identical(
+					MapHelper.GetKeyPtr(ExistingIndex), MapHelper.GetKeyPtr(NewIndex)))
+			{
+				OutError = FString::Printf(
+					TEXT("map variable '%s' has a duplicate typed key: %s"),
+					*Variable.Name,
+					*Entry.KeyExpression);
+				return false;
+			}
+		}
+	}
+
+	MapHelper.Rehash();
+	MapProperty->ExportTextItem_Direct(OutDefaultText, MapStorage, nullptr, nullptr, PPF_None);
 	return true;
 }
 
