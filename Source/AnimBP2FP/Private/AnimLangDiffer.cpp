@@ -213,6 +213,10 @@ void FAnimLangDiffer::DiffVariables(
 				|| OldVar.PinSubCategory != NewVar.PinSubCategory
 				|| OldVar.TypeObjectPath != NewVar.TypeObjectPath
 				|| OldVar.ContainerType != NewVar.ContainerType
+				|| OldVar.ValuePinCategory != NewVar.ValuePinCategory
+				|| OldVar.ValuePinSubCategory != NewVar.ValuePinSubCategory
+				|| OldVar.ValueTypeObjectPath != NewVar.ValueTypeObjectPath
+				|| OldVar.MapEntries != NewVar.MapEntries
 				|| OldVar.bIsReference != NewVar.bIsReference
 				|| OldVar.bIsConst != NewVar.bIsConst
 				|| OldVar.bIsWeakPointer != NewVar.bIsWeakPointer

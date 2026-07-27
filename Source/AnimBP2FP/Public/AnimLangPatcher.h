@@ -72,6 +72,10 @@ private:
 	// Apply individual diff operations
 	static bool ApplyPropertyChange(UAnimBlueprint* Blueprint, const FAnimLangDiffEntry& Entry, TArray<FString>& OutWarnings);
 	static bool ApplyVariableChange(UAnimBlueprint* Blueprint, const FAnimLangDiffEntry& Entry, const TSharedPtr<FAnimGraphAST>& NewAST, TArray<FString>& OutWarnings);
+	static bool ApplyMapVariableDefaults(
+		UAnimBlueprint* Blueprint,
+		const TArray<FVariableDef>& Variables,
+		FString& OutError);
 	static bool ApplyNodeStructuralChange(UAnimBlueprint* Blueprint, const FAnimLangDiffEntry& Entry, const TSharedPtr<FAnimGraphAST>& NewAST, TArray<FString>& OutWarnings);
 	
 	// Find an animation graph node by path

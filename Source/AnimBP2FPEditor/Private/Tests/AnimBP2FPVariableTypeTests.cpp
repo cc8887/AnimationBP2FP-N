@@ -9,6 +9,7 @@
 #include "AnimBPImporter.h"
 #include "AnimLangParser.h"
 #include "AnimLangDiffer.h"
+#include "AnimLangPatcher.h"
 #include "AnimLangParser.h"
 #include "AnimLangVariableCodec.h"
 #include "EdGraphSchema_K2.h"
@@ -340,6 +341,99 @@ bool FAnimBP2FPVariableMapDefaultImport::RunTest(const FString& Parameters)
 		DuplicateAST, TEXT("/Engine/Transient/AnimBP2FPMapDuplicate"), Context, &DuplicateError);
 	TestNull(TEXT("typed duplicate map import fails atomically"), DuplicateResult);
 	TestTrue(TEXT("duplicate error is explicit"), DuplicateError.Contains(TEXT("duplicate typed key")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimBP2FPVariableMapDiffAndPatch,
+	"AnimBP2FP.VariableTypes.MapDiffAndPatch",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FAnimBP2FPVariableMapDiffAndPatch::RunTest(const FString& Parameters)
+{
+	FVariableDef BaseVariable;
+	BaseVariable.Name = TEXT("Values");
+	BaseVariable.Type = EPinType::Name;
+	BaseVariable.PinCategory = UEdGraphSchema_K2::PC_Name.ToString();
+	BaseVariable.ContainerType = TEXT("map");
+	BaseVariable.ValuePinCategory = UEdGraphSchema_K2::PC_Int.ToString();
+	BaseVariable.MapEntries.Add({TEXT("\"Idle\""), TEXT("1")});
+
+	auto DetectsVariableChange = [&BaseVariable](TFunctionRef<void(FVariableDef&)> Mutate)
+	{
+		TSharedPtr<FAnimGraphAST> OldAST = MakeShared<FAnimGraphAST>();
+		TSharedPtr<FAnimGraphAST> NewAST = MakeShared<FAnimGraphAST>();
+		OldAST->Variables.Add(BaseVariable);
+		FVariableDef Changed = BaseVariable;
+		Mutate(Changed);
+		NewAST->Variables.Add(MoveTemp(Changed));
+		const FAnimLangDiffResult Diff = FAnimLangDiffer::Diff(OldAST, NewAST);
+		return Diff.Entries.ContainsByPredicate([](const FAnimLangDiffEntry& Entry)
+		{
+			return Entry.Op == EAnimLangDiffOp::VariableChanged;
+		});
+	};
+
+	TestTrue(TEXT("value category change is detected"), DetectsVariableChange([](FVariableDef& Variable)
+	{
+		Variable.ValuePinCategory = UEdGraphSchema_K2::PC_Object.ToString();
+	}));
+	TestTrue(TEXT("value type object change is detected"), DetectsVariableChange([](FVariableDef& Variable)
+	{
+		Variable.ValueTypeObjectPath = UObject::StaticClass()->GetPathName();
+	}));
+	TestTrue(TEXT("map entry addition is detected"), DetectsVariableChange([](FVariableDef& Variable)
+	{
+		Variable.MapEntries.Add({TEXT("\"Run\""), TEXT("2")});
+	}));
+	TestTrue(TEXT("map entry removal is detected"), DetectsVariableChange([](FVariableDef& Variable)
+	{
+		Variable.MapEntries.Reset();
+	}));
+	TestTrue(TEXT("map entry value change is detected"), DetectsVariableChange([](FVariableDef& Variable)
+	{
+		Variable.MapEntries[0].ValueExpression = TEXT("9");
+	}));
+
+	const FString Source = TEXT(R"ANIM(
+(anim-blueprint "ABP_MapPatch"
+  :variables [
+    (name :name "Values" :container map :value-pin-category "int"
+      :default [(entry :key "Idle" :value 1)])
+  ])
+)ANIM");
+	TArray<FAnimLangParseError> ParseErrors;
+	const TSharedPtr<FAnimGraphAST> SourceAST = FAnimLangParser::Parse(Source, ParseErrors);
+	FAnimBPImportContext Context;
+	Context.bTransient = true;
+	FString ImportError;
+	UAnimBlueprint* Blueprint = FAnimBPImporter::ImportFromAST(
+		SourceAST, TEXT("/Engine/Transient/AnimBP2FPMapPatch"), Context, &ImportError);
+	TestNotNull(TEXT("map patch fixture imports"), Blueprint);
+	if (!Blueprint)
+	{
+		return false;
+	}
+
+	TSharedPtr<FAnimGraphAST> EditedAST = FAnimBPExporter::ExportToAST(Blueprint);
+	TestTrue(TEXT("map patch fixture exports"), EditedAST.IsValid());
+	if (!EditedAST.IsValid())
+	{
+		return false;
+	}
+	EditedAST->Variables[0].MapEntries[0].ValueExpression = TEXT("9");
+	const FAnimLangPatchResult PatchResult = FAnimLangPatcher::IncrementalUpdate(Blueprint, EditedAST->ToString());
+	TestTrue(TEXT("map entry patch succeeds"), PatchResult.bSuccess);
+
+	const TSharedPtr<FAnimGraphAST> PatchedAST = FAnimBPExporter::ExportToAST(Blueprint);
+	TestTrue(TEXT("patched map re-exports"), PatchedAST.IsValid());
+	if (PatchedAST.IsValid() && PatchedAST->Variables.Num() == 1
+		&& PatchedAST->Variables[0].MapEntries.Num() == 1)
+	{
+		TestEqual(TEXT("patched map value persists"),
+			PatchedAST->Variables[0].MapEntries[0].ValueExpression,
+			FString(TEXT("9")));
+	}
 	return true;
 }
 

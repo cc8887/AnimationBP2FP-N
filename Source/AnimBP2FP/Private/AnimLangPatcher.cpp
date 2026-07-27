@@ -193,6 +193,15 @@ FAnimLangPatchResult FAnimLangPatcher::Apply(
 	{
 		Result.bSuccess = false;
 	}
+	else
+	{
+		FString MapDefaultError;
+		if (!ApplyMapVariableDefaults(Blueprint, NewAST->Variables, MapDefaultError))
+		{
+			Result.bSuccess = false;
+			Result.FailedOps.Add(FString::Printf(TEXT("Map variable defaults: %s"), *MapDefaultError));
+		}
+	}
 	
 	return Result;
 }
@@ -364,6 +373,50 @@ bool FAnimLangPatcher::ApplyVariableChange(
 	}
 	
 	return false;
+}
+
+bool FAnimLangPatcher::ApplyMapVariableDefaults(
+	UAnimBlueprint* Blueprint,
+	const TArray<FVariableDef>& Variables,
+	FString& OutError)
+{
+	const bool bHasMapEntries = Variables.ContainsByPredicate([](const FVariableDef& Variable)
+	{
+		return Variable.ContainerType.Equals(TEXT("map"), ESearchCase::IgnoreCase)
+			&& !Variable.MapEntries.IsEmpty();
+	});
+	if (!bHasMapEntries)
+	{
+		return true;
+	}
+
+	FKismetEditorUtilities::CompileBlueprint(Blueprint,
+		EBlueprintCompileOptions::RegenerateSkeletonOnly
+		| EBlueprintCompileOptions::SkipGarbageCollection
+		| EBlueprintCompileOptions::SkipSave);
+	for (const FVariableDef& Variable : Variables)
+	{
+		if (!Variable.ContainerType.Equals(TEXT("map"), ESearchCase::IgnoreCase)
+			|| Variable.MapEntries.IsEmpty())
+		{
+			continue;
+		}
+
+		FString DefaultText;
+		if (!FAnimLangVariableCodec::BuildMapDefaultText(*Blueprint, Variable, DefaultText, OutError))
+		{
+			return false;
+		}
+		const int32 VariableIndex = FBlueprintEditorUtils::FindNewVariableIndex(
+			Blueprint, FName(*Variable.Name));
+		if (VariableIndex == INDEX_NONE)
+		{
+			OutError = FString::Printf(TEXT("map variable '%s' could not be found after skeleton compile"), *Variable.Name);
+			return false;
+		}
+		Blueprint->NewVariables[VariableIndex].DefaultValue = MoveTemp(DefaultText);
+	}
+	return true;
 }
 
 // ========== Structural Change ==========
