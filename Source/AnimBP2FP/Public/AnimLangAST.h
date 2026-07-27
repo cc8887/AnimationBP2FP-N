@@ -184,6 +184,18 @@ struct ANIMBP2FP_API FStateMachineAST
 /**
  * 变量定义
  */
+struct ANIMBP2FP_API FMapEntryDef
+{
+	FString KeyExpression;
+	FString ValueExpression;
+
+	bool operator==(const FMapEntryDef& Other) const
+	{
+		return KeyExpression == Other.KeyExpression
+			&& ValueExpression == Other.ValueExpression;
+	}
+};
+
 struct ANIMBP2FP_API FVariableDef
 {
 	FString Name;
@@ -194,6 +206,11 @@ struct ANIMBP2FP_API FVariableDef
 	FString PinCategory;     // Exact UE FEdGraphPinType category (authoritative when non-empty)
 	FString PinSubCategory;
 	FString ContainerType;   // none, array, set, or map
+	FString ValuePinCategory;
+	FString ValuePinSubCategory;
+	FString ValueTypeObjectPath;
+	TArray<FMapEntryDef> MapEntries;
+	bool bHasStructuredMapDefault = false;
 	bool bIsReference = false;
 	bool bIsConst = false;
 	bool bIsWeakPointer = false;

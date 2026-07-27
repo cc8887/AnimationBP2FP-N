@@ -34,6 +34,18 @@ static EPinType ParsePinTypeFromText(const FString& TypeText)
 	return EPinType::Unknown;
 }
 
+static FString CanonicalPinCategoryForType(EPinType Type)
+{
+	switch (Type)
+	{
+	case EPinType::Int: return TEXT("int");
+	case EPinType::Bool: return TEXT("bool");
+	case EPinType::Name: return TEXT("name");
+	case EPinType::Object: return TEXT("object");
+	default: return FString();
+	}
+}
+
 static FString UnquoteAnimLangValue(FString Value)
 {
 	if (Value.StartsWith(TEXT("\"")) && Value.EndsWith(TEXT("\"")) && Value.Len() >= 2)
@@ -544,6 +556,7 @@ FVariableDef FAnimLangParser::ParseVarDef()
 	if (Check(EAnimLangTokenType::Identifier))
 	{
 		Var.Type = ParsePinTypeFromText(Advance().Value);
+		Var.PinCategory = CanonicalPinCategoryForType(Var.Type);
 	}
 	else
 	{
@@ -588,6 +601,32 @@ FVariableDef FAnimLangParser::ParseVarDef()
 				Var.ContainerType = UnquoteAnimLangValue(ParseValue());
 				continue;
 			}
+			if (FieldName == TEXT("value-pin-category"))
+			{
+				Var.ValuePinCategory = UnquoteAnimLangValue(ParseValue());
+				continue;
+			}
+			if (FieldName == TEXT("value-pin-subcategory"))
+			{
+				Var.ValuePinSubCategory = UnquoteAnimLangValue(ParseValue());
+				continue;
+			}
+			if (FieldName == TEXT("value-type-object"))
+			{
+				FString TypeObjectValue = ParseValue();
+				if (TypeObjectValue.StartsWith(TEXT("(asset ")))
+				{
+					TypeObjectValue.RemoveFromStart(TEXT("(asset "));
+					TypeObjectValue.RemoveFromEnd(TEXT(")"));
+				}
+				Var.ValueTypeObjectPath = UnquoteAnimLangValue(TypeObjectValue);
+				continue;
+			}
+			if (FieldName == TEXT("default"))
+			{
+				ParseMapDefault(Var);
+				continue;
+			}
 			if (FieldName == TEXT("reference") || FieldName == TEXT("const")
 				|| FieldName == TEXT("weak") || FieldName == TEXT("object-wrapper"))
 			{
@@ -624,7 +663,126 @@ FVariableDef FAnimLangParser::ParseVarDef()
 		Synchronize();
 		Match(EAnimLangTokenType::RParen);
 	}
+	ValidateVariableDefinition(Var);
 	return Var;
+}
+
+bool FAnimLangParser::ParseMapDefault(FVariableDef& Var)
+{
+	Var.bHasStructuredMapDefault = true;
+	if (!Expect(EAnimLangTokenType::LBracket, TEXT("map default")))
+	{
+		return false;
+	}
+
+	TSet<FString> Keys;
+	while (!IsAtEnd() && !Check(EAnimLangTokenType::RBracket))
+	{
+		const int32 StartPos = Pos;
+		FMapEntryDef Entry;
+		if (ParseMapEntry(Entry))
+		{
+			if (Keys.Contains(Entry.KeyExpression))
+			{
+				Error(FString::Printf(TEXT("Duplicate map key %s"), *Entry.KeyExpression));
+			}
+			else
+			{
+				Keys.Add(Entry.KeyExpression);
+				Var.MapEntries.Add(MoveTemp(Entry));
+			}
+		}
+		if (Pos == StartPos)
+		{
+			Error(TEXT("Map entry parser made no progress"));
+			Advance();
+		}
+	}
+	const bool bClosed = Expect(EAnimLangTokenType::RBracket, TEXT("map default"));
+	Var.MapEntries.Sort([](const FMapEntryDef& A, const FMapEntryDef& B)
+	{
+		const int32 KeyOrder = A.KeyExpression.Compare(B.KeyExpression, ESearchCase::CaseSensitive);
+		return KeyOrder == 0
+			? A.ValueExpression.Compare(B.ValueExpression, ESearchCase::CaseSensitive) < 0
+			: KeyOrder < 0;
+	});
+	return bClosed;
+}
+
+bool FAnimLangParser::ParseMapEntry(FMapEntryDef& OutEntry)
+{
+	if (!Expect(EAnimLangTokenType::LParen, TEXT("map entry")))
+	{
+		return false;
+	}
+	if (!CheckValue(EAnimLangTokenType::Identifier, TEXT("entry")))
+	{
+		Error(TEXT("Expected 'entry' in map default"));
+		Synchronize();
+		Match(EAnimLangTokenType::RParen);
+		return false;
+	}
+	Advance();
+
+	bool bHasKey = false;
+	bool bHasValue = false;
+	while (!IsAtEnd() && !Check(EAnimLangTokenType::RParen))
+	{
+		if (!Check(EAnimLangTokenType::Keyword))
+		{
+			Error(TEXT("Expected :key or :value in map entry"));
+			if (IsValueStart()) ParseRawExpressionText(); else Advance();
+			continue;
+		}
+		const FString Field = Advance().Value;
+		if (Field == TEXT("key"))
+		{
+			OutEntry.KeyExpression = ParseRawExpressionText();
+			bHasKey = !OutEntry.KeyExpression.IsEmpty();
+		}
+		else if (Field == TEXT("value"))
+		{
+			OutEntry.ValueExpression = ParseRawExpressionText();
+			bHasValue = !OutEntry.ValueExpression.IsEmpty();
+		}
+		else
+		{
+			Error(FString::Printf(TEXT("Unknown map entry field :%s"), *Field));
+			if (IsValueStart()) ParseRawExpressionText();
+		}
+	}
+	Expect(EAnimLangTokenType::RParen, TEXT("map entry"));
+	if (!bHasKey) Error(TEXT("Map entry requires :key"));
+	if (!bHasValue) Error(TEXT("Map entry requires :value"));
+	return bHasKey && bHasValue;
+}
+
+void FAnimLangParser::ValidateVariableDefinition(FVariableDef& Var)
+{
+	const bool bIsMap = Var.ContainerType.Equals(TEXT("map"), ESearchCase::IgnoreCase);
+	if (Var.PinSubCategory.IsEmpty())
+	{
+		Var.PinSubCategory = TEXT("None");
+	}
+	if (bIsMap && Var.ValuePinSubCategory.IsEmpty())
+	{
+		Var.ValuePinSubCategory = TEXT("None");
+	}
+	const bool bHasValueType = !Var.ValuePinCategory.IsEmpty()
+		|| !Var.ValuePinSubCategory.IsEmpty()
+		|| !Var.ValueTypeObjectPath.IsEmpty();
+	if (bIsMap && Var.ValuePinCategory.IsEmpty())
+	{
+		Error(FString::Printf(TEXT("Map variable '%s' requires :value-pin-category"), *Var.Name));
+	}
+	if (!bIsMap && bHasValueType)
+	{
+		Error(FString::Printf(TEXT("Non-map variable '%s' cannot declare map value type fields"), *Var.Name));
+	}
+	if (!bIsMap && Var.bHasStructuredMapDefault)
+	{
+		Error(FString::Printf(TEXT("Non-map variable '%s' cannot declare a structured map :default"), *Var.Name));
+	}
 }
 
 void FAnimLangParser::ParseHelpers(TSharedPtr<FAnimGraphAST> AST)

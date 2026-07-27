@@ -318,11 +318,11 @@ FString FVariableDef::ToString() const
 	}
 	
 	FString Result = FString::Printf(TEXT("(%s :name %s"), *TypeStr, *EscapeQuotedStringForDSL(Name));
-	if (!PinCategory.IsEmpty())
+	if (!PinCategory.IsEmpty() && !PinCategory.Equals(TypeStr, ESearchCase::IgnoreCase))
 	{
 		Result += FString::Printf(TEXT(" :pin-category %s"), *EscapeQuotedStringForDSL(PinCategory));
 	}
-	if (!PinSubCategory.IsEmpty())
+	if (!PinSubCategory.IsEmpty() && !PinSubCategory.Equals(TEXT("None"), ESearchCase::IgnoreCase))
 	{
 		Result += FString::Printf(TEXT(" :pin-subcategory %s"), *EscapeQuotedStringForDSL(PinSubCategory));
 	}
@@ -334,11 +334,49 @@ FString FVariableDef::ToString() const
 	{
 		Result += FString::Printf(TEXT(" :container %s"), *ContainerType.ToLower());
 	}
+	const bool bIsMap = ContainerType.Equals(TEXT("map"), ESearchCase::IgnoreCase);
+	if (bIsMap)
+	{
+		if (!ValuePinCategory.IsEmpty())
+		{
+			Result += FString::Printf(TEXT(" :value-pin-category %s"),
+				*EscapeQuotedStringForDSL(ValuePinCategory));
+		}
+		if (!ValuePinSubCategory.IsEmpty()
+			&& !ValuePinSubCategory.Equals(TEXT("None"), ESearchCase::IgnoreCase))
+		{
+			Result += FString::Printf(TEXT(" :value-pin-subcategory %s"),
+				*EscapeQuotedStringForDSL(ValuePinSubCategory));
+		}
+		if (!ValueTypeObjectPath.IsEmpty())
+		{
+			Result += FString::Printf(TEXT(" :value-type-object (asset %s)"),
+				*EscapeQuotedStringForDSL(ValueTypeObjectPath));
+		}
+	}
 	if (bIsReference) Result += TEXT(" :reference true");
 	if (bIsConst) Result += TEXT(" :const true");
 	if (bIsWeakPointer) Result += TEXT(" :weak true");
 	if (bIsUObjectWrapper) Result += TEXT(" :object-wrapper true");
-	if (!DefaultValue.IsEmpty())
+	if (bIsMap && !MapEntries.IsEmpty())
+	{
+		TArray<FMapEntryDef> SortedEntries = MapEntries;
+		SortedEntries.Sort([](const FMapEntryDef& A, const FMapEntryDef& B)
+		{
+			const int32 KeyOrder = A.KeyExpression.Compare(B.KeyExpression, ESearchCase::CaseSensitive);
+			return KeyOrder == 0
+				? A.ValueExpression.Compare(B.ValueExpression, ESearchCase::CaseSensitive) < 0
+				: KeyOrder < 0;
+		});
+		Result += TEXT(" :default [");
+		for (const FMapEntryDef& Entry : SortedEntries)
+		{
+			Result += FString::Printf(TEXT(" (entry :key %s :value %s)"),
+				*Entry.KeyExpression, *Entry.ValueExpression);
+		}
+		Result += TEXT(" ]");
+	}
+	else if (!bIsMap && !DefaultValue.IsEmpty())
 	{
 		Result += FString::Printf(TEXT(" %s"), *DefaultValue);
 	}

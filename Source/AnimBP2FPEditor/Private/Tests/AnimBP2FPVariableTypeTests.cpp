@@ -62,7 +62,7 @@ bool FAnimBP2FPVariableExporterPreservesReadableTypes::RunTest(const FString& Pa
 	TestEqual(TEXT("array container preserved"), AST->Variables[3].ContainerType, FString(TEXT("array")));
 
 	const FString DSL = AST->ToString();
-	TestTrue(TEXT("DSL emits exact pin category"), DSL.Contains(TEXT(":pin-category \"object\"")));
+	TestFalse(TEXT("DSL omits redundant object pin category"), DSL.Contains(TEXT(":pin-category \"object\"")));
 	TestTrue(TEXT("DSL emits array container"), DSL.Contains(TEXT(":container array")));
 
 	TArray<FAnimLangParseError> Errors;
@@ -179,6 +179,83 @@ bool FAnimBP2FPVariableExactTypeDiffAndMapFailure::RunTest(const FString& Parame
 	AddExpectedError(TEXT("[UNSUPPORTED:VariableType]"), EAutomationExpectedErrorFlags::Contains, 1);
 	const FString ExportedDSL = FAnimBPExporter::Export(Blueprint);
 	TestTrue(TEXT("map export fails instead of emitting incomplete DSL"), ExportedDSL.StartsWith(TEXT("; Error:")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimBP2FPVariableMapCanonicalSyntax,
+	"AnimBP2FP.VariableTypes.MapCanonicalSyntax",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FAnimBP2FPVariableMapCanonicalSyntax::RunTest(const FString& Parameters)
+{
+	const FString Source = TEXT(R"ANIM(
+(anim-blueprint "ABP_MapSyntax"
+  :variables [
+    (name :name "Values" :container map
+      :value-pin-category "int"
+      :default [
+        (entry :key "Run" :value 2)
+        (entry :key "Idle" :value 1)
+      ])
+  ])
+)ANIM");
+
+	TArray<FAnimLangParseError> Errors;
+	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(Source, Errors);
+	TestTrue(TEXT("typed map syntax parses"), Parsed.IsValid() && Errors.IsEmpty());
+	TestEqual(TEXT("one map variable parses"), Parsed.IsValid() ? Parsed->Variables.Num() : 0, 1);
+	if (!Parsed.IsValid() || Parsed->Variables.Num() != 1)
+	{
+		return false;
+	}
+
+	const FVariableDef& Variable = Parsed->Variables[0];
+	TestEqual(TEXT("map container parses"), Variable.ContainerType, FString(TEXT("map")));
+	TestEqual(TEXT("map value category parses"), Variable.ValuePinCategory, FString(TEXT("int")));
+	TestEqual(TEXT("two map entries parse"), Variable.MapEntries.Num(), 2);
+	if (Variable.MapEntries.Num() == 2)
+	{
+		TestEqual(TEXT("entries canonicalize by key"), Variable.MapEntries[0].KeyExpression, FString(TEXT("\"Idle\"")));
+		TestEqual(TEXT("entry value remains typed"), Variable.MapEntries[0].ValueExpression, FString(TEXT("1")));
+	}
+
+	const FString Canonical = Parsed->ToString();
+	TestFalse(TEXT("redundant key category is omitted"), Canonical.Contains(TEXT(":pin-category")));
+	TestFalse(TEXT("None subcategories are omitted"), Canonical.Contains(TEXT("pin-subcategory")));
+	TestTrue(TEXT("map container remains explicit"), Canonical.Contains(TEXT(":container map")));
+	TestTrue(TEXT("value category remains explicit"), Canonical.Contains(TEXT(":value-pin-category \"int\"")));
+	TestTrue(TEXT("canonical key order is stable"),
+		Canonical.Find(TEXT(":key \"Idle\"")) < Canonical.Find(TEXT(":key \"Run\"")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimBP2FPVariableMapSyntaxValidation,
+	"AnimBP2FP.VariableTypes.MapSyntaxValidation",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FAnimBP2FPVariableMapSyntaxValidation::RunTest(const FString& Parameters)
+{
+	auto ParseHasErrors = [](const FString& VariableSource)
+	{
+		const FString Source = FString::Printf(
+			TEXT("(anim-blueprint \"ABP_InvalidMap\" :variables [%s])"), *VariableSource);
+		TArray<FAnimLangParseError> Errors;
+		FAnimLangParser::Parse(Source, Errors);
+		return Errors.ContainsByPredicate([](const FAnimLangParseError& Error) { return !Error.bWarning; });
+	};
+
+	TestTrue(TEXT("map requires value category"),
+		ParseHasErrors(TEXT("(name :name \"Values\" :container map)")));
+	TestTrue(TEXT("scalar rejects value fields"),
+		ParseHasErrors(TEXT("(name :name \"Value\" :value-pin-category \"int\")")));
+	TestTrue(TEXT("entry requires key"),
+		ParseHasErrors(TEXT("(name :name \"Values\" :container map :value-pin-category \"int\" :default [(entry :value 1)])")));
+	TestTrue(TEXT("entry requires value"),
+		ParseHasErrors(TEXT("(name :name \"Values\" :container map :value-pin-category \"int\" :default [(entry :key \"Idle\")])")));
+	TestTrue(TEXT("duplicate raw keys are rejected"),
+		ParseHasErrors(TEXT("(name :name \"Values\" :container map :value-pin-category \"int\" :default [(entry :key \"Idle\" :value 1) (entry :key \"Idle\" :value 2)])")));
 	return true;
 }
 

@@ -110,6 +110,9 @@ private:
 	void MigrateLegacyRigBindings(const TSharedPtr<FAnimGraphAST>& AST);
 	void ValidateRigBindings(const TSharedPtr<FAnimGraphAST>& AST);
 	FVariableDef ParseVarDef();
+	bool ParseMapDefault(FVariableDef& Var);
+	bool ParseMapEntry(FMapEntryDef& OutEntry);
+	void ValidateVariableDefinition(FVariableDef& Var);
 	void ParseHelpers(TSharedPtr<FAnimGraphAST> AST);
 	FHelperGraphDef ParseHelperGraphDef();
 	void ParseLogicGraphs(TSharedPtr<FAnimGraphAST> AST);
