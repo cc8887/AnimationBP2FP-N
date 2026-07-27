@@ -2,6 +2,7 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
 #include "AnimBPImporter.h"
+#include "AnimLangVariableCodec.h"
 
 #if WITH_EDITOR
 
@@ -653,113 +654,6 @@ namespace
 			UE_LOG(LogAnimBPImporter, Log, TEXT("Removing stale managed generated var: %s"), *VariableToRemove.ToString());
 			FBlueprintEditorUtils::RemoveMemberVariable(Blueprint, VariableToRemove);
 		}
-	}
-
-	static bool TryBuildEdGraphPinType(EPinType Type, FEdGraphPinType& OutPinType)
-	{
-		switch (Type)
-		{
-		case EPinType::Float:
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Real;
-			OutPinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
-			return true;
-		case EPinType::Int:
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Int;
-			return true;
-		case EPinType::Bool:
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
-			return true;
-		case EPinType::Vector:
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
-			OutPinType.PinSubCategoryObject = TBaseStructure<FVector>::Get();
-			return true;
-		case EPinType::Rotator:
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
-			OutPinType.PinSubCategoryObject = TBaseStructure<FRotator>::Get();
-			return true;
-		case EPinType::Transform:
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
-			OutPinType.PinSubCategoryObject = TBaseStructure<FTransform>::Get();
-			return true;
-		case EPinType::Name:
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Name;
-			return true;
-		case EPinType::Object:
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Object;
-			return true;
-		default:
-			return false;
-		}
-	}
-
-	static bool TryBuildVariablePinType(const FVariableDef& Var, FEdGraphPinType& OutPinType, FString& OutError)
-	{
-		if (Var.PinCategory.IsEmpty())
-		{
-			if (Var.Type == EPinType::Enum)
-			{
-				UEnum* EnumObject = Var.TypeObjectPath.IsEmpty() ? nullptr : LoadObject<UEnum>(nullptr, *Var.TypeObjectPath);
-				if (!EnumObject)
-				{
-					OutError = FString::Printf(TEXT("enum type object '%s' could not be loaded"), *Var.TypeObjectPath);
-					return false;
-				}
-				OutPinType.PinCategory = UEdGraphSchema_K2::PC_Byte;
-				OutPinType.PinSubCategoryObject = EnumObject;
-				return true;
-			}
-			if (!TryBuildEdGraphPinType(Var.Type, OutPinType))
-			{
-				OutError = TEXT("legacy DSL type is unsupported");
-				return false;
-			}
-			return true;
-		}
-
-		OutPinType.PinCategory = FName(*Var.PinCategory);
-		OutPinType.PinSubCategory = FName(*Var.PinSubCategory);
-		const bool bRequiresTypeObject = Var.PinCategory == UEdGraphSchema_K2::PC_Struct.ToString()
-			|| Var.PinCategory == UEdGraphSchema_K2::PC_Object.ToString()
-			|| Var.PinCategory == UEdGraphSchema_K2::PC_Class.ToString()
-			|| Var.PinCategory == UEdGraphSchema_K2::PC_SoftObject.ToString()
-			|| Var.PinCategory == UEdGraphSchema_K2::PC_SoftClass.ToString()
-			|| Var.PinCategory == UEdGraphSchema_K2::PC_Interface.ToString();
-		if (bRequiresTypeObject && Var.TypeObjectPath.IsEmpty())
-		{
-			OutError = FString::Printf(TEXT("pin category '%s' requires :type-object"), *Var.PinCategory);
-			return false;
-		}
-		if (!Var.TypeObjectPath.IsEmpty())
-		{
-			UObject* TypeObject = LoadObject<UObject>(nullptr, *Var.TypeObjectPath);
-			if (!TypeObject)
-			{
-				OutError = FString::Printf(TEXT("pin type object '%s' could not be loaded"), *Var.TypeObjectPath);
-				return false;
-			}
-			OutPinType.PinSubCategoryObject = TypeObject;
-		}
-
-		const FString Container = Var.ContainerType.ToLower();
-		if (Container.IsEmpty() || Container == TEXT("none")) OutPinType.ContainerType = EPinContainerType::None;
-		else if (Container == TEXT("array")) OutPinType.ContainerType = EPinContainerType::Array;
-		else if (Container == TEXT("set")) OutPinType.ContainerType = EPinContainerType::Set;
-		else if (Container == TEXT("map"))
-		{
-			OutError = TEXT("map value terminal type is not represented by this DSL version");
-			return false;
-		}
-		else
-		{
-			OutError = FString::Printf(TEXT("unknown container '%s'"), *Var.ContainerType);
-			return false;
-		}
-
-		OutPinType.bIsReference = Var.bIsReference;
-		OutPinType.bIsConst = Var.bIsConst;
-		OutPinType.bIsWeakPointer = Var.bIsWeakPointer;
-		OutPinType.bIsUObjectWrapper = Var.bIsUObjectWrapper;
-		return true;
 	}
 
 	static FString IMP_NormalizeBindingToken(const FString& In)
@@ -1792,7 +1686,7 @@ bool FAnimBPImporter::BuildVariables(UAnimBlueprint* Blueprint, const TArray<FVa
 
 		FEdGraphPinType PinType;
 		FString TypeError;
-		if (!TryBuildVariablePinType(Var, PinType, TypeError))
+		if (!FAnimLangVariableCodec::BuildPinType(Var, PinType, TypeError))
 		{
 			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:VariableType] Variable '%s': %s"), *Var.Name, *TypeError);
 			return false;
@@ -5512,7 +5406,7 @@ bool FAnimBPImporter::RebuildAnimGraph(UAnimBlueprint* Blueprint, const TSharedP
 		{
 			FEdGraphPinType PinType;
 			FString TypeError;
-			if (!TryBuildVariablePinType(Var, PinType, TypeError))
+			if (!FAnimLangVariableCodec::BuildPinType(Var, PinType, TypeError))
 			{
 				UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:VariableType] Variable '%s': %s"), *Var.Name, *TypeError);
 				return false;

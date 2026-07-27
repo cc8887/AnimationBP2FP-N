@@ -2,6 +2,7 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
 #include "AnimLangPatcher.h"
+#include "AnimLangVariableCodec.h"
 
 #if WITH_EDITOR
 
@@ -18,67 +19,6 @@
 #include "Kismet2/KismetEditorUtilities.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogAnimLangPatcher, Log, All);
-
-namespace
-{
-	static bool BuildPatchVariablePinType(const FVariableDef& Var, FEdGraphPinType& OutPinType, FString& OutError)
-	{
-		if (!Var.PinCategory.IsEmpty())
-		{
-			OutPinType.PinCategory = FName(*Var.PinCategory);
-			OutPinType.PinSubCategory = FName(*Var.PinSubCategory);
-			const bool bRequiresTypeObject = Var.PinCategory == UEdGraphSchema_K2::PC_Struct.ToString()
-				|| Var.PinCategory == UEdGraphSchema_K2::PC_Object.ToString()
-				|| Var.PinCategory == UEdGraphSchema_K2::PC_Class.ToString()
-				|| Var.PinCategory == UEdGraphSchema_K2::PC_SoftObject.ToString()
-				|| Var.PinCategory == UEdGraphSchema_K2::PC_SoftClass.ToString()
-				|| Var.PinCategory == UEdGraphSchema_K2::PC_Interface.ToString();
-			if (bRequiresTypeObject && Var.TypeObjectPath.IsEmpty())
-			{
-				OutError = FString::Printf(TEXT("pin category '%s' requires :type-object"), *Var.PinCategory);
-				return false;
-			}
-			if (!Var.TypeObjectPath.IsEmpty())
-			{
-				UObject* TypeObject = LoadObject<UObject>(nullptr, *Var.TypeObjectPath);
-				if (!TypeObject)
-				{
-					OutError = FString::Printf(TEXT("pin type object '%s' could not be loaded"), *Var.TypeObjectPath);
-					return false;
-				}
-				OutPinType.PinSubCategoryObject = TypeObject;
-			}
-			const FString Container = Var.ContainerType.ToLower();
-			if (Container.IsEmpty() || Container == TEXT("none")) OutPinType.ContainerType = EPinContainerType::None;
-			else if (Container == TEXT("array")) OutPinType.ContainerType = EPinContainerType::Array;
-			else if (Container == TEXT("set")) OutPinType.ContainerType = EPinContainerType::Set;
-			else
-			{
-				OutError = Container == TEXT("map")
-					? TEXT("map value terminal type is not represented by this DSL version")
-					: FString::Printf(TEXT("unknown container '%s'"), *Var.ContainerType);
-				return false;
-			}
-			OutPinType.bIsReference = Var.bIsReference;
-			OutPinType.bIsConst = Var.bIsConst;
-			OutPinType.bIsWeakPointer = Var.bIsWeakPointer;
-			OutPinType.bIsUObjectWrapper = Var.bIsUObjectWrapper;
-			return true;
-		}
-
-		switch (Var.Type)
-		{
-		case EPinType::Float: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Real; OutPinType.PinSubCategory = UEdGraphSchema_K2::PC_Float; return true;
-		case EPinType::Int: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Int; return true;
-		case EPinType::Bool: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Boolean; return true;
-		case EPinType::Name: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Name; return true;
-		case EPinType::Vector: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Struct; OutPinType.PinSubCategoryObject = TBaseStructure<FVector>::Get(); return true;
-		case EPinType::Rotator: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Struct; OutPinType.PinSubCategoryObject = TBaseStructure<FRotator>::Get(); return true;
-		case EPinType::Transform: OutPinType.PinCategory = UEdGraphSchema_K2::PC_Struct; OutPinType.PinSubCategoryObject = TBaseStructure<FTransform>::Get(); return true;
-		default: OutError = TEXT("legacy DSL type is unsupported"); return false;
-		}
-	}
-}
 
 // ========== FAnimLangPatchResult ==========
 
@@ -356,7 +296,7 @@ bool FAnimLangPatcher::ApplyVariableChange(
 		
 		FEdGraphPinType PinType;
 		FString TypeError;
-		if (!BuildPatchVariablePinType(*NewVar, PinType, TypeError))
+		if (!FAnimLangVariableCodec::BuildPinType(*NewVar, PinType, TypeError))
 		{
 			OutWarnings.Add(FString::Printf(TEXT("Variable '%s' type is unsupported: %s"), *Entry.VariableName, *TypeError));
 			return false;
@@ -405,7 +345,7 @@ bool FAnimLangPatcher::ApplyVariableChange(
 		
 		FEdGraphPinType PinType;
 		FString TypeError;
-		if (!BuildPatchVariablePinType(*NewVar, PinType, TypeError))
+		if (!FAnimLangVariableCodec::BuildPinType(*NewVar, PinType, TypeError))
 		{
 			OutWarnings.Add(FString::Printf(TEXT("Variable '%s' type is unsupported: %s"), *Entry.VariableName, *TypeError));
 			return false;

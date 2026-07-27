@@ -7,6 +7,7 @@
 #include "AnimLangParser.h"
 #include "AnimLangDiffer.h"
 #include "AnimLangParser.h"
+#include "AnimLangVariableCodec.h"
 #include "EdGraphSchema_K2.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -256,6 +257,46 @@ bool FAnimBP2FPVariableMapSyntaxValidation::RunTest(const FString& Parameters)
 		ParseHasErrors(TEXT("(name :name \"Values\" :container map :value-pin-category \"int\" :default [(entry :key \"Idle\")])")));
 	TestTrue(TEXT("duplicate raw keys are rejected"),
 		ParseHasErrors(TEXT("(name :name \"Values\" :container map :value-pin-category \"int\" :default [(entry :key \"Idle\" :value 1) (entry :key \"Idle\" :value 2)])")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimBP2FPVariableMapPinTypeCodec,
+	"AnimBP2FP.VariableTypes.MapPinTypeCodec",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FAnimBP2FPVariableMapPinTypeCodec::RunTest(const FString& Parameters)
+{
+	FVariableDef Variable;
+	Variable.Name = TEXT("ObjectByName");
+	Variable.Type = EPinType::Name;
+	Variable.PinCategory = UEdGraphSchema_K2::PC_Name.ToString();
+	Variable.PinSubCategory = TEXT("None");
+	Variable.ContainerType = TEXT("map");
+	Variable.ValuePinCategory = UEdGraphSchema_K2::PC_Object.ToString();
+	Variable.ValuePinSubCategory = TEXT("None");
+	Variable.ValueTypeObjectPath = UObject::StaticClass()->GetPathName();
+
+	FEdGraphPinType PinType;
+	FString Error;
+	TestTrue(TEXT("typed map pin builds"),
+		FAnimLangVariableCodec::BuildPinType(Variable, PinType, Error));
+	TestEqual(TEXT("map container builds"), PinType.ContainerType, EPinContainerType::Map);
+	TestEqual(TEXT("map key category builds"), PinType.PinCategory, UEdGraphSchema_K2::PC_Name);
+	TestEqual(TEXT("map value category builds"),
+		PinType.PinValueType.TerminalCategory, UEdGraphSchema_K2::PC_Object);
+	TestEqual(TEXT("map value object builds"),
+		PinType.PinValueType.TerminalSubCategoryObject.Get(), static_cast<UObject*>(UObject::StaticClass()));
+
+	FVariableDef MissingValue = Variable;
+	MissingValue.ValuePinCategory.Reset();
+	TestFalse(TEXT("map without value category fails"),
+		FAnimLangVariableCodec::BuildPinType(MissingValue, PinType, Error));
+
+	FVariableDef MissingObject = Variable;
+	MissingObject.ValueTypeObjectPath = TEXT("/Script/DoesNotExist.MissingClass");
+	TestFalse(TEXT("missing value type object fails"),
+		FAnimLangVariableCodec::BuildPinType(MissingObject, PinType, Error));
 	return true;
 }
 
