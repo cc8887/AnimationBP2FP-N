@@ -4,7 +4,10 @@
 
 #if WITH_EDITOR
 
+#include "Animation/AnimBlueprint.h"
+#include "Animation/AnimBlueprintGeneratedClass.h"
 #include "EdGraphSchema_K2.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
@@ -60,6 +63,16 @@ namespace
 		return SubCategory.IsEmpty() || SubCategory.Equals(TEXT("None"), ESearchCase::IgnoreCase)
 			? NAME_None
 			: FName(*SubCategory);
+	}
+
+	FString QuoteDSLString(const FString& Value)
+	{
+		FString Escaped = Value;
+		Escaped.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+		Escaped.ReplaceInline(TEXT("\""), TEXT("\\\""));
+		Escaped.ReplaceInline(TEXT("\n"), TEXT("\\n"));
+		Escaped.ReplaceInline(TEXT("\r"), TEXT("\\r"));
+		return FString::Printf(TEXT("\"%s\""), *Escaped);
 	}
 
 	bool LoadTypeObject(
@@ -175,6 +188,102 @@ bool FAnimLangVariableCodec::BuildPinType(
 	OutPinType.bIsConst = Variable.bIsConst;
 	OutPinType.bIsWeakPointer = Variable.bIsWeakPointer;
 	OutPinType.bIsUObjectWrapper = Variable.bIsUObjectWrapper;
+	return true;
+}
+
+FString FAnimLangVariableCodec::ExportPropertyExpression(const FProperty& Property, const void* Value)
+{
+	if (const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(&Property))
+	{
+		const UObject* Object = ObjectProperty->GetObjectPropertyValue(Value);
+		return Object
+			? FString::Printf(TEXT("(asset %s)"), *QuoteDSLString(Object->GetPathName()))
+			: TEXT("nil");
+	}
+	if (const FNameProperty* NameProperty = CastField<FNameProperty>(&Property))
+	{
+		return QuoteDSLString(NameProperty->GetPropertyValue(Value).ToString());
+	}
+	if (const FStrProperty* StringProperty = CastField<FStrProperty>(&Property))
+	{
+		return QuoteDSLString(StringProperty->GetPropertyValue(Value));
+	}
+	if (const FBoolProperty* BoolProperty = CastField<FBoolProperty>(&Property))
+	{
+		return BoolProperty->GetPropertyValue(Value) ? TEXT("true") : TEXT("false");
+	}
+
+	FString Exported;
+	Property.ExportTextItem_Direct(Exported, Value, Value, nullptr, PPF_None);
+	if (Property.IsA<FNumericProperty>() || Property.IsA<FEnumProperty>())
+	{
+		return Exported;
+	}
+	return FString::Printf(TEXT("(ue-value %s)"), *QuoteDSLString(Exported));
+}
+
+bool FAnimLangVariableCodec::ExportMapEntries(
+	const UAnimBlueprint& Blueprint,
+	FVariableDef& InOutVariable,
+	FString& OutError)
+{
+	InOutVariable.MapEntries.Reset();
+	InOutVariable.bHasStructuredMapDefault = false;
+	OutError.Reset();
+
+	if (!Blueprint.GeneratedClass)
+	{
+		const FBPVariableDescription* Description = Blueprint.NewVariables.FindByPredicate(
+			[&InOutVariable](const FBPVariableDescription& Candidate)
+			{
+				return Candidate.VarName.ToString() == InOutVariable.Name;
+			});
+		if (!Description || Description->DefaultValue.IsEmpty())
+		{
+			return true;
+		}
+		OutError = FString::Printf(
+			TEXT("map variable '%s' has a default but no generated property"), *InOutVariable.Name);
+		return false;
+	}
+
+	const FMapProperty* MapProperty = FindFProperty<FMapProperty>(
+		Blueprint.GeneratedClass, FName(*InOutVariable.Name));
+	if (!MapProperty)
+	{
+		OutError = FString::Printf(
+			TEXT("generated map property '%s' could not be found"), *InOutVariable.Name);
+		return false;
+	}
+
+	const UObject* Defaults = Blueprint.GeneratedClass->GetDefaultObject(false);
+	if (!Defaults)
+	{
+		OutError = FString::Printf(
+			TEXT("class defaults for map variable '%s' are unavailable"), *InOutVariable.Name);
+		return false;
+	}
+
+	const void* MapAddress = MapProperty->ContainerPtrToValuePtr<void>(Defaults);
+	FScriptMapHelper MapHelper(MapProperty, MapAddress);
+	for (int32 Index = 0; Index < MapHelper.GetMaxIndex(); ++Index)
+	{
+		if (!MapHelper.IsValidIndex(Index))
+		{
+			continue;
+		}
+		FMapEntryDef& Entry = InOutVariable.MapEntries.AddDefaulted_GetRef();
+		Entry.KeyExpression = ExportPropertyExpression(*MapProperty->KeyProp, MapHelper.GetKeyPtr(Index));
+		Entry.ValueExpression = ExportPropertyExpression(*MapProperty->ValueProp, MapHelper.GetValuePtr(Index));
+	}
+
+	InOutVariable.MapEntries.Sort([](const FMapEntryDef& Left, const FMapEntryDef& Right)
+	{
+		return Left.KeyExpression == Right.KeyExpression
+			? Left.ValueExpression < Right.ValueExpression
+			: Left.KeyExpression < Right.KeyExpression;
+	});
+	InOutVariable.bHasStructuredMapDefault = !InOutVariable.MapEntries.IsEmpty();
 	return true;
 }
 

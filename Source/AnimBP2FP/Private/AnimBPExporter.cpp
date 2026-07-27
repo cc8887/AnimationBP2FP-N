@@ -2,6 +2,7 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
 #include "AnimBPExporter.h"
+#include "AnimLangVariableCodec.h"
 
 #if WITH_EDITOR
 
@@ -1541,12 +1542,6 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(
 	// Extract variables from AnimBlueprint
 	for (const FBPVariableDescription& Var : AnimBlueprint->NewVariables)
 	{
-		if (Var.VarType.ContainerType == EPinContainerType::Map)
-		{
-			UE_LOG(LogAnimBP2FP, Error, TEXT("[UNSUPPORTED:VariableType] Variable '%s' is a map; map value terminal types are not represented by this DSL version"),
-				*Var.VarName.ToString());
-			return nullptr;
-		}
 		FVariableDef VarDef;
 		VarDef.Name = Var.VarName.ToString();
 		VarDef.Type = PinTypeToAnimLangType(Var.VarType);
@@ -1568,8 +1563,27 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(
 		{
 			VarDef.TypeObjectPath = TypeObject->GetPathName();
 		}
-		
-		VarDef.DefaultValue = Var.DefaultValue;
+
+		if (Var.VarType.ContainerType == EPinContainerType::Map)
+		{
+			VarDef.ValuePinCategory = Var.VarType.PinValueType.TerminalCategory.ToString();
+			VarDef.ValuePinSubCategory = Var.VarType.PinValueType.TerminalSubCategory.ToString();
+			if (const UObject* ValueTypeObject = Var.VarType.PinValueType.TerminalSubCategoryObject.Get())
+			{
+				VarDef.ValueTypeObjectPath = ValueTypeObject->GetPathName();
+			}
+
+			FString MapError;
+			if (!FAnimLangVariableCodec::ExportMapEntries(*AnimBlueprint, VarDef, MapError))
+			{
+				UE_LOG(LogAnimBP2FP, Error, TEXT("[UNSUPPORTED:VariableDefault] %s"), *MapError);
+				return nullptr;
+			}
+		}
+		else
+		{
+			VarDef.DefaultValue = Var.DefaultValue;
+		}
 		ResultAST->Variables.Add(VarDef);
 	}
 

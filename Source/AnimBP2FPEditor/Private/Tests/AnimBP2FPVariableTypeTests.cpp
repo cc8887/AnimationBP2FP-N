@@ -3,12 +3,17 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "Animation/AnimBlueprint.h"
+#include "Animation/AnimBlueprintGeneratedClass.h"
+#include "Animation/AnimInstance.h"
 #include "AnimBPExporter.h"
 #include "AnimLangParser.h"
 #include "AnimLangDiffer.h"
 #include "AnimLangParser.h"
 #include "AnimLangVariableCodec.h"
 #include "EdGraphSchema_K2.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "UObject/UnrealType.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -150,11 +155,11 @@ bool FAnimBP2FPVariableNameWithSpacesRoundTrips::RunTest(const FString& Paramete
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FAnimBP2FPVariableExactTypeDiffAndMapFailure,
-	"AnimBP2FP.VariableTypes.ExactTypeDiffAndMapFailure",
+	FAnimBP2FPVariableExactTypeDiff,
+	"AnimBP2FP.VariableTypes.ExactTypeDiff",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
 
-bool FAnimBP2FPVariableExactTypeDiffAndMapFailure::RunTest(const FString& Parameters)
+bool FAnimBP2FPVariableExactTypeDiff::RunTest(const FString& Parameters)
 {
 	TSharedPtr<FAnimGraphAST> OldAST = MakeShared<FAnimGraphAST>();
 	TSharedPtr<FAnimGraphAST> NewAST = MakeShared<FAnimGraphAST>();
@@ -170,16 +175,80 @@ bool FAnimBP2FPVariableExactTypeDiffAndMapFailure::RunTest(const FString& Parame
 	NewAST->Variables.Add(NewVar);
 	const FAnimLangDiffResult Diff = FAnimLangDiffer::Diff(OldAST, NewAST);
 	TestTrue(TEXT("exact container change is detected"), Diff.HasChanges());
+	return true;
+}
 
-	UAnimBlueprint* Blueprint = NewObject<UAnimBlueprint>(GetTransientPackage());
-	FBPVariableDescription& MapVariable = Blueprint->NewVariables.AddDefaulted_GetRef();
-	MapVariable.VarName = TEXT("MapVariable");
-	MapVariable.VarType.PinCategory = UEdGraphSchema_K2::PC_Name;
-	MapVariable.VarType.ContainerType = EPinContainerType::Map;
-	MapVariable.VarType.PinValueType.TerminalCategory = UEdGraphSchema_K2::PC_Int;
-	AddExpectedError(TEXT("[UNSUPPORTED:VariableType]"), EAutomationExpectedErrorFlags::Contains, 1);
-	const FString ExportedDSL = FAnimBPExporter::Export(Blueprint);
-	TestTrue(TEXT("map export fails instead of emitting incomplete DSL"), ExportedDSL.StartsWith(TEXT("; Error:")));
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimBP2FPVariableCompiledMapExport,
+	"AnimBP2FP.VariableTypes.CompiledMapExport",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FAnimBP2FPVariableCompiledMapExport::RunTest(const FString& Parameters)
+{
+	UAnimBlueprint* Blueprint = Cast<UAnimBlueprint>(FKismetEditorUtilities::CreateBlueprint(
+		UAnimInstance::StaticClass(), GetTransientPackage(), TEXT("ABP_MapExportFixture"),
+		BPTYPE_Normal, UAnimBlueprint::StaticClass(), UAnimBlueprintGeneratedClass::StaticClass(),
+		FName(TEXT("AnimBP2FPMapExportTest"))));
+	TestNotNull(TEXT("map export fixture exists"), Blueprint);
+	if (!Blueprint)
+	{
+		return false;
+	}
+
+	FEdGraphPinType MapType;
+	MapType.PinCategory = UEdGraphSchema_K2::PC_Name;
+	MapType.ContainerType = EPinContainerType::Map;
+	MapType.PinValueType.TerminalCategory = UEdGraphSchema_K2::PC_Int;
+	TestTrue(TEXT("map variable is added"),
+		FBlueprintEditorUtils::AddMemberVariable(Blueprint, TEXT("Values"), MapType));
+	FKismetEditorUtilities::CompileBlueprint(Blueprint);
+
+	FMapProperty* MapProperty = Blueprint->GeneratedClass
+		? FindFProperty<FMapProperty>(Blueprint->GeneratedClass, TEXT("Values"))
+		: nullptr;
+	TestNotNull(TEXT("compiled map property exists"), MapProperty);
+	UObject* Defaults = Blueprint->GeneratedClass
+		? Blueprint->GeneratedClass->GetDefaultObject(false)
+		: nullptr;
+	TestNotNull(TEXT("compiled class defaults exist"), Defaults);
+	if (!MapProperty || !Defaults)
+	{
+		return false;
+	}
+
+	void* MapAddress = MapProperty->ContainerPtrToValuePtr<void>(Defaults);
+	FScriptMapHelper MapHelper(MapProperty, MapAddress);
+	auto AddEntry = [&MapHelper, MapProperty](const FName Key, const int32 Value)
+	{
+		const int32 Index = MapHelper.AddDefaultValue_Invalid_NeedsRehash();
+		MapProperty->KeyProp->CopyCompleteValue(MapHelper.GetKeyPtr(Index), &Key);
+		MapProperty->ValueProp->CopyCompleteValue(MapHelper.GetValuePtr(Index), &Value);
+	};
+	AddEntry(TEXT("Run"), 2);
+	AddEntry(TEXT("Idle"), 1);
+	MapHelper.Rehash();
+
+	const TSharedPtr<FAnimGraphAST> AST = FAnimBPExporter::ExportToAST(Blueprint);
+	TestTrue(TEXT("compiled map exports"), AST.IsValid());
+	if (!AST.IsValid() || AST->Variables.Num() != 1)
+	{
+		return false;
+	}
+
+	const FVariableDef& Variable = AST->Variables[0];
+	TestEqual(TEXT("map key category exports"), Variable.PinCategory, UEdGraphSchema_K2::PC_Name.ToString());
+	TestEqual(TEXT("map value category exports"), Variable.ValuePinCategory, UEdGraphSchema_K2::PC_Int.ToString());
+	TestEqual(TEXT("both map entries export"), Variable.MapEntries.Num(), 2);
+	if (Variable.MapEntries.Num() == 2)
+	{
+		TestEqual(TEXT("entries sort by key"), Variable.MapEntries[0].KeyExpression, FString(TEXT("\"Idle\"")));
+		TestEqual(TEXT("first value exports"), Variable.MapEntries[0].ValueExpression, FString(TEXT("1")));
+		TestEqual(TEXT("second key exports"), Variable.MapEntries[1].KeyExpression, FString(TEXT("\"Run\"")));
+	}
+
+	const FString FirstExport = AST->ToString();
+	const FString SecondExport = FAnimBPExporter::ExportToAST(Blueprint)->ToString();
+	TestEqual(TEXT("map export is deterministic"), SecondExport, FirstExport);
 	return true;
 }
 
