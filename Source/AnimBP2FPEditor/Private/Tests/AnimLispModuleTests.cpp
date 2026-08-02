@@ -1,6 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 
 #include "AnimLangDiagnostics.h"
@@ -13,7 +15,7 @@
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimLispModuleIdentityTest,
 	"AnimBP2FP.AnimLisp.Module.Identity",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimLispModuleIdentityTest::RunTest(const FString& Parameters)
 {
@@ -37,7 +39,7 @@ bool FAnimLispModuleIdentityTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimLispTypeIdentityTest,
 	"AnimBP2FP.AnimLisp.Module.TypeIdentity",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimLispTypeIdentityTest::RunTest(const FString& Parameters)
 {
@@ -70,7 +72,7 @@ bool FAnimLispTypeIdentityTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimLispTokenizerSourceSpanTest,
 	"AnimBP2FP.AnimLisp.Module.TokenizerSourceSpan",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimLispTokenizerSourceSpanTest::RunTest(const FString& Parameters)
 {
@@ -81,9 +83,9 @@ bool FAnimLispTokenizerSourceSpanTest::RunTest(const FString& Parameters)
 		TEXT("Test.riglang"),
 		&Errors);
 
-	TestTrue(TEXT("Tokenization succeeds"), Errors.IsEmpty());
+	TestTrue(TEXT("Tokenization succeeds"), Errors.Num() == 0);
 	TestEqual(TEXT("Tokenizer emits the expected token sequence"), Tokens.Num(), 5);
-	if (!Tokens.IsEmpty())
+	if (Tokens.Num() != 0)
 	{
 		TestEqual(TEXT("Source filename"), Tokens[0].Span.SourceFile, FString(TEXT("Test.riglang")));
 		TestEqual(TEXT("Source line"), Tokens[0].Span.Line, 1);
@@ -103,7 +105,7 @@ bool FAnimLispTokenizerSourceSpanTest::RunTest(const FString& Parameters)
 	TArray<FAnimLangToken> LegacyTokens;
 	TArray<FAnimLangLexError> LegacyErrors;
 	TestTrue(TEXT("Legacy tokenizer succeeds"), FAnimLangTokenizer::Tokenize(Source, LegacyTokens, LegacyErrors));
-	TestTrue(TEXT("Legacy tokenizer reports no errors"), LegacyErrors.IsEmpty());
+	TestTrue(TEXT("Legacy tokenizer reports no errors"), LegacyErrors.Num() == 0);
 	TestEqual(TEXT("Legacy token count is unchanged"), LegacyTokens.Num(), Tokens.Num());
 	if (LegacyTokens.Num() == Tokens.Num())
 	{
@@ -123,7 +125,7 @@ bool FAnimLispTokenizerSourceSpanTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimLispCrossFileDiagnosticTest,
 	"AnimBP2FP.AnimLisp.Module.CrossFileDiagnostic",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimLispCrossFileDiagnosticTest::RunTest(const FString& Parameters)
 {
@@ -154,7 +156,7 @@ bool FAnimLispCrossFileDiagnosticTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimLispLegacyRigObjectPathMigrationTest,
 	"AnimBP2FP.AnimLisp.Module.LegacyRigObjectPathMigration",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimLispLegacyRigObjectPathMigrationTest::RunTest(const FString& Parameters)
 {
@@ -189,3 +191,4 @@ bool FAnimLispLegacyRigObjectPathMigrationTest::RunTest(const FString& Parameter
 }
 
 #endif
+#endif // UE 5.8+

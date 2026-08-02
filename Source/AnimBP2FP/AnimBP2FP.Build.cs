@@ -7,6 +7,9 @@ public class AnimBP2FP : ModuleRules
 	public AnimBP2FP(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
+		CppStandard = Target.Version.MajorVersion == 5 && Target.Version.MinorVersion >= 8
+			? (CppStandardVersion)System.Enum.Parse(typeof(CppStandardVersion), "Cpp20")
+			: CppStandardVersion.Cpp17;
 
 		PublicIncludePaths.AddRange(
 			new string[] {

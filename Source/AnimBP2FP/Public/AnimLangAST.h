@@ -4,6 +4,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Animation/AnimationAsset.h"
 #include "AnimLispModule.h"
 

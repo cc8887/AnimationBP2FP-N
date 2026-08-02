@@ -43,7 +43,11 @@ void FAnimBP2FPCompilerHook::Register()
 		this, &FAnimBP2FPCompilerHook::OnBlueprintCompiled);
 
 	// Ticker for deferred processing
+#if ENGINE_MAJOR_VERSION < 5
+	TickerHandle = FTicker::GetCoreTicker().AddTicker(
+#else
 	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+#endif
 		FTickerDelegate::CreateRaw(this, &FAnimBP2FPCompilerHook::Tick), 0.5f);
 
 	bIsRegistered = true;
@@ -69,7 +73,11 @@ void FAnimBP2FPCompilerHook::Unregister()
 
 	if (TickerHandle.IsValid())
 	{
+#if ENGINE_MAJOR_VERSION < 5
+		FTicker::GetCoreTicker().RemoveTicker(TickerHandle);
+#else
 		FTSTicker::GetCoreTicker().RemoveTicker(TickerHandle);
+#endif
 		TickerHandle.Reset();
 	}
 

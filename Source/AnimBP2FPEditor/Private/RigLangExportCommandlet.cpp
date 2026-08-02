@@ -3,7 +3,15 @@
 #include "FBP2FPMappingRegistry.h"
 #include "RigLangExporter.h"
 #include "RigLangParser.h"
+#if ENGINE_MAJOR_VERSION < 5
+#include "ControlRigBlueprint.h"
+#else
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "ControlRigBlueprintLegacy.h"
+#else
+#include "ControlRigBlueprint.h"
+#endif
+#endif
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"

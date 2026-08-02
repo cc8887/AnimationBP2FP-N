@@ -6,6 +6,11 @@
 
 #if WITH_EDITOR
 
+// Keep UE4 on the public unsupported stubs below; all asset-authoring dependencies are UE5-only.
+DEFINE_LOG_CATEGORY_STATIC(LogAnimBP2FP, Log, All);
+
+#if ENGINE_MAJOR_VERSION >= 5
+
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
 #include "Animation/AnimInstance.h"
@@ -21,7 +26,11 @@
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Modules/ModuleManager.h"
 #include "Misc/SecureHash.h"
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "StructUtils/InstancedStruct.h"
+#elif ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
+#include "InstancedStruct.h"
+#endif
 #include "UObject/UnrealType.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
@@ -49,22 +58,27 @@
 #include "AnimationStateMachineGraph.h"
 #include "Animation/AnimLayerInterface.h"
 #include "BlueprintLispConverter.h"
+#if ENGINE_MAJOR_VERSION >= 5
 #include "AnimGraphNode_ControlRig.h"
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "ControlRigBlueprintLegacy.h"
+#else
+#include "ControlRigBlueprint.h"
+#endif
+#endif
 #include "RigLangExporter.h"
 
 // State machine node headers
 #include "AnimStateEntryNode.h"
 #include "AnimStateNode.h"
+#if ENGINE_MAJOR_VERSION >= 5
 #include "AnimStateAliasNode.h"
+#endif
 #include "AnimStateTransitionNode.h"
 #include "AnimStateConduitNode.h"
 #include "AnimGraphNode_StateResult.h"
 #include "AnimationGraph.h"
 #include "AnimationGraphSchema.h"
-
-// Logging
-DEFINE_LOG_CATEGORY_STATIC(LogAnimBP2FP, Log, All);
 
 // ========== Helper Functions ==========
 
@@ -295,6 +309,7 @@ namespace
 
 		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
 		{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
 			if (StructProperty->Struct == FInstancedStruct::StaticStruct())
 			{
 				const FInstancedStruct* Instance = static_cast<const FInstancedStruct*>(Value);
@@ -309,12 +324,11 @@ namespace
 				{
 					Snapshot.Fields.Add({Path, Property->GetCPPType(), TEXT("invalid")});
 				}
+				return;
 			}
-			else
-			{
-				Snapshot.Fields.Add({Path, Property->GetCPPType(), TEXT("struct=") + StructProperty->Struct->GetPathName()});
-				CaptureSnapshotStruct(StructProperty->Struct, Value, Path, RootAsset, Snapshot, VisitedObjects);
-			}
+#endif
+			Snapshot.Fields.Add({Path, Property->GetCPPType(), TEXT("struct=") + StructProperty->Struct->GetPathName()});
+			CaptureSnapshotStruct(StructProperty->Struct, Value, Path, RootAsset, Snapshot, VisitedObjects);
 			return;
 		}
 
@@ -437,12 +451,14 @@ namespace
 		{
 			Dependency.AssetMetadata = SnapshotAnimationAsset(Animation);
 		}
+#if ENGINE_MAJOR_VERSION >= 5
 		if (const UAnimMontage* Montage = Cast<UAnimMontage>(Object))
 		{
 			AddExternalDependency(Montage->BlendProfileIn, AST, SeenPaths);
 			AddExternalDependency(Montage->BlendProfileOut, AST, SeenPaths);
 		}
-		IAssetRegistry* AssetRegistry = ReferencedObjects.IsEmpty()
+#endif
+		IAssetRegistry* AssetRegistry = ReferencedObjects.Num() == 0
 			? nullptr
 			: &FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
 		for (const FString& ReferencedObjectPath : ReferencedObjects)
@@ -470,7 +486,12 @@ namespace
 			Module.Get().GetAssetsByPackageName(PackageName, Assets, true);
 			for (const FAssetData& AssetData : Assets)
 			{
-				if (IsDependencyCandidateClassPath(AssetData.AssetClassPath.ToString()))
+#if ENGINE_MAJOR_VERSION >= 5
+				const FString AssetClassPath = AssetData.AssetClassPath.ToString();
+#else
+				const FString AssetClassPath = AssetData.AssetClass.ToString();
+#endif
+				if (IsDependencyCandidateClassPath(AssetClassPath))
 				{
 					AddExternalDependency(AssetData.GetAsset(), AST, SeenPaths);
 				}
@@ -541,7 +562,7 @@ namespace
 	static FString FormatExposedCustomPinNames(const UAnimGraphNode_Base* Node)
 	{
 		const TArray<FString> Names = GetExposedCustomPinNames(Node);
-		if (Names.IsEmpty()) return FString();
+		if (Names.Num() == 0) return FString();
 
 		FString Result = TEXT("(pin-names");
 		for (const FString& Name : Names)
@@ -659,6 +680,7 @@ namespace
 		});
 	}
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
 	static const TMap<FName, FAnimGraphNodePropertyBinding>* GetPropertyBindingMap(const UAnimGraphNode_Base* Node)
 	{
 		if (!Node || !Node->GetBinding())
@@ -730,6 +752,17 @@ namespace
 		Result += TEXT(")");
 		return Result;
 	}
+#else
+	static bool TryGetPropertyBinding(const UAnimGraphNode_Base*, const FName&, FAnimGraphNodePropertyBinding&)
+	{
+		return false;
+	}
+
+	static FString FormatBindPathValue(const FAnimGraphNodePropertyBinding&)
+	{
+		return FString();
+	}
+#endif
 
 	static bool IsManagedHelperGraphName(const FString& GraphName)
 	{
@@ -1610,7 +1643,7 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(
 
 	auto ExportLogicGraph = [AnimBlueprint, &ResultAST](UEdGraph* Graph, const TCHAR* Role, const TCHAR* Kind) -> bool
 	{
-		if (!Graph || Graph->Nodes.IsEmpty())
+		if (!Graph || Graph->Nodes.Num() == 0)
 		{
 			return true;
 		}
@@ -1684,7 +1717,7 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(
 		FAnimationLayerDef& Layer = ResultAST->AnimationLayers.AddDefaulted_GetRef();
 		Layer.InterfaceClassPath = InterfacePath;
 		Layer.GraphName = LayerGraph->GetName();
-		Layer.GraphGuid = LayerGraph->GraphGuid.ToString(EGuidFormats::DigitsWithHyphensLower);
+		Layer.GraphGuid = LayerGraph->GraphGuid.ToString(EGuidFormats::DigitsWithHyphens);
 		Layer.SchemaClassPath = LayerGraph->GetSchema()->GetClass()->GetPathName();
 
 		TSharedPtr<FAnimGraphAST> LayerAST = MakeShared<FAnimGraphAST>();
@@ -2019,6 +2052,7 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 		return Result;
 	}
 
+#if ENGINE_MAJOR_VERSION >= 5
 	if (UAnimGraphNode_ControlRig* ControlRigNode = Cast<UAnimGraphNode_ControlRig>(Node))
 	{
 		Result->NodeType = TEXT("control-rig");
@@ -2165,7 +2199,7 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 			FAnimGraphNodePropertyBinding PropertyBinding;
 			const bool bHasPropertyBinding = TryGetPropertyBinding(Node, Pin->GetFName(), PropertyBinding)
 				&& !FormatBindPathValue(PropertyBinding).IsEmpty();
-			if (!bHasPropertyBinding && Pin->LinkedTo.IsEmpty())
+			if (!bHasPropertyBinding && Pin->LinkedTo.Num() == 0)
 			{
 				Input.ValueExpression = FormatRigPinDefault(Pin);
 			}
@@ -2193,22 +2227,23 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 		}
 		return Result;
 	}
+#endif
 
 	// ---- SequencePlayer ----
 	if (UAnimGraphNode_SequencePlayer* SeqPlayer = Cast<UAnimGraphNode_SequencePlayer>(Node))
 	{
 		Result->NodeType = TEXT("sequence-player");
 		
-		if (SeqPlayer->Node.GetSequence())
-		{
-			Result->Properties.Add(TEXT("name"), FString::Printf(TEXT("\"%s\""), *SeqPlayer->Node.GetSequence()->GetName()));
-		}
-		else
-		{
-			Result->Properties.Add(TEXT("name"), TEXT("\"None\""));
-		}
-		
-		Result->Properties.Add(TEXT("loop"), SeqPlayer->Node.IsLooping() ? TEXT("true") : TEXT("false"));
+#if ENGINE_MAJOR_VERSION >= 5
+		UAnimSequenceBase* Sequence = SeqPlayer->Node.GetSequence();
+		const bool bLoop = SeqPlayer->Node.IsLooping();
+#else
+		UAnimSequenceBase* Sequence = SeqPlayer->Node.Sequence;
+		const bool bLoop = SeqPlayer->Node.bLoopAnimation;
+#endif
+		Result->Properties.Add(TEXT("name"), Sequence
+			? FString::Printf(TEXT("\"%s\""), *Sequence->GetName()) : TEXT("\"None\""));
+		Result->Properties.Add(TEXT("loop"), bLoop ? TEXT("true") : TEXT("false"));
 		
 		// Collect all other non-pose parameters from pins
 		CollectNonPoseParams(Node, Result->Properties);
@@ -2221,18 +2256,22 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 	{
 		Result->NodeType = TEXT("blendspace-player");
 		
-		if (BSPlayer->Node.GetBlendSpace())
-		{
-			Result->Properties.Add(TEXT("name"), FString::Printf(TEXT("\"%s\""), *BSPlayer->Node.GetBlendSpace()->GetName()));
-		}
-		else
-		{
-			Result->Properties.Add(TEXT("name"), TEXT("\"None\""));
-		}
-		
-		Result->Properties.Add(TEXT("loop"), BSPlayer->Node.IsLooping() ? TEXT("true") : TEXT("false"));
-		
-		float PlayRate = BSPlayer->Node.GetPlayRate();
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
+		UBlendSpace* BlendSpace = BSPlayer->Node.GetBlendSpace();
+		const bool bLoop = BSPlayer->Node.IsLooping();
+		const float PlayRate = BSPlayer->Node.GetPlayRate();
+#elif ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2)
+		UBlendSpace* BlendSpace = BSPlayer->Node.GetBlendSpace();
+		const bool bLoop = BSPlayer->Node.IsLooping();
+		const float PlayRate = BSPlayer->Node.GetPlayRate();
+#else
+		UBlendSpaceBase* BlendSpace = BSPlayer->Node.BlendSpace;
+		const bool bLoop = BSPlayer->Node.bLoop;
+		const float PlayRate = BSPlayer->Node.PlayRate;
+#endif
+		Result->Properties.Add(TEXT("name"), BlendSpace
+			? FString::Printf(TEXT("\"%s\""), *BlendSpace->GetName()) : TEXT("\"None\""));
+		Result->Properties.Add(TEXT("loop"), bLoop ? TEXT("true") : TEXT("false"));
 		if (!FMath::IsNearlyEqual(PlayRate, 1.0f))
 		{
 			Result->Properties.Add(TEXT("play-rate"), FString::SanitizeFloat(PlayRate));
@@ -2577,6 +2616,7 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 	}
 
 	// ---- Generic fallback: auto-extract all pins ----
+#if ENGINE_MAJOR_VERSION >= 5
 	for (const UClass* TestClass = Node->GetClass(); TestClass; TestClass = TestClass->GetSuperClass())
 	{
 		if (TestClass->GetName() != TEXT("AnimGraphNode_BlendStack_Base"))
@@ -2601,7 +2641,7 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 			}
 			Result->Properties.Add(TEXT("bound-graph-class"), QuoteDSLString(BoundGraph->GetClass()->GetPathName()));
 			Result->Properties.Add(TEXT("bound-graph-guid"), QuoteDSLString(
-				BoundGraph->GraphGuid.ToString(EGuidFormats::DigitsWithHyphensLower)));
+				BoundGraph->GraphGuid.ToString(EGuidFormats::DigitsWithHyphens)));
 			if (const UEdGraphSchema* Schema = BoundGraph->GetSchema())
 			{
 				Result->Properties.Add(TEXT("bound-graph-schema"), QuoteDSLString(Schema->GetClass()->GetPathName()));
@@ -2666,6 +2706,7 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 		}
 		return Result;
 	}
+#endif
 
 	{
 		// Convert "AnimGraphNode_XYZ" to "xyz" in kebab-case
@@ -2747,8 +2788,8 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 			UEdGraph* StateGraph = StateNode->GetBoundGraph();
 			if (StateGraph)
 			{
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
-			// UE5.5+: GetResultNodeInsideState() was removed, use GetPoseSinkPinInsideState() instead
+#if ENGINE_MAJOR_VERSION < 5 || (ENGINE_MAJOR_VERSION == 5 && (ENGINE_MINOR_VERSION == 1 || ENGINE_MINOR_VERSION >= 5))
+			// UE4, UE5.1, and UE5.5+: use the pose sink pin directly
 			UEdGraphPin* PoseSinkPin = StateNode->GetPoseSinkPinInsideState();
 			if (PoseSinkPin && PoseSinkPin->LinkedTo.Num() > 0)
 			{
@@ -2776,6 +2817,7 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 			UE_LOG(LogAnimBP2FP, Log, TEXT("    State: %s (has animation: %s)"), 
 				*State.Name, State.Animation.IsValid() ? TEXT("yes") : TEXT("no"));
 		}
+#if ENGINE_MAJOR_VERSION >= 5
 		else if (UAnimStateAliasNode* Alias = Cast<UAnimStateAliasNode>(GraphNode))
 		{
 			FStateMachineAST::FState State;
@@ -2791,6 +2833,7 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 			UE_LOG(LogAnimBP2FP, Log, TEXT("    Alias: %s (global: %s, targets: %d)"),
 				*State.Name, State.bGlobalAlias ? TEXT("true") : TEXT("false"), State.AliasedStates.Num());
 		}
+#endif
 		else if (UAnimStateConduitNode* Conduit = Cast<UAnimStateConduitNode>(GraphNode))
 		{
 			FStateMachineAST::FState State;
@@ -2816,8 +2859,10 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 	{
 		if (UAnimStateTransitionNode* TransNode = Cast<UAnimStateTransitionNode>(GraphNode))
 		{
-			// Skip disabled transitions
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2)
+			// Newer UE5 exposes an explicit disabled transition flag.
 			if (TransNode->bDisabled) continue;
+#endif
 			
 			UAnimStateNodeBase* FromState = TransNode->GetPreviousState();
 			UAnimStateNodeBase* ToState = TransNode->GetNextState();
@@ -3020,4 +3065,69 @@ bool FAnimBPExporter::ExportEventGraph(
 	}
 }
 
+#else
+
+namespace
+{
+	const TCHAR* UE4ExporterUnsupported = TEXT("[UNSUPPORTED:UE4AnimAuthoring] Unreal Engine 4 supports parser/lint/diff only; Animation Blueprint export requires Unreal Engine 5");
+}
+
+FString FAnimBPExporter::Export(UAnimBlueprint* AnimBlueprint)
+{
+	UE_LOG(LogAnimBP2FP, Error, TEXT("%s"), UE4ExporterUnsupported);
+	return FString::Printf(TEXT("; Error: %s"), UE4ExporterUnsupported);
+}
+
+TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBlueprint)
+{
+	return ExportToAST(AnimBlueprint, nullptr);
+}
+
+TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(
+	UAnimBlueprint* AnimBlueprint,
+	TMap<FString, FRigLangExportResult>* OutRigModules)
+{
+	if (OutRigModules) OutRigModules->Reset();
+	UE_LOG(LogAnimBP2FP, Error, TEXT("%s"), UE4ExporterUnsupported);
+	return nullptr;
+}
+
+FString FAnimBPExporter::ExportWithOptions(UAnimBlueprint* AnimBlueprint, const FExportOptions& Options)
+{
+	TMap<FString, FRigLangExportResult> IgnoredRigModules;
+	return ExportWithOptions(AnimBlueprint, Options, IgnoredRigModules);
+}
+
+FString FAnimBPExporter::ExportWithOptions(
+	UAnimBlueprint* AnimBlueprint,
+	const FExportOptions& Options,
+	TMap<FString, FRigLangExportResult>& OutRigModules,
+	TSharedPtr<FAnimGraphAST>* OutAST)
+{
+	OutRigModules.Reset();
+	if (OutAST) OutAST->Reset();
+	UE_LOG(LogAnimBP2FP, Error, TEXT("%s"), UE4ExporterUnsupported);
+	return FString::Printf(TEXT("; Error: %s"), UE4ExporterUnsupported);
+}
+
+bool FAnimBPExporter::ExportEventGraph(
+	UAnimBlueprint* AnimBlueprint,
+	const FEventGraphExportOptions& Options,
+	FString& OutLispCode,
+	FString& OutError)
+{
+	OutLispCode.Reset();
+	OutError = UE4ExporterUnsupported;
+	UE_LOG(LogAnimBP2FP, Error, TEXT("%s"), UE4ExporterUnsupported);
+	return false;
+}
+
+#endif // ENGINE_MAJOR_VERSION >= 5
+
 #endif // WITH_EDITOR
+ // WITH_EDITOR
+TOR
+/ ENGINE_MAJOR_VERSION >= 5
+
+#endif // WITH_EDITOR
+TOR

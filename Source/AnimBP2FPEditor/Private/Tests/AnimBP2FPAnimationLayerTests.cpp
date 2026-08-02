@@ -1,6 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 #include "Animation/AnimBlueprint.h"
 #include "AnimBPExporter.h"
@@ -23,7 +25,7 @@
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPExportsNamedAnimationLayerGraphs,
 	"AnimBP2FP.AnimationLayers.ExportsAllImplementedInterfaceGraphs",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPExportsNamedAnimationLayerGraphs::RunTest(const FString& Parameters)
 {
@@ -86,7 +88,7 @@ bool FAnimBP2FPExportsNamedAnimationLayerGraphs::RunTest(const FString& Paramete
 
 	TArray<FAnimLangParseError> Errors;
 	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(DSL, Errors);
-	TestTrue(TEXT("animation layer DSL parses"), Parsed.IsValid() && Errors.IsEmpty());
+	TestTrue(TEXT("animation layer DSL parses"), Parsed.IsValid() && Errors.Num() == 0);
 	TestTrue(TEXT("parsed AST preserves the layer"), Parsed.IsValid() && Parsed->AnimationLayers.Num() == 1);
 	TestTrue(TEXT("parsed layer preserves its root"), Parsed.IsValid() && Parsed->AnimationLayers.Num() == 1
 		&& Parsed->AnimationLayers[0].RootNode.IsValid());
@@ -96,7 +98,7 @@ bool FAnimBP2FPExportsNamedAnimationLayerGraphs::RunTest(const FString& Paramete
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPExportsSelfAnimationLayerGraphs,
 	"AnimBP2FP.AnimationLayers.ExportsSelfAnimationLayerGraph",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPExportsSelfAnimationLayerGraphs::RunTest(const FString& Parameters)
 {
@@ -155,7 +157,7 @@ bool FAnimBP2FPExportsSelfAnimationLayerGraphs::RunTest(const FString& Parameter
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPImportsNamedAnimationLayerGraphs,
 	"AnimBP2FP.AnimationLayers.ImporterRestoresNamedPoseGraph",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPImportsNamedAnimationLayerGraphs::RunTest(const FString& Parameters)
 {
@@ -164,7 +166,7 @@ bool FAnimBP2FPImportsNamedAnimationLayerGraphs::RunTest(const FString& Paramete
 	FAnimationLayerDef& Layer = AST->AnimationLayers.AddDefaulted_GetRef();
 	Layer.GraphName = TEXT("UpperBodyLayer");
 	Layer.SchemaClassPath = UAnimationGraphSchema::StaticClass()->GetPathName();
-	Layer.GraphGuid = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+	Layer.GraphGuid = FGuid::NewGuid().ToString(ANIMBP2FP_GUID_HYPHENS);
 	Layer.RootNode = MakeShared<FAnimNodeAST>();
 	Layer.RootNode->NodeType = TEXT("identity-pose");
 	AST->RootNode = MakeShared<FAnimNodeAST>();
@@ -195,10 +197,11 @@ bool FAnimBP2FPImportsNamedAnimationLayerGraphs::RunTest(const FString& Paramete
 	TestTrue(TEXT("self animation layer uses UAnimationGraph"), RestoredLayer && RestoredLayer->IsA<UAnimationGraph>());
 	TestTrue(TEXT("restored layer uses animation graph schema"), RestoredLayer && RestoredLayer->GetSchema()
 		&& RestoredLayer->GetSchema()->IsA<UAnimationGraphSchema>());
-	TestEqual(TEXT("restored layer graph GUID is exact"), RestoredLayer ? RestoredLayer->GraphGuid.ToString(EGuidFormats::DigitsWithHyphensLower) : FString(), Layer.GraphGuid);
+	TestEqual(TEXT("restored layer graph GUID is exact"), RestoredLayer ? RestoredLayer->GraphGuid.ToString(ANIMBP2FP_GUID_HYPHENS) : FString(), Layer.GraphGuid);
 	TestTrue(TEXT("restored layer contains a root node"), RestoredLayer && RestoredLayer->Nodes.ContainsByPredicate(
 		[](const UEdGraphNode* Node) { return Node && Node->IsA<UAnimGraphNode_Root>(); }));
 	return true;
 }
 
 #endif
+#endif // UE 5.8+

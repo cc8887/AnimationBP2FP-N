@@ -16,7 +16,7 @@ struct ANIMBP2FP_API FRigLangDiffResult
 {
 	TArray<FRigLangDifference> Differences;
 
-	bool IsEmpty() const { return Differences.IsEmpty(); }
+	bool IsEmpty() const { return Differences.Num() == 0; }
 	FString ToJson() const;
 };
 

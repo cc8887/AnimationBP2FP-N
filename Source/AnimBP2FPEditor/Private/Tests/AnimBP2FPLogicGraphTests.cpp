@@ -1,6 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
@@ -38,7 +40,7 @@ namespace AnimBP2FPLogicGraphTests
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPMainDSLIncludesBlueprintLispLogicGraphs,
 	"AnimBP2FP.LogicGraphs.MainDSLIncludesBlueprintLisp",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPMainDSLIncludesBlueprintLispLogicGraphs::RunTest(const FString& Parameters)
 {
@@ -78,7 +80,7 @@ bool FAnimBP2FPMainDSLIncludesBlueprintLispLogicGraphs::RunTest(const FString& P
 
 	TArray<FAnimLangParseError> Errors;
 	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(DSL, Errors);
-	TestTrue(TEXT("main DSL with BlueprintLisp parses"), Parsed.IsValid() && Errors.IsEmpty());
+	TestTrue(TEXT("main DSL with BlueprintLisp parses"), Parsed.IsValid() && Errors.Num() == 0);
 	if (!Parsed.IsValid() || Parsed->LogicGraphs.Num() != 2)
 	{
 		return false;
@@ -93,7 +95,7 @@ bool FAnimBP2FPMainDSLIncludesBlueprintLispLogicGraphs::RunTest(const FString& P
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPImporterRestoresLogicGraphs,
 	"AnimBP2FP.LogicGraphs.ImporterRestoresBeforeCompile",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPImporterRestoresLogicGraphs::RunTest(const FString& Parameters)
 {
@@ -142,7 +144,7 @@ bool FAnimBP2FPImporterRestoresLogicGraphs::RunTest(const FString& Parameters)
 		}
 	}
 	TestTrue(TEXT("EventGraph is created"), RestoredEventGraph != nullptr);
-	TestTrue(TEXT("EventGraph nodes are restored"), RestoredEventGraph && !RestoredEventGraph->Nodes.IsEmpty());
+	TestTrue(TEXT("EventGraph nodes are restored"), RestoredEventGraph && RestoredEventGraph->Nodes.Num() != 0);
 
 	UEdGraph* RestoredFunctionGraph = nullptr;
 	for (UEdGraph* Graph : Destination->FunctionGraphs)
@@ -154,14 +156,14 @@ bool FAnimBP2FPImporterRestoresLogicGraphs::RunTest(const FString& Parameters)
 		}
 	}
 	TestTrue(TEXT("function graph is created"), RestoredFunctionGraph != nullptr);
-	TestTrue(TEXT("function graph nodes are restored"), RestoredFunctionGraph && !RestoredFunctionGraph->Nodes.IsEmpty());
+	TestTrue(TEXT("function graph nodes are restored"), RestoredFunctionGraph && RestoredFunctionGraph->Nodes.Num() != 0);
 	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPPureFunctionFlagsRoundTrip,
 	"AnimBP2FP.LogicGraphs.PureFunctionFlagsRoundTrip",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPPureFunctionFlagsRoundTrip::RunTest(const FString& Parameters)
 {
@@ -226,3 +228,4 @@ bool FAnimBP2FPPureFunctionFlagsRoundTrip::RunTest(const FString& Parameters)
 }
 
 #endif
+#endif // UE 5.8+

@@ -1,10 +1,21 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 
 #include "ControlRigBlueprintFactory.h"
+#if ENGINE_MAJOR_VERSION < 5
+#if ENGINE_MAJOR_VERSION >= 5
+#include "ControlRigBlueprint.h"
+#else
+#if ENGINE_MAJOR_VERSION >= 5
 #include "ControlRigBlueprintLegacy.h"
+#else
+#include "ControlRigBlueprint.h"
+#endif
+#endif
 #include "Kismet2/KismetEditorUtilities.h"
 #include "RigLangExporter.h"
 #include "RigLangImporter.h"
@@ -31,8 +42,8 @@
 
 namespace RigLangGraphImportTests
 {
-const EAutomationTestFlags Flags =
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter;
+const ANIMBP2FP_AUTOMATION_TEST_FLAGS_TYPE Flags =
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter;
 
 UControlRigBlueprint* MakeSourceRig()
 {
@@ -184,7 +195,7 @@ bool FRigLangGraphImportRoundTripTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("public visibility exports"), Public->Visibility, FString(TEXT("public")));
 		TestTrue(TEXT("function external variable exports"), Public->ExternalVariables.ContainsByPredicate(
 			[](const FRigExternalVariableAST& Variable) { return Variable.Name == TEXT("Speed"); }));
-		TestTrue(TEXT("function dependency exports with exact identity"), !Public->Dependencies.IsEmpty()
+		TestTrue(TEXT("function dependency exports with exact identity"), Public->Dependencies.Num() != 0
 			&& Public->Dependencies[0].HostObject.Contains(TEXT("CR_GraphImportSource"))
 			&& Public->Dependencies[0].LibraryNodePath.Contains(TEXT("WantsToLock")));
 	}
@@ -352,11 +363,11 @@ bool FRigLangGraphImportRoundTripTest::RunTest(const FString& Parameters)
 		{
 			return Graph.Nodes.ContainsByPredicate([](const FRigNodeAST& Node)
 			{
-				return Node.Pins.ContainsByPredicate([](const FRigPinAST& Pin) { return !Pin.SubPins.IsEmpty(); });
+				return Node.Pins.ContainsByPredicate([](const FRigPinAST& Pin) { return Pin.SubPins.Num() != 0; });
 			});
 		}));
 	TestTrue(TEXT("links are reconstructed"), ReExport.Module->Graphs.ContainsByPredicate(
-		[](const FRigGraphAST& Graph) { return !Graph.Links.IsEmpty(); }));
+		[](const FRigGraphAST& Graph) { return Graph.Links.Num() != 0; }));
 	TestTrue(TEXT("reroute, comment, and injected nodes are reconstructed"),
 		ReExport.Module->Graphs.ContainsByPredicate([](const FRigGraphAST& Graph)
 		{
@@ -901,3 +912,6 @@ bool FRigLangGraphImportEmptyNamedGraphTest::RunTest(const FString& Parameters)
 }
 
 #endif
+
+#endif // ENGINE_MAJOR_VERSION >= 5
+#endif // UE 5.8+

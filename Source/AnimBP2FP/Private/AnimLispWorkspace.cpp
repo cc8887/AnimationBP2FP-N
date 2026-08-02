@@ -13,11 +13,25 @@ namespace
 bool AreRigVMLinkTypesCompatible(const FAnimLispTypeRef& A, const FAnimLispTypeRef& B)
 {
 	if (A == B) return true;
+#if ENGINE_MAJOR_VERSION < 5
+	// UE4 RigVM has no public type registry. Preserve only the documented float/double
+	// normalization; do not synthesize registry indices.
+	const bool bAReal = A.CPPType == TEXT("float") || A.CPPType == TEXT("double");
+	const bool bBReal = B.CPPType == TEXT("float") || B.CPPType == TEXT("double");
+	return bAReal && bBReal && A.ContainerType == B.ContainerType;
+#elif ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 5
+	FRigVMRegistry& Registry = FRigVMRegistry::Get();
+	const TRigVMTypeIndex AIndex = Registry.GetTypeIndexFromCPPType(A.CPPType);
+	const TRigVMTypeIndex BIndex = Registry.GetTypeIndexFromCPPType(B.CPPType);
+	return AIndex != INDEX_NONE && BIndex != INDEX_NONE
+		&& Registry.CanMatchTypes(AIndex, BIndex, true);
+#else
 	const FRigVMRegistry_RWLock& Registry = FRigVMRegistry::Get();
 	const TRigVMTypeIndex AIndex = Registry.GetTypeIndexFromCPPType(A.CPPType);
 	const TRigVMTypeIndex BIndex = Registry.GetTypeIndexFromCPPType(B.CPPType);
 	return AIndex != INDEX_NONE && BIndex != INDEX_NONE
 		&& Registry.CanMatchTypes(AIndex, BIndex, true);
+#endif
 }
 
 struct FTokenForm
@@ -446,7 +460,7 @@ void LintRigGraph(const FRigGraphAST& Graph, FAnimLangDiagnostics& OutDiag)
 		FString Member;
 		do
 		{
-			Member = ComponentStack.Pop(EAllowShrinking::No);
+			Member = ComponentStack.Pop(ANIMBP2FP_NO_SHRINKING);
 			OnComponentStack.Remove(Member);
 			Component.Add(Member);
 		}
@@ -660,12 +674,12 @@ void LintRigModule(const FRigModuleAST& Rig, FAnimLangDiagnostics& OutDiag)
 		if (const FRigHierarchyElementAST* Element = ElementsById.FindRef(ElementId))
 			for (const FRigHierarchyParentAST& Parent : Element->Parents)
 				if (ElementsById.Contains(Parent.StableId)) VisitTypedParents(Parent.StableId);
-		TypedParentPath.Pop(EAllowShrinking::No);
+		TypedParentPath.Pop(ANIMBP2FP_NO_SHRINKING);
 		TypedParentVisit.Add(ElementId, 2);
 	};
 	for (const FRigHierarchyElementAST& Element : Rig.Hierarchy) VisitTypedParents(Element.StableId);
 
-	if (!Rig.Graphs.IsEmpty())
+	if (Rig.Graphs.Num() != 0)
 	{
 		for (const FRigGraphAST& Graph : Rig.Graphs) LintRigGraph(Graph, OutDiag);
 	}
@@ -697,7 +711,7 @@ FAnimLispTypeRef RigFunctionTypeSignature(const FRigFunctionAST& Function)
 	TArray<FString> Arguments;
 	const TArray<FRigCallableArgumentAST>* OrderedArguments = &Function.Arguments;
 	TArray<FRigCallableArgumentAST> LegacyArguments;
-	if (OrderedArguments->IsEmpty() && (!Function.Inputs.IsEmpty() || !Function.Outputs.IsEmpty()))
+	if (OrderedArguments->Num() == 0 && (Function.Inputs.Num() != 0 || Function.Outputs.Num() != 0))
 	{
 		LegacyArguments = Function.Inputs;
 		LegacyArguments.Append(Function.Outputs);
@@ -810,7 +824,7 @@ struct FAnimLispWorkspace::FImpl
 			}
 			if (Asset == nullptr)
 			{
-				if (Errors.IsEmpty())
+				if (Errors.Num() == 0)
 				{
 					FAnimLangSourceLoc Location;
 					Location.SourceFile = SourceFile;
@@ -902,7 +916,7 @@ struct FAnimLispWorkspace::FImpl
 				Use.Location = Node.Location;
 			}
 		};
-		if (!Rig->Graphs.IsEmpty())
+		if (Rig->Graphs.Num() != 0)
 			for (const FRigGraphAST& Graph : Rig->Graphs) CollectCalls(Graph);
 		else
 		{
@@ -916,13 +930,13 @@ struct FAnimLispWorkspace::FImpl
 		FString CanonicalProbeSource = Source;
 		if (!CanonicalProbeSource.IsEmpty() && CanonicalProbeSource[0] == 0xFEFF)
 		{
-			CanonicalProbeSource.RemoveAt(0, 1, EAllowShrinking::No);
+			CanonicalProbeSource.RemoveAt(0, 1, ANIMBP2FP_NO_SHRINKING);
 		}
 		TArray<FAnimLangParseError> ProbeErrors;
 		const TArray<FAnimLangToken> ProbeTokens = FAnimLangTokenizer::Tokenize(
 			CanonicalProbeSource, SourceFile, &ProbeErrors);
 		const TArray<FTokenForm> ProbeForms = FindTopLevelForms(ProbeTokens);
-		if (!ProbeForms.IsEmpty() && ProbeForms[0].Head == TEXT("anim-blueprint"))
+		if (ProbeForms.Num() != 0 && ProbeForms[0].Head == TEXT("anim-blueprint"))
 		{
 			TArray<FAnimLangParseError> ParseErrors;
 			const TSharedPtr<FAnimGraphAST> AST = FAnimLangParser::Parse(CanonicalProbeSource, ParseErrors);
@@ -1015,17 +1029,17 @@ struct FAnimLispWorkspace::FImpl
 				const EAnimLangTokenType Expected = Token.Type == EAnimLangTokenType::RParen
 					? EAnimLangTokenType::LParen
 					: EAnimLangTokenType::LBracket;
-				if (Delimiters.IsEmpty() || Delimiters.Last() != Expected)
+				if (Delimiters.Num() == 0 || Delimiters.Last() != Expected)
 				{
 					AddError(TEXT("Mismatched Anim module delimiter"), Token.Span);
 				}
 				else
 				{
-					Delimiters.Pop(EAllowShrinking::No);
+					Delimiters.Pop(ANIMBP2FP_NO_SHRINKING);
 				}
 			}
 		}
-		if (!Delimiters.IsEmpty())
+		if (Delimiters.Num() != 0)
 		{
 			FAnimLangSourceLoc Location;
 			Location.SourceFile = SourceFile;
@@ -1033,7 +1047,7 @@ struct FAnimLispWorkspace::FImpl
 			Location.Column = Tokens.Last().Span.Column;
 			AddError(TEXT("Unbalanced Anim module form"), Location);
 		}
-		if (Headers.IsEmpty())
+		if (Headers.Num() == 0)
 		{
 			FAnimLangSourceLoc Location;
 			Location.SourceFile = SourceFile;
@@ -1217,7 +1231,7 @@ struct FAnimLispWorkspace::FImpl
 				RequireProperty(Form, TEXT("rig-variable"), {EAnimLangTokenType::String});
 			}
 		}
-		if (!Errors.IsEmpty())
+		if (Errors.Num() != 0)
 		{
 			if (Asset != nullptr)
 			{
@@ -1584,7 +1598,7 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag, const bool bAllowL
 								*Module.Id.ToString(),
 								*Target.Id.ToString()),
 							Import.Location);
-						if (!Target.ParseErrors.IsEmpty())
+						if (Target.ParseErrors.Num() != 0)
 						{
 							Diagnostic.AddRelatedLocation(Target.ParseErrors[0].Location, TEXT("Dependency parse error"));
 						}
@@ -1658,7 +1672,7 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag, const bool bAllowL
 				bImportCycleReported = true;
 			}
 		}
-		ImportVisitStack.Pop(EAllowShrinking::No);
+		ImportVisitStack.Pop(ANIMBP2FP_NO_SHRINKING);
 		ImportVisitState[ModuleIndex] = 2;
 	};
 	for (int32 ModuleIndex = 0; ModuleIndex < Impl->Modules.Num() && !bImportCycleReported; ++ModuleIndex)
@@ -1731,7 +1745,7 @@ bool FAnimLispWorkspace::Build(FAnimLangDiagnostics& OutDiag, const bool bAllowL
 				bCycleReported = true;
 			}
 		}
-		VisitStack.Pop(EAllowShrinking::No);
+		VisitStack.Pop(ANIMBP2FP_NO_SHRINKING);
 		VisitState[ModuleIndex] = 2;
 	};
 	for (int32 ModuleIndex = 0; ModuleIndex < Impl->Modules.Num() && !bCycleReported; ++ModuleIndex)

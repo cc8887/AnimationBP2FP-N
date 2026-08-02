@@ -95,7 +95,7 @@ bool IsPromotedHierarchyProperty(const FString& Key)
 void AppendHierarchyProperties(FString& Out, const FRigHierarchyElementAST& Element)
 {
 	TMap<FString, FString> Legacy = Element.Properties;
-	if (!Element.Parents.IsEmpty() || !Element.Transforms.IsEmpty() || !Element.States.IsEmpty() || !Element.Metadata.IsEmpty())
+	if (Element.Parents.Num() != 0 || Element.Transforms.Num() != 0 || Element.States.Num() != 0 || Element.Metadata.Num() != 0)
 	{
 		for (auto It = Legacy.CreateIterator(); It; ++It) if (IsPromotedHierarchyProperty(It.Key())) It.RemoveCurrent();
 	}
@@ -429,7 +429,7 @@ FString BuildCanonical(const FRigModuleAST& Module, const bool bIncludeContentHa
 		Out += TEXT(")");
 	}
 
-	if (!Module.Hierarchy.IsEmpty())
+	if (Module.Hierarchy.Num() != 0)
 	{
 		Out += TEXT("\n(rig-hierarchy");
 		for (const FRigHierarchyElementAST& Element : Module.Hierarchy)
@@ -529,7 +529,7 @@ FString BuildCanonical(const FRigModuleAST& Module, const bool bIncludeContentHa
 		Out += TEXT(")");
 	}
 
-	if (!Module.Variables.IsEmpty())
+	if (Module.Variables.Num() != 0)
 	{
 		TArray<FRigVariableAST> Variables = Module.Variables;
 		Variables.Sort([](const FRigVariableAST& A, const FRigVariableAST& B)
@@ -598,7 +598,7 @@ FString BuildCanonical(const FRigModuleAST& Module, const bool bIncludeContentHa
 			FunctionProperties.Remove(TEXT("library-node-path"));
 		}
 		AppendProperties(Out, FunctionProperties, TEXT(" "));
-		if (!Function.Arguments.IsEmpty())
+		if (Function.Arguments.Num() != 0)
 		{
 			for (const FRigCallableArgumentAST& Argument : Function.Arguments) AppendArgument(Out, Argument, 2);
 		}
@@ -629,7 +629,7 @@ FString BuildCanonical(const FRigModuleAST& Module, const bool bIncludeContentHa
 			Out += TEXT(" :graph-id ") + Quote(Entry.GraphStableId);
 		}
 		AppendProperties(Out, Entry.Properties, TEXT(" "));
-		if (!Entry.Arguments.IsEmpty())
+		if (Entry.Arguments.Num() != 0)
 		{
 			for (const FRigCallableArgumentAST& Argument : Entry.Arguments) AppendArgument(Out, Argument, 2);
 		}
@@ -704,7 +704,7 @@ bool FRigModuleAST::SemanticEquals(const FRigModuleAST& Other) const
 FRigCoverageTotals FRigModuleAST::GetCoverageTotals() const
 {
 	FRigCoverageTotals Totals;
-	if (!Graphs.IsEmpty())
+	if (Graphs.Num() != 0)
 	{
 		for (const FRigGraphAST& Graph : Graphs) AddCoverage(Graph, Totals);
 		return Totals;

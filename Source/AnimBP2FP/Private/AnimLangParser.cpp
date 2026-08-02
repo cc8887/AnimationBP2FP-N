@@ -108,7 +108,7 @@ static FString LegacyRigSourceAssetPath(const FString& RawValue)
 	}
 	else if (ObjectPath.EndsWith(TEXT("_C")))
 	{
-		ObjectPath.LeftChopInline(2, EAllowShrinking::No);
+		ObjectPath.LeftChopInline(2, ANIMBP2FP_NO_SHRINKING);
 	}
 	return ObjectPath;
 }

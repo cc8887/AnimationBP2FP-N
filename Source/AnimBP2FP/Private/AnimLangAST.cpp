@@ -369,7 +369,7 @@ FString FVariableDef::ToString() const
 	if (bIsConst) Result += TEXT(" :const true");
 	if (bIsWeakPointer) Result += TEXT(" :weak true");
 	if (bIsUObjectWrapper) Result += TEXT(" :object-wrapper true");
-	if (bIsMap && !MapEntries.IsEmpty())
+	if (bIsMap && MapEntries.Num() != 0)
 	{
 		TArray<FMapEntryDef> SortedEntries = MapEntries;
 		SortedEntries.Sort([](const FMapEntryDef& A, const FMapEntryDef& B)
@@ -513,7 +513,7 @@ FString FAnimDependency::ToString(int32 Indent) const
 		{
 			Result += FString::Printf(TEXT(" :root-motion-root-lock %s"), *EscapeQuotedStringForDSL(AssetMetadata.RootMotionRootLock));
 		}
-		if (!AssetMetadata.Notifies.IsEmpty())
+		if (AssetMetadata.Notifies.Num() != 0)
 		{
 			Result += TEXT(" :notifies [");
 			for (const FAnimNotifySnapshot& Notify : AssetMetadata.Notifies)
@@ -524,7 +524,7 @@ FString FAnimDependency::ToString(int32 Indent) const
 			}
 			Result += TEXT(" ]");
 		}
-		if (!AssetMetadata.SyncMarkers.IsEmpty())
+		if (AssetMetadata.SyncMarkers.Num() != 0)
 		{
 			Result += TEXT(" :sync-markers [");
 			for (const FAnimSyncMarkerSnapshot& Marker : AssetMetadata.SyncMarkers)
@@ -533,7 +533,7 @@ FString FAnimDependency::ToString(int32 Indent) const
 			}
 			Result += TEXT(" ]");
 		}
-		if (!AssetMetadata.MontageSections.IsEmpty())
+		if (AssetMetadata.MontageSections.Num() != 0)
 		{
 			Result += TEXT(" :montage-sections [");
 			for (const FMontageSectionSnapshot& Section : AssetMetadata.MontageSections)
@@ -543,13 +543,13 @@ FString FAnimDependency::ToString(int32 Indent) const
 			}
 			Result += TEXT(" ]");
 		}
-		if (!AssetMetadata.SlotTrackNames.IsEmpty())
+		if (AssetMetadata.SlotTrackNames.Num() != 0)
 		{
 			Result += TEXT(" :slot-tracks [");
 			for (const FString& Slot : AssetMetadata.SlotTrackNames) Result += TEXT(" ") + EscapeQuotedStringForDSL(Slot);
 			Result += TEXT(" ]");
 		}
-		if (!AssetMetadata.UnsupportedFields.IsEmpty())
+		if (AssetMetadata.UnsupportedFields.Num() != 0)
 		{
 			Result += TEXT(" :unsupported [");
 			for (const FString& Field : AssetMetadata.UnsupportedFields) Result += TEXT(" ") + EscapeQuotedStringForDSL(Field);
@@ -561,7 +561,7 @@ FString FAnimDependency::ToString(int32 Indent) const
 	{
 		Result += FString::Printf(TEXT("\n%s:typed-snapshot (asset-structure :kind %s :stable-hash %s"),
 			*C, *EscapeQuotedStringForDSL(TypedSnapshot.Kind), *EscapeQuotedStringForDSL(TypedSnapshot.StableHash));
-		if (!TypedSnapshot.Fields.IsEmpty())
+		if (TypedSnapshot.Fields.Num() != 0)
 		{
 			Result += TEXT(" :fields [");
 			for (const FExternalAssetSnapshotField& Field : TypedSnapshot.Fields)
@@ -571,7 +571,7 @@ FString FAnimDependency::ToString(int32 Indent) const
 			}
 			Result += TEXT(" ]");
 		}
-		if (!TypedSnapshot.ObjectReferences.IsEmpty())
+		if (TypedSnapshot.ObjectReferences.Num() != 0)
 		{
 			Result += TEXT(" :object-references [");
 			for (const FString& Reference : TypedSnapshot.ObjectReferences)
@@ -622,7 +622,7 @@ FString FAnimGraphAST::ToString() const
 		Result += FString::Printf(TEXT("  (metadata :root-motion-mode %s)\n"), *EscapeQuotedStringForDSL(Metadata.RootMotionMode));
 	}
 
-	if (!RigImports.IsEmpty())
+	if (RigImports.Num() != 0)
 	{
 		TArray<FAnimLispImport> SortedImports = RigImports;
 		SortedImports.Sort([](const FAnimLispImport& A, const FAnimLispImport& B)
@@ -641,7 +641,7 @@ FString FAnimGraphAST::ToString() const
 		}
 	}
 
-	if (!Dependencies.IsEmpty())
+	if (Dependencies.Num() != 0)
 	{
 		TArray<FAnimDependency> SortedDependencies = Dependencies;
 		SortedDependencies.Sort([](const FAnimDependency& A, const FAnimDependency& B)
@@ -721,7 +721,7 @@ FString FAnimGraphAST::ToString() const
 		Result += TEXT("  )\n");
 	}
 
-	if (!AnimationLayers.IsEmpty())
+	if (AnimationLayers.Num() != 0)
 	{
 		TArray<FAnimationLayerDef> SortedLayers = AnimationLayers;
 		SortedLayers.Sort([](const FAnimationLayerDef& A, const FAnimationLayerDef& B)

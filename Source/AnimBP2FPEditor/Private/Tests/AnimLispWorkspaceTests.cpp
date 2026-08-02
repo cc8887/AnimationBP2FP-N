@@ -1,6 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 
 #include "AnimLangDiagnostics.h"
@@ -13,7 +15,7 @@
 namespace AnimLispWorkspaceTests
 {
 constexpr EAutomationTestFlags TestFlags =
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter;
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter;
 
 FString RigHeader(const FString& Asset, const FString& Hash)
 {
@@ -176,7 +178,7 @@ bool FAnimLispWorkspaceCapabilityTest::RunTest(const FString& Parameters)
 	}
 	TestEqual(TEXT("Capability error points at Anim use"), Diagnostic->Location.SourceFile, FString(TEXT("Mover.animlang")));
 	TestEqual(TEXT("Capability error has one definition relation"), Diagnostic->RelatedLocations.Num(), 1);
-	if (!Diagnostic->RelatedLocations.IsEmpty())
+	if (Diagnostic->RelatedLocations.Num() != 0)
 	{
 		TestEqual(TEXT("Related location points at Rig definition"), Diagnostic->RelatedLocations[0].SourceFile, FString(TEXT("FootRig.riglang")));
 	}
@@ -595,7 +597,7 @@ bool FAnimLispWorkspaceModuleIdentityAndHashTest::RunTest(const FString& Paramet
 		TEXT("Duplicate module identity"));
 	if (TestNotNull(TEXT("Duplicate module identity is diagnosed"), Duplicate))
 	{
-		TestFalse(TEXT("Duplicate module points at both files"), Duplicate->RelatedLocations.IsEmpty());
+		TestFalse(TEXT("Duplicate module points at both files"), Duplicate->RelatedLocations.Num() == 0);
 	}
 	TestNotNull(
 		TEXT("Importer is blocked by duplicate dependency"),
@@ -640,7 +642,7 @@ bool FAnimLispWorkspaceBlockedCascadeTest::RunTest(const FString& Parameters)
 	if (TestNotNull(TEXT("Dependent module is blocked"), Blocked))
 	{
 		TestEqual(TEXT("Blocked diagnostic points at dependency parse error"), Blocked->RelatedLocations.Num(), 1);
-		if (!Blocked->RelatedLocations.IsEmpty())
+		if (Blocked->RelatedLocations.Num() != 0)
 		{
 			TestEqual(TEXT("Related parse location is in broken module"), Blocked->RelatedLocations[0].SourceFile, FString(TEXT("BrokenRig.riglang")));
 		}
@@ -734,7 +736,7 @@ bool FAnimLispWorkspaceGraphLintTest::RunTest(const FString& Parameters)
 		TEXT("source.Out"));
 	if (TestNotNull(TEXT("Connected incompatible pin types are diagnosed"), TypeMismatch))
 	{
-		TestFalse(TEXT("Pin mismatch includes the other endpoint"), TypeMismatch->RelatedLocations.IsEmpty());
+		TestFalse(TEXT("Pin mismatch includes the other endpoint"), TypeMismatch->RelatedLocations.Num() == 0);
 	}
 	TestNotNull(
 		TEXT("Reachable lossy node is diagnosed"),
@@ -1449,7 +1451,7 @@ bool FAnimLispWorkspaceSymbolKindAndBindingDirectionTest::RunTest(const FString&
 			Fragment);
 		if (TestNotNull(*(Label + TEXT(" emits kind or direction diagnostic")), Diagnostic))
 		{
-			TestFalse(*(Label + TEXT(" relates declaration")), Diagnostic->RelatedLocations.IsEmpty());
+			TestFalse(*(Label + TEXT(" relates declaration")), Diagnostic->RelatedLocations.Num() == 0);
 		}
 	};
 
@@ -1589,7 +1591,7 @@ bool FAnimLispWorkspaceDuplicateImportAliasTest::RunTest(const FString& Paramete
 	{
 		TestEqual(TEXT("Duplicate alias points at second import"), Diagnostic->Location.Line, 3);
 		TestEqual(TEXT("Duplicate alias relates first import"), Diagnostic->RelatedLocations.Num(), 1);
-		if (!Diagnostic->RelatedLocations.IsEmpty())
+		if (Diagnostic->RelatedLocations.Num() != 0)
 		{
 			TestEqual(TEXT("Related location points at first import"), Diagnostic->RelatedLocations[0].Line, 2);
 		}
@@ -1670,7 +1672,7 @@ bool FAnimLispWorkspaceGraphPinSemanticsTest::RunTest(const FString& Parameters)
 		TEXT("execute-context mismatch"));
 	if (TestNotNull(TEXT("Execute/value link mismatch is rejected"), ExecuteDiagnostic))
 	{
-		TestFalse(TEXT("Execute mismatch relates target pin"), ExecuteDiagnostic->RelatedLocations.IsEmpty());
+		TestFalse(TEXT("Execute mismatch relates target pin"), ExecuteDiagnostic->RelatedLocations.Num() == 0);
 	}
 	return true;
 }
@@ -1841,3 +1843,4 @@ bool FAnimLispWorkspaceOptionalExactTypeSchemaTest::RunTest(const FString& Param
 }
 
 #endif
+#endif // UE 5.8+

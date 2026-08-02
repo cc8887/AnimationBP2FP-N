@@ -1,8 +1,11 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 
+#if ENGINE_MAJOR_VERSION >= 5
 #include "AnimBPExporter.h"
 #include "AnimBPImporter.h"
 #include "AnimLangParser.h"
@@ -12,7 +15,15 @@
 #include "Animation/AnimBlueprintGeneratedClass.h"
 #include "AnimGraphNode_Base.h"
 #include "AnimGraphNode_ControlRig.h"
+#if ENGINE_MAJOR_VERSION < 5
+#include "ControlRigBlueprint.h"
+#else
+#if ENGINE_MAJOR_VERSION >= 5
 #include "ControlRigBlueprintLegacy.h"
+#else
+#include "ControlRigBlueprint.h"
+#endif
+#endif
 #include "Kismet2/KismetEditorUtilities.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -138,7 +149,7 @@ namespace
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPControlRigInputsRoundTrip,
 	"AnimBP2FP.ControlRig.InputsRoundTrip",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPControlRigInputsRoundTrip::RunTest(const FString& Parameters)
 {
@@ -225,7 +236,7 @@ bool FAnimBP2FPControlRigInputsRoundTrip::RunTest(const FString& Parameters)
 	TArray<FAnimLangParseError> ReparseErrors;
 	const TSharedPtr<FAnimGraphAST> ReparsedAST = FAnimLangParser::Parse(SourceDSL, ReparseErrors);
 	TestTrue(TEXT("real typed Control Rig canonical DSL reparses without diagnostics"),
-		ReparsedAST.IsValid() && ReparseErrors.IsEmpty());
+		ReparsedAST.IsValid() && ReparseErrors.Num() == 0);
 	if (ReparsedAST.IsValid())
 	{
 		TestEqual(TEXT("canonical reparse retains the typed Rig asset path"),
@@ -452,7 +463,7 @@ bool FAnimBP2FPControlRigInputsRoundTrip::RunTest(const FString& Parameters)
 		EAutomationExpectedErrorFlags::Contains, 1);
 	ExpectTypedImportFailure(TEXT("MissingRigInput"), [](FAnimRigNodeBinding& Binding)
 	{
-		if (!Binding.Inputs.IsEmpty()) Binding.Inputs[0].RigInputName = TEXT("MissingInput");
+		if (Binding.Inputs.Num() != 0) Binding.Inputs[0].RigInputName = TEXT("MissingInput");
 	});
 	AddExpectedErrorPlain(TEXT("[UNSUPPORTED:ControlRigInput] Input 'GroundNormal' has no unique exact public Rig variable/type"),
 		EAutomationExpectedErrorFlags::Contains, 1);
@@ -481,3 +492,6 @@ bool FAnimBP2FPControlRigInputsRoundTrip::RunTest(const FString& Parameters)
 }
 
 #endif
+
+#endif
+#endif // UE 5.8+

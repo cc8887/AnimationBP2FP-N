@@ -183,7 +183,11 @@ void FAnimBP2FPEditorModule::ExportAnimBPToDSL()
 	
 	TArray<FAssetData> AnimBPAssets;
 	FARFilter Filter;
+#if ENGINE_MAJOR_VERSION < 5
+	Filter.ClassNames.Add(UAnimBlueprint::StaticClass()->GetFName());
+#else
 	Filter.ClassPaths.Add(UAnimBlueprint::StaticClass()->GetClassPathName());
+#endif
 	Filter.PackagePaths.Add(FName(TEXT("/Game")));
 	Filter.bRecursivePaths = true;
 	AssetRegistry.GetAssets(Filter, AnimBPAssets);

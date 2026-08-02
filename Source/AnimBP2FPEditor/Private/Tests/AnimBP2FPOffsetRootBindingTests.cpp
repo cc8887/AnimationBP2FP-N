@@ -1,6 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 
 #include "AnimBPExporter.h"
@@ -11,7 +13,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
-
+#if ENGINE_MAJOR_VERSION >= 5
 namespace
 {
 	const TMap<FName, FAnimGraphNodePropertyBinding>* GetPropertyBindings(const UAnimGraphNode_Base* Node)
@@ -87,14 +89,14 @@ namespace
 				}
 			}
 		}
-		return OutHiddenBindings.IsEmpty();
+		return OutHiddenBindings.Num() == 0;
 	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPOffsetRootBindingsRoundTrip,
 	"AnimBP2FP.OffsetRoot.BindingsRoundTrip",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPOffsetRootBindingsRoundTrip::RunTest(const FString& Parameters)
 {
@@ -171,3 +173,5 @@ bool FAnimBP2FPOffsetRootBindingsRoundTrip::RunTest(const FString& Parameters)
 }
 
 #endif
+#endif
+#endif // UE 5.8+

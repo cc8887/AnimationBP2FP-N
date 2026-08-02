@@ -1,6 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 #include "RigLangDiffer.h"
 #include "RigLangImportCommandlet.h"
@@ -8,7 +10,15 @@
 #include "RigLangImporter.h"
 #include "ControlRig.h"
 #include "ControlRigBlueprintFactory.h"
+#if ENGINE_MAJOR_VERSION < 5
+#include "ControlRigBlueprint.h"
+#else
+#if ENGINE_MAJOR_VERSION >= 5
 #include "ControlRigBlueprintLegacy.h"
+#else
+#include "ControlRigBlueprint.h"
+#endif
+#endif
 #include "RigVMModel/RigVMClient.h"
 #include "RigVMModel/RigVMController.h"
 #include "Units/Execution/RigUnit_BeginExecution.h"
@@ -19,8 +29,8 @@
 
 namespace RigLangRoundTripTests
 {
-const EAutomationTestFlags Flags =
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter;
+const ANIMBP2FP_AUTOMATION_TEST_FLAGS_TYPE Flags =
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter;
 
 bool HasPath(const FRigLangDiffResult& Result, const FString& Path)
 {
@@ -745,3 +755,4 @@ bool FRigLangRealAssetTransientRoundTripTest::RunTest(const FString& Parameters)
 	return true;
 }
 #endif
+#endif // UE 5.8+

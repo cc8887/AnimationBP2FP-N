@@ -2,6 +2,7 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
 #include "AnimLispModule.h"
+#include "AnimBP2FPVersionCompat.h"
 
 FString AnimLispStableRuntimeSymbol(const FString& Value)
 {
@@ -30,7 +31,7 @@ FString NormalizeAssetPath(const FString& InAssetPath)
 	}
 	while (Result.Len() > 1 && Result.EndsWith(TEXT("/")))
 	{
-		Result.LeftChopInline(1, EAllowShrinking::No);
+		Result.LeftChopInline(1, ANIMBP2FP_NO_SHRINKING);
 	}
 	return Result;
 }

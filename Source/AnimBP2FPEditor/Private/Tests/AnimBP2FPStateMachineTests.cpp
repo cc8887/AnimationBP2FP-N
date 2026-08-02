@@ -1,6 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 
 #include "AnimBPExporter.h"
@@ -10,7 +12,9 @@
 #include "Animation/AnimBlueprintGeneratedClass.h"
 #include "AnimGraphNode_StateMachine.h"
 #include "AnimationStateMachineGraph.h"
+#if ENGINE_MAJOR_VERSION >= 5
 #include "AnimStateAliasNode.h"
+#endif
 #include "AnimStateConduitNode.h"
 #include "AnimStateNode.h"
 #include "AnimStateTransitionNode.h"
@@ -20,7 +24,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
-
+#if ENGINE_MAJOR_VERSION >= 5
 namespace AnimBP2FPStateMachineTests
 {
 	struct FTopology
@@ -225,7 +229,7 @@ namespace AnimBP2FPStateMachineTests
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPStateMachineTopologyAndPosesRoundTrip,
 	"AnimBP2FP.StateMachine.TopologyAndPosesRoundTrip",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPStateMachineTopologyAndPosesRoundTrip::RunTest(const FString& Parameters)
 {
@@ -311,7 +315,7 @@ bool FAnimBP2FPStateMachineTopologyAndPosesRoundTrip::RunTest(const FString& Par
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPStateMachineNestedControlRigFailurePropagates,
 	"AnimBP2FP.StateMachine.NestedControlRigFailurePropagates",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPStateMachineNestedControlRigFailurePropagates::RunTest(const FString& Parameters)
 {
@@ -374,3 +378,6 @@ bool FAnimBP2FPStateMachineNestedControlRigFailurePropagates::RunTest(const FStr
 }
 
 #endif
+
+#endif
+#endif // UE 5.8+

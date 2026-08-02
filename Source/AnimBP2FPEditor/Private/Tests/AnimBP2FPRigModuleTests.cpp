@@ -1,6 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 
 #include "AnimLangAST.h"
@@ -12,7 +14,7 @@
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPRigModuleParsePrintRoundTrip,
 	"AnimBP2FP.RigModule.ParsePrintRoundTrip",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPRigModuleParsePrintRoundTrip::RunTest(const FString& Parameters)
 {
@@ -39,8 +41,8 @@ bool FAnimBP2FPRigModuleParsePrintRoundTrip::RunTest(const FString& Parameters)
 
 	TArray<FAnimLangParseError> FirstErrors;
 	const TSharedPtr<FAnimGraphAST> First = FAnimLangParser::Parse(Source, FirstErrors);
-	TestTrue(TEXT("Typed Rig module source parses without diagnostics"), First.IsValid() && FirstErrors.IsEmpty());
-	if (!First.IsValid() || !FirstErrors.IsEmpty()) return false;
+	TestTrue(TEXT("Typed Rig module source parses without diagnostics"), First.IsValid() && FirstErrors.Num() == 0);
+	if (!First.IsValid() || FirstErrors.Num() != 0) return false;
 	TestEqual(TEXT("One typed Rig import is retained"), First->RigImports.Num(), 1);
 	if (First->RigImports.Num() == 1)
 	{
@@ -91,8 +93,8 @@ bool FAnimBP2FPRigModuleParsePrintRoundTrip::RunTest(const FString& Parameters)
 	TArray<FAnimLangParseError> SecondErrors;
 	const TSharedPtr<FAnimGraphAST> Second = FAnimLangParser::Parse(Canonical, SecondErrors);
 	TestTrue(TEXT("Canonical Rig module source reparses without diagnostics"),
-		Second.IsValid() && SecondErrors.IsEmpty());
-	if (!Second.IsValid() || !SecondErrors.IsEmpty()) return false;
+		Second.IsValid() && SecondErrors.Num() == 0);
+	if (!Second.IsValid() || SecondErrors.Num() != 0) return false;
 	TestTrue(TEXT("Reparsed Control Rig node retains typed binding"),
 		Second->RootNode.IsValid() && Second->RootNode->RigBinding.IsSet());
 	TestEqual(TEXT("Typed Rig module source reaches a fixed point"), Second->ToString(), Canonical);
@@ -102,7 +104,7 @@ bool FAnimBP2FPRigModuleParsePrintRoundTrip::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPRigModuleGrammarValidation,
 	"AnimBP2FP.RigModule.GrammarValidation",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPRigModuleGrammarValidation::RunTest(const FString& Parameters)
 {
@@ -174,7 +176,7 @@ bool FAnimBP2FPRigModuleGrammarValidation::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPRigModuleLegacyReferenceMigration,
 	"AnimBP2FP.RigModule.LegacyReferenceMigration",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPRigModuleLegacyReferenceMigration::RunTest(const FString& Parameters)
 {
@@ -211,7 +213,7 @@ bool FAnimBP2FPRigModuleLegacyReferenceMigration::RunTest(const FString& Paramet
 	TestFalse(TEXT("Legacy migration removes the raw exposed pin manifest from the AST"),
 		AST->RootNode->Properties.Contains(TEXT("exposed-input-pins")));
 	TestTrue(TEXT("Legacy entry remains unresolved"), Binding.EntryName.IsEmpty());
-	TestTrue(TEXT("Legacy exposed names do not fabricate value bindings"), Binding.Inputs.IsEmpty());
+	TestTrue(TEXT("Legacy exposed names do not fabricate value bindings"), Binding.Inputs.Num() == 0);
 	TestEqual(TEXT("Legacy node cannot claim exact coverage"), AST->RootNode->Coverage, EAnimNodeCoverage::Lossy);
 	const FString Canonical = AST->ToString();
 	TestFalse(TEXT("Canonical legacy node does not invent a Rig entry"), Canonical.Contains(TEXT("rig-entry")));
@@ -223,14 +225,14 @@ bool FAnimBP2FPRigModuleLegacyReferenceMigration::RunTest(const FString& Paramet
 	TArray<FAnimLangParseError> CanonicalErrors;
 	const TSharedPtr<FAnimGraphAST> Reparsed = FAnimLangParser::Parse(Canonical, CanonicalErrors);
 	TestTrue(TEXT("Canonical unresolved typed node reparses without legacy warnings"),
-		Reparsed.IsValid() && CanonicalErrors.IsEmpty());
+		Reparsed.IsValid() && CanonicalErrors.Num() == 0);
 	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPRigModuleWorkspaceCanonicalDetection,
 	"AnimBP2FP.RigModule.WorkspaceCanonicalDetection",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPRigModuleWorkspaceCanonicalDetection::RunTest(const FString& Parameters)
 {
@@ -258,3 +260,4 @@ bool FAnimBP2FPRigModuleWorkspaceCanonicalDetection::RunTest(const FString& Para
 }
 
 #endif
+#endif // UE 5.8+

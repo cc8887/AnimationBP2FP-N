@@ -1,6 +1,14 @@
 #include "RigLangImportCommandlet.h"
 
+#if ENGINE_MAJOR_VERSION < 5
+#include "ControlRigBlueprint.h"
+#else
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "ControlRigBlueprintLegacy.h"
+#else
+#include "ControlRigBlueprint.h"
+#endif
+#endif
 #include "RigLangExporter.h"
 #include "RigLangImporter.h"
 #include "RigLangExportCommandlet.h"
@@ -313,7 +321,7 @@ FRigLangTransientRoundTripResult RigLangRoundTrip::RunTransient(
 	FString ActualNormalized;
 	auto Finalize = [&]()
 	{
-		const bool bSemanticSuccess = Result.bSuccess && Result.Diagnostics.IsEmpty();
+		const bool bSemanticSuccess = Result.bSuccess && Result.Diagnostics.Num() == 0;
 		bool bArtifactsComplete = true;
 		bArtifactsComplete &= SaveArtifact(
 			StagingDirectory, TEXT("source.riglang"), SourceText, Result.Diagnostics);
@@ -363,7 +371,7 @@ FRigLangTransientRoundTripResult RigLangRoundTrip::RunTransient(
 	if (!Source.bSuccess || !Source.Module)
 	{
 		Result.Diagnostics.Append(Source.Errors);
-		if (Result.Diagnostics.IsEmpty()) Result.Diagnostics.Add(TEXT("Source Control Rig export failed"));
+		if (Result.Diagnostics.Num() == 0) Result.Diagnostics.Add(TEXT("Source Control Rig export failed"));
 		Finalize();
 		return Result;
 	}
@@ -383,7 +391,7 @@ FRigLangTransientRoundTripResult RigLangRoundTrip::RunTransient(
 	}
 	if (!Imported.Blueprint || !Imported.bCompiled)
 	{
-		if (!Imported.Blueprint && Result.Diagnostics.IsEmpty()) Result.Diagnostics.Add(TEXT("Transient import failed"));
+		if (!Imported.Blueprint && Result.Diagnostics.Num() == 0) Result.Diagnostics.Add(TEXT("Transient import failed"));
 	}
 	else
 	{
@@ -399,7 +407,7 @@ FRigLangTransientRoundTripResult RigLangRoundTrip::RunTransient(
 		}
 	}
 	Result.bSuccess = Imported.Blueprint && Imported.bCompiled
-		&& Result.CompileErrorCount == 0 && Result.Diff.IsEmpty() && Result.Diagnostics.IsEmpty();
+		&& Result.CompileErrorCount == 0 && Result.Diff.IsEmpty() && Result.Diagnostics.Num() == 0;
 	Finalize();
 	return Result;
 }

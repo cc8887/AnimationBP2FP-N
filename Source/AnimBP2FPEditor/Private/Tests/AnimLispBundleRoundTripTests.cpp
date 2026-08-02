@@ -1,6 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 
 #include "AnimLangDiagnostics.h"
@@ -10,7 +12,15 @@
 #include "AnimLispWorkspace.h"
 #include "AnimGraphNode_ControlRig.h"
 #include "Animation/AnimBlueprint.h"
+#if ENGINE_MAJOR_VERSION < 5
+#include "ControlRigBlueprint.h"
+#else
+#if ENGINE_MAJOR_VERSION >= 5
 #include "ControlRigBlueprintLegacy.h"
+#else
+#include "ControlRigBlueprint.h"
+#endif
+#endif
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
@@ -25,7 +35,7 @@
 namespace AnimLispBundleRoundTripTests
 {
 constexpr EAutomationTestFlags Flags =
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter;
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter;
 
 FString RigSource()
 {
@@ -200,7 +210,7 @@ bool FAnimLispBundleBindingPreflightNoAnimStageTest::RunTest(const FString& Para
 	}, TEXT("MissingEntry"))) return false;
 	if (!ExpectRejected(TEXT("duplicate input"), [](FAnimRigNodeBinding& Binding)
 	{
-		if (!Binding.Inputs.IsEmpty())
+		if (Binding.Inputs.Num() != 0)
 		{
 			Binding.Inputs.Reserve(Binding.Inputs.Num() + 1);
 			const FAnimRigInputBinding Duplicate = Binding.Inputs[0];
@@ -209,7 +219,7 @@ bool FAnimLispBundleBindingPreflightNoAnimStageTest::RunTest(const FString& Para
 	}, TEXT("duplicate"))) return false;
 	return ExpectRejected(TEXT("wrong input type"), [](FAnimRigNodeBinding& Binding)
 	{
-		if (!Binding.Inputs.IsEmpty())
+		if (Binding.Inputs.Num() != 0)
 		{
 			Binding.Inputs[0].ResolvedType.CPPType = TEXT("FString");
 			Binding.Inputs[0].ResolvedType.CPPTypeObject.Reset();
@@ -444,3 +454,5 @@ bool FAnimLispPersistentBundleCommitTest::RunTest(const FString& Parameters)
 }
 
 #endif
+
+#endif // UE 5.8+

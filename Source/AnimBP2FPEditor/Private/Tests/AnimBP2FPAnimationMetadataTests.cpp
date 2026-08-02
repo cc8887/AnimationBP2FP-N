@@ -1,6 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 
 #include "AnimLangAST.h"
@@ -20,7 +22,7 @@
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPNodeIdRoundTrips,
 	"AnimBP2FP.AnimationMetadata.NodeIdRoundTrips",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPNodeIdRoundTrips::RunTest(const FString& Parameters)
 {
@@ -39,7 +41,7 @@ bool FAnimBP2FPNodeIdRoundTrips::RunTest(const FString& Parameters)
 
 	TArray<FAnimLangParseError> Errors;
 	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(DSL, Errors);
-	TestTrue(TEXT("node id DSL parses"), Parsed.IsValid() && Errors.IsEmpty());
+	TestTrue(TEXT("node id DSL parses"), Parsed.IsValid() && Errors.Num() == 0);
 	TestTrue(TEXT("parsed root exists"), Parsed.IsValid() && Parsed->RootNode.IsValid());
 	if (!Parsed.IsValid() || !Parsed->RootNode.IsValid())
 	{
@@ -80,7 +82,7 @@ bool FAnimBP2FPNodeIdRoundTrips::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPDependencyManifestRoundTrips,
 	"AnimBP2FP.AnimationMetadata.DependencyManifestRoundTrips",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPDependencyManifestRoundTrips::RunTest(const FString& Parameters)
 {
@@ -123,7 +125,7 @@ bool FAnimBP2FPDependencyManifestRoundTrips::RunTest(const FString& Parameters)
 
 	TArray<FAnimLangParseError> Errors;
 	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(DSL, Errors);
-	TestTrue(TEXT("dependency DSL parses"), Parsed.IsValid() && Errors.IsEmpty());
+	TestTrue(TEXT("dependency DSL parses"), Parsed.IsValid() && Errors.Num() == 0);
 	if (!Parsed.IsValid())
 	{
 		return false;
@@ -143,7 +145,7 @@ bool FAnimBP2FPDependencyManifestRoundTrips::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPTypedAssetSnapshotRoundTrips,
 	"AnimBP2FP.AnimationMetadata.TypedAssetSnapshotRoundTrips",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPTypedAssetSnapshotRoundTrips::RunTest(const FString& Parameters)
 {
@@ -167,7 +169,7 @@ bool FAnimBP2FPTypedAssetSnapshotRoundTrips::RunTest(const FString& Parameters)
 
 	TArray<FAnimLangParseError> Errors;
 	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(DSL, Errors);
-	TestTrue(TEXT("typed snapshot DSL parses"), Parsed.IsValid() && Errors.IsEmpty());
+	TestTrue(TEXT("typed snapshot DSL parses"), Parsed.IsValid() && Errors.Num() == 0);
 	if (!Parsed.IsValid() || Parsed->Dependencies.Num() != 1)
 	{
 		return false;
@@ -186,7 +188,7 @@ bool FAnimBP2FPTypedAssetSnapshotRoundTrips::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPRealMotionMatchingAssetsHaveTypedSnapshots,
 	"AnimBP2FP.AnimationMetadata.RealMotionMatchingAssetsHaveTypedSnapshots",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPRealMotionMatchingAssetsHaveTypedSnapshots::RunTest(const FString& Parameters)
 {
@@ -289,7 +291,7 @@ bool FAnimBP2FPRealMotionMatchingAssetsHaveTypedSnapshots::RunTest(const FString
 
 	TArray<FAnimLangParseError> ParseErrors;
 	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(AST->ToString(), ParseErrors);
-	TestTrue(TEXT("real typed snapshot DSL parses"), Parsed.IsValid() && ParseErrors.IsEmpty());
+	TestTrue(TEXT("real typed snapshot DSL parses"), Parsed.IsValid() && ParseErrors.Num() == 0);
 	const FAnimDependency* ParsedDatabase = Parsed.IsValid() ? Parsed->Dependencies.FindByPredicate([](const FAnimDependency& Dependency)
 	{
 		return Dependency.Role == TEXT("pose-search-database");
@@ -306,7 +308,7 @@ bool FAnimBP2FPRealMotionMatchingAssetsHaveTypedSnapshots::RunTest(const FString
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPMissingDependencyFailsBeforeImport,
 	"AnimBP2FP.AnimationMetadata.MissingDependencyFailsBeforeImport",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPMissingDependencyFailsBeforeImport::RunTest(const FString& Parameters)
 {
@@ -330,7 +332,7 @@ bool FAnimBP2FPMissingDependencyFailsBeforeImport::RunTest(const FString& Parame
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPRootMotionMetadataUpdatesExistingBlueprint,
 	"AnimBP2FP.AnimationMetadata.RootMotionMetadataUpdatesExistingBlueprint",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPRootMotionMetadataUpdatesExistingBlueprint::RunTest(const FString& Parameters)
 {
@@ -359,3 +361,4 @@ bool FAnimBP2FPRootMotionMetadataUpdatesExistingBlueprint::RunTest(const FString
 }
 
 #endif
+#endif // UE 5.8+

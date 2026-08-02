@@ -14,6 +14,8 @@
 
 #include "Animation/AnimBlueprint.h"
 
+class UAnimGraphNode_Base;
+
 /**
  * Exports UAnimBlueprint to AnimLang DSL code
  * 编辑器专用：仅用于编辑器构建

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Commandlets/Commandlet.h"
 #include "RigLangDiffer.h"
 #include "RigLangImportCommandlet.generated.h"
@@ -18,7 +19,7 @@ struct FRigLangTransientRoundTripResult
 	FString ArtifactDirectory;
 	FRigLangDiffResult Diff;
 	TArray<FString> Diagnostics;
-	TObjectPtr<UControlRigBlueprint> ImportedBlueprint = nullptr;
+	TAnimBP2FPObjectPtr<UControlRigBlueprint> ImportedBlueprint = nullptr;
 };
 
 namespace RigLangRoundTrip

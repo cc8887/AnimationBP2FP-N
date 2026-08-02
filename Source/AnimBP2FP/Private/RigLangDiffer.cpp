@@ -243,7 +243,7 @@ void DiffGraph(const FRigGraphAST& OldGraph, const FRigGraphAST& NewGraph,
 	const FString NewGraphIdentity = NewGraphTokens
 		? NewGraphTokens->FindRef(NewGraph.StableId) : NewGraph.StableId;
 	DiffScalar(OldGraphIdentity, NewGraphIdentity, GraphFieldPath + TEXT("/stable-id"), Result);
-	const bool bSourceFallbackGraph = OldGraph.Nodes.IsEmpty()
+	const bool bSourceFallbackGraph = OldGraph.Nodes.Num() == 0
 		|| !OldGraph.Nodes.ContainsByPredicate([](const FRigNodeAST& Node)
 		{
 			FGuid EditorGuid;

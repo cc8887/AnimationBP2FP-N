@@ -1,6 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 
 #include "AnimBPExporter.h"
@@ -49,7 +51,7 @@ namespace
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPMotionMatchingCallbackRoundTrips,
 	"AnimBP2FP.MotionMatching.CallbackRoundTrips",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPMotionMatchingCallbackRoundTrips::RunTest(const FString& Parameters)
 {
@@ -169,3 +171,4 @@ bool FAnimBP2FPMotionMatchingCallbackRoundTrips::RunTest(const FString& Paramete
 }
 
 #endif
+#endif // UE 5.8+

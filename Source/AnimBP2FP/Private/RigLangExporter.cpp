@@ -92,7 +92,16 @@ FString SHA256UTF8(const FString& Text)
 
 namespace
 {
-FString QuoteRigLangValue(const FString& Value);
+FString QuoteRigLangValue(const FString& Value)
+{
+	FString Escaped = Value;
+	Escaped.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+	Escaped.ReplaceInline(TEXT("\""), TEXT("\\\""));
+	Escaped.ReplaceInline(TEXT("\r"), TEXT("\\r"));
+	Escaped.ReplaceInline(TEXT("\n"), TEXT("\\n"));
+	Escaped.ReplaceInline(TEXT("\t"), TEXT("\\t"));
+	return TEXT("\"") + Escaped + TEXT("\"");
+}
 }
 
 FString FRigLangExporter::ComputeContentHash(const FString& CanonicalHashInput)
@@ -152,7 +161,7 @@ FString FRigLangExporter::ComputeDeterministicEditorGuid(
 	if (Digits == TEXT("00000000000000000000000000000000")) Digits[31] = TEXT('1');
 	FGuid Guid;
 	check(FGuid::ParseExact(Digits, EGuidFormats::Digits, Guid) && Guid.IsValid());
-	return Guid.ToString(EGuidFormats::DigitsWithHyphensLower);
+	return Guid.ToString(EGuidFormats::DigitsWithHyphens);
 }
 
 bool FRigLangExporter::ValidateStrictCoverage(
@@ -190,9 +199,13 @@ bool FRigLangExporter::ValidateStrictCoverage(
 	return bValid;
 }
 
-#if WITH_EDITOR
+#if WITH_EDITOR && (ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4))
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "ControlRigBlueprintLegacy.h"
+#else
+#include "ControlRigBlueprint.h"
+#endif
 #include "EdGraph/RigVMEdGraph.h"
 #include "EdGraph/RigVMEdGraphNode.h"
 #include "Rigs/RigHierarchy.h"
@@ -221,17 +234,6 @@ bool FRigLangExporter::ValidateStrictCoverage(
 
 namespace
 {
-FString QuoteRigLangValue(const FString& Value)
-{
-	FString Escaped = Value;
-	Escaped.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
-	Escaped.ReplaceInline(TEXT("\""), TEXT("\\\""));
-	Escaped.ReplaceInline(TEXT("\r"), TEXT("\\r"));
-	Escaped.ReplaceInline(TEXT("\n"), TEXT("\\n"));
-	Escaped.ReplaceInline(TEXT("\t"), TEXT("\\t"));
-	return TEXT("\"") + Escaped + TEXT("\"");
-}
-
 FString ExportStructText(const UScriptStruct* Struct, const void* Value)
 {
 	FString Text;
@@ -285,7 +287,7 @@ FString ExportTypedControlValue(const FRigControlValue& Value, ERigControlType T
 	}
 	default: break;
 	}
-	return TEXT("(") + TypeName + (Fields.IsEmpty() ? FString() : TEXT(" ") + FString::Join(Fields, TEXT(" "))) + TEXT(")");
+	return TEXT("(") + TypeName + (Fields.Num() == 0 ? FString() : TEXT(" ") + FString::Join(Fields, TEXT(" "))) + TEXT(")");
 }
 
 FRigHierarchyStateAST ExportControlState(const FRigControlValue& Value, const ERigControlType Type, const FString& Role)
@@ -401,7 +403,7 @@ TArray<FRigElementKey> TopologicallySortHierarchy(const URigHierarchy* Hierarchy
 		if (AType != BType) return AType < BType;
 		return A.Name.LexicalLess(B.Name);
 	};
-	while (!Remaining.IsEmpty())
+	while (Remaining.Num() != 0)
 	{
 		TArray<FRigElementKey> Ready;
 		for (const FRigElementKey& Key : Remaining)
@@ -421,7 +423,7 @@ TArray<FRigElementKey> TopologicallySortHierarchy(const URigHierarchy* Hierarchy
 			if (bReady) Ready.Add(Key);
 		}
 		Ready.Sort(Less);
-		if (Ready.IsEmpty())
+		if (Ready.Num() == 0)
 		{
 			Remaining.Sort(Less);
 			OutErrors.Add(TEXT("Hierarchy parent cycle prevents topological export at: ") + Remaining[0].ToString());
@@ -549,7 +551,7 @@ FRigCallableArgumentAST ExportArgument(const URigVMPin* Source)
 FRigGraphVariableAST ExportLocalVariable(const FRigVMGraphVariableDescription& Source)
 {
 	FRigGraphVariableAST Result;
-	Result.Guid = Source.Guid.ToString(EGuidFormats::DigitsWithHyphensLower);
+	Result.Guid = Source.Guid.ToString(EGuidFormats::DigitsWithHyphens);
 	Result.Name = Source.Name.ToString();
 	Result.Type.CPPType = Source.CPPType;
 	Result.Type.CPPTypeObject = Source.CPPTypeObject
@@ -571,7 +573,7 @@ FRigGraphVariableAST ExportLocalVariable(const FRigVMGraphVariableDescription& S
 FRigExternalVariableAST ExportExternalVariable(const FRigVMExternalVariable& Source)
 {
 	FRigExternalVariableAST Result;
-	Result.Guid = Source.GetGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+	Result.Guid = Source.GetGuid().ToString(EGuidFormats::DigitsWithHyphens);
 	Result.Name = Source.GetName().ToString();
 	Result.Type.CPPType = Source.GetBaseCPPType().ToString();
 	Result.Type.CPPTypeObject = Source.GetCPPTypeObject()
@@ -637,7 +639,7 @@ FRigNodeAST ExportNode(
 	Result.StableId = Node->GetName();
 	if (const FGuid* EditorGuid = EditorNodeGuids.Find(Node); EditorGuid && EditorGuid->IsValid())
 	{
-		Result.Guid = EditorGuid->ToString(EGuidFormats::DigitsWithHyphensLower);
+		Result.Guid = EditorGuid->ToString(EGuidFormats::DigitsWithHyphens);
 	}
 	else
 	{
@@ -671,7 +673,7 @@ FRigNodeAST ExportNode(
 		Result.Kind = ERigNodeKind::Variable;
 		Result.Properties.Add(TEXT("variable-name"), QuoteRigLangValue(VariableNode->GetVariableName().ToString()));
 		Result.Properties.Add(TEXT("variable-guid"), QuoteRigLangValue(
-			VariableNode->GetVariableGuid().ToString(EGuidFormats::DigitsWithHyphensLower)));
+			VariableNode->GetVariableGuid().ToString(EGuidFormats::DigitsWithHyphens)));
 		Result.Properties.Add(TEXT("getter"), VariableNode->IsGetter() ? TEXT("true") : TEXT("false"));
 		Result.Properties.Add(TEXT("external"), VariableNode->IsExternalVariable() ? TEXT("true") : TEXT("false"));
 		Result.Properties.Add(TEXT("local"), VariableNode->IsLocalVariable() ? TEXT("true") : TEXT("false"));
@@ -708,7 +710,7 @@ FRigNodeAST ExportNode(
 		for (const URigVMPin* Pin : CollapseNode->GetPins())
 		{
 			if (Pin) PinGuids.Add(TEXT("(") + QuoteRigLangValue(Pin->GetName()) + TEXT(" ")
-				+ QuoteRigLangValue(CollapseNode->FindPinGuid(Pin).ToString(EGuidFormats::DigitsWithHyphensLower)) + TEXT(")"));
+				+ QuoteRigLangValue(CollapseNode->FindPinGuid(Pin).ToString(EGuidFormats::DigitsWithHyphens)) + TEXT(")"));
 		}
 		Result.Properties.Add(TEXT("interface-pin-guids"), TEXT("(") + FString::Join(PinGuids, TEXT(" ")) + TEXT(")"));
 		TArray<FString> ExternalVariables;
@@ -1265,7 +1267,7 @@ FRigLangExportResult FRigLangExporter::Export(
 	{
 		FRigVariableAST Variable;
 		Variable.StableId = SourceVariable.Guid.IsValid()
-			? SourceVariable.Guid.ToString(EGuidFormats::DigitsWithHyphensLower)
+			? SourceVariable.Guid.ToString(EGuidFormats::DigitsWithHyphens)
 			: SourceVariable.Name.ToString();
 		Variable.Name = SourceVariable.Name.ToString();
 		Variable.Access = SourceVariable.bPublic ? ERigVariableAccess::PublicInput : ERigVariableAccess::Internal;
@@ -1312,7 +1314,7 @@ FRigLangExportResult FRigLangExporter::Export(
 		FRigGraphAST Graph = ExportGraph(Model, EditorNodeGuids, Result.Coverage);
 		Graph.StableId = Model->GetPathName();
 		Graph.EditorGuid = EditorGraphGuids.Contains(Model) && EditorGraphGuids[Model].IsValid()
-			? EditorGraphGuids[Model].ToString(EGuidFormats::DigitsWithHyphensLower)
+			? EditorGraphGuids[Model].ToString(EGuidFormats::DigitsWithHyphens)
 			: ComputeDeterministicEditorGuid(Blueprint->GetPathName(), Model->GetPathName());
 		if (Model == Blueprint->GetLocalFunctionLibrary())
 		{
@@ -1473,12 +1475,12 @@ FRigLangExportResult FRigLangExporter::Export(
 
 	if (Options.bStrict)
 	{
-		Result.bSuccess = Result.Errors.IsEmpty()
+		Result.bSuccess = Result.Errors.Num() == 0
 			&& ValidateStrictCoverage(Result.Coverage, Result.Errors);
 	}
 	else
 	{
-		Result.bSuccess = Result.Errors.IsEmpty();
+		Result.bSuccess = Result.Errors.Num() == 0;
 	}
 	return Result;
 }
@@ -1490,7 +1492,11 @@ FRigLangExportResult FRigLangExporter::Export(
 	const FRigLangExportOptions& Options)
 {
 	FRigLangExportResult Result;
+#if ENGINE_MAJOR_VERSION < 5
+	Result.Errors.Add(TEXT("[UNSUPPORTED:UE4ControlRigAssetAuthoring] RigLang asset export requires Unreal Engine 5"));
+#else
 	Result.Errors.Add(TEXT("RigLang export requires an editor build"));
+#endif
 	return Result;
 }
 

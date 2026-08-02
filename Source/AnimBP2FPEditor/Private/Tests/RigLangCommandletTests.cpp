@@ -1,6 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 
 #include "AnimBP2FPExportCommandlet.h"
@@ -22,7 +24,7 @@
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangCommandletArgumentsTest,
 	"AnimBP2FP.Commandlet.Arguments",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FRigLangCommandletArgumentsTest::RunTest(const FString& Parameters)
 {
@@ -165,7 +167,7 @@ bool FRigLangCommandletArgumentsTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangCommandletAtomicOutputTest,
 	"AnimBP2FP.Commandlet.AtomicOutput",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FRigLangCommandletAtomicOutputTest::RunTest(const FString& Parameters)
 {
@@ -195,7 +197,7 @@ bool FRigLangCommandletAtomicOutputTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangCommandletJsonContractsTest,
 	"AnimBP2FP.Commandlet.JsonContracts",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FRigLangCommandletJsonContractsTest::RunTest(const FString& Parameters)
 {
@@ -402,3 +404,4 @@ bool FRigLangCommandletJsonContractsTest::RunTest(const FString& Parameters)
 }
 
 #endif
+#endif // UE 5.8+

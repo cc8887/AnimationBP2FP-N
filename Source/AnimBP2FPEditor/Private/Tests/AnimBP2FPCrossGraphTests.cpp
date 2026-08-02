@@ -1,6 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 
 #include "AnimBPExporter.h"
@@ -13,7 +15,7 @@
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPLinkedPureExpressionsAreStructured,
 	"AnimBP2FP.CrossGraph.LinkedPureExpressionsAreStructured",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPLinkedPureExpressionsAreStructured::RunTest(const FString& Parameters)
 {
@@ -41,7 +43,7 @@ bool FAnimBP2FPLinkedPureExpressionsAreStructured::RunTest(const FString& Parame
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPPropertyAccessSplitStructOutputsAreStructured,
 	"AnimBP2FP.CrossGraph.PropertyAccessSplitStructOutputsAreStructured",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPPropertyAccessSplitStructOutputsAreStructured::RunTest(const FString& Parameters)
 {
@@ -77,3 +79,4 @@ bool FAnimBP2FPPropertyAccessSplitStructOutputsAreStructured::RunTest(const FStr
 }
 
 #endif
+#endif // UE 5.8+

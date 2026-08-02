@@ -165,7 +165,11 @@ FString FBP2FPMappingRegistry::DSLToBlueprintPath(
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 
 	TArray<FAssetData> AllBPs;
+#if ENGINE_MAJOR_VERSION < 5
+	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetFName(), AllBPs);
+#else
 	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetClassPathName(), AllBPs);
+#endif
 
 	TArray<FString> Candidates;
 	for (const FAssetData& Asset : AllBPs)
@@ -262,7 +266,11 @@ void FBP2FPMappingRegistry::ScanBlueprints()
 
 	// Scan Animation Blueprints
 	TArray<FAssetData> AnimBPAssets;
+#if ENGINE_MAJOR_VERSION < 5
+	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetFName(), AnimBPAssets);
+#else
 	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetClassPathName(), AnimBPAssets);
+#endif
 
 	for (const FAssetData& AssetData : AnimBPAssets)
 	{
@@ -310,7 +318,11 @@ void FBP2FPMappingRegistry::ScanDSLFiles(const FString& CategoryTag)
 
 	TMap<FString, TArray<FString>> BPNameToPaths;
 	TArray<FAssetData> AllBPs;
+#if ENGINE_MAJOR_VERSION < 5
+	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetFName(), AllBPs);
+#else
 	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetClassPathName(), AllBPs);
+#endif
 	for (const FAssetData& Asset : AllBPs)
 	{
 		FString PkgPath = Asset.PackageName.ToString();
