@@ -1,6 +1,5 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 // AnimBP2FPCompilerHookTests.cpp - UE Automation Tests for Compiler Hook
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 //
 // Run via:
 //   UnrealEditor.exe <project> -run=AutomationTests -filter="AnimBP2FP.CompilerHook"
@@ -320,4 +319,3 @@ bool FLifecycle_AnimHookPriorityOrdering::RunTest(const FString& Parameters)
 
 #endif // WITH_DEV_AUTOMATION_TESTS
 #endif // ENGINE_MAJOR_VERSION >= 5
-#endif // UE 5.8+

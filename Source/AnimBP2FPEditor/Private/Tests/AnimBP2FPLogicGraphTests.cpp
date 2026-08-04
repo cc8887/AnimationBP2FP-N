@@ -1,6 +1,5 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
 #include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
@@ -17,7 +16,7 @@
 #include "K2Node_CustomEvent.h"
 #include "K2Node_FunctionEntry.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && ANIMBP2FP_HAS_ANIM_AUTHORING
 
 namespace AnimBP2FPLogicGraphTests
 {
@@ -174,7 +173,8 @@ bool FAnimBP2FPPureFunctionFlagsRoundTrip::RunTest(const FString& Parameters)
 	UK2Node_FunctionEntry* SourceEntry = nullptr;
 	for (UEdGraphNode* Node : SourceGraph->Nodes)
 	{
-		if ((SourceEntry = Cast<UK2Node_FunctionEntry>(Node))) break;
+		SourceEntry = Cast<UK2Node_FunctionEntry>(Node);
+		if (SourceEntry) break;
 	}
 	TestNotNull(TEXT("source function entry exists"), SourceEntry);
 	if (!SourceEntry) return false;
@@ -214,7 +214,8 @@ bool FAnimBP2FPPureFunctionFlagsRoundTrip::RunTest(const FString& Parameters)
 	{
 		for (UEdGraphNode* Node : DestinationGraph->Nodes)
 		{
-			if ((DestinationEntry = Cast<UK2Node_FunctionEntry>(Node))) break;
+			DestinationEntry = Cast<UK2Node_FunctionEntry>(Node);
+			if (DestinationEntry) break;
 		}
 	}
 	TestTrue(TEXT("destination entry preserves BlueprintPure"), DestinationEntry
@@ -228,4 +229,3 @@ bool FAnimBP2FPPureFunctionFlagsRoundTrip::RunTest(const FString& Parameters)
 }
 
 #endif
-#endif // UE 5.8+

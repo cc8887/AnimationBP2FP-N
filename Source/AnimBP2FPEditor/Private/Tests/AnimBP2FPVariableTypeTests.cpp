@@ -1,6 +1,5 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
 #include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
@@ -19,7 +18,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "UObject/UnrealType.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && ANIMBP2FP_HAS_ANIM_AUTHORING
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPVariableExporterPreservesReadableTypes,
@@ -571,4 +570,3 @@ bool FAnimBP2FPVariableMapPinTypeCodec::RunTest(const FString& Parameters)
 }
 
 #endif
-#endif // UE 5.8+

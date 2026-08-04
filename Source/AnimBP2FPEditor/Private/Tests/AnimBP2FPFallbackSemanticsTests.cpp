@@ -1,6 +1,5 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
 #include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
@@ -21,7 +20,7 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && ANIMBP2FP_HAS_ANIM_AUTHORING
 
 namespace AnimBP2FPFallbackSemanticsTests
 {
@@ -268,7 +267,7 @@ bool FAnimBP2FPUnknownNodeDoesNotBecomeCachedPose::RunTest(const FString& Parame
 	return true;
 }
 
-#if ENGINE_MAJOR_VERSION >= 5
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 9)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPBlendStackEmptyBoundGraphIsUnsupported,
 	"AnimBP2FP.FallbackSemantics.BlendStackEmptyBoundGraphIsUnsupported",
@@ -279,7 +278,7 @@ bool FAnimBP2FPBlendStackEmptyBoundGraphIsUnsupported::RunTest(const FString& Pa
 	using namespace AnimBP2FPFallbackSemanticsTests;
 	FModuleManager::Get().LoadModule(TEXT("BlendStackEditor"));
 	UClass* BlendStackClass = LoadClass<UAnimGraphNode_Base>(nullptr, TEXT("/Script/BlendStackEditor.AnimGraphNode_BlendStack"));
-	TestNotNull(TEXT("UE 5.9 BlendStack editor class loads"), BlendStackClass);
+	TestNotNull(TEXT("BlendStack editor class loads"), BlendStackClass);
 	if (!BlendStackClass)
 	{
 		return false;
@@ -367,4 +366,3 @@ bool FAnimBP2FPBlendStackEmptyBoundGraphIsUnsupported::RunTest(const FString& Pa
 #endif
 
 #endif // WITH_DEV_AUTOMATION_TESTS
-#endif // UE 5.8+

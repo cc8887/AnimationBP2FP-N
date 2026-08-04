@@ -56,7 +56,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogAnimBPImporter, Log, All);
 #include "AnimGraphNode_IdentityPose.h"
 #if ENGINE_MAJOR_VERSION >= 5
 #include "AnimGraphNode_ControlRig.h"
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7)
 #include "ControlRigBlueprintLegacy.h"
 #else
 #include "ControlRigBlueprint.h"
@@ -827,6 +827,8 @@ namespace
 			void* MapPtr = MapProperty->ContainerPtrToValuePtr<void>(BindingObject);
 			return reinterpret_cast<TMap<FName, FAnimGraphNodePropertyBinding>*>(MapPtr);
 		}
+#elif ENGINE_MAJOR_VERSION == 5
+		return Node ? &Node->PropertyBindings : nullptr;
 #endif
 		return nullptr;
 	}
@@ -1475,7 +1477,7 @@ bool FAnimBPImporter::SetNodeProperty(UAnimGraphNode_Base* Node, const FString& 
 				&& SelfNode->StringValue.Equals(TEXT("true"), ESearchCase::IgnoreCase);
 			if (bSelfContext)
 			{
-				MemberReference->SetSelfMember(MemberName, FGuid());
+				MemberReference->SetSelfMember(MemberName);
 				return true;
 			}
 
@@ -1517,7 +1519,7 @@ bool FAnimBPImporter::SetNodeProperty(UAnimGraphNode_Base* Node, const FString& 
 						FunctionNameProperty->ContainerPtrToValuePtr<void>(RuntimeFunctionValue.GetStructMemory()));
 					if (!FunctionName.IsNone())
 					{
-						static_cast<FMemberReference*>(ValuePtr)->SetSelfMember(FunctionName, FGuid());
+						static_cast<FMemberReference*>(ValuePtr)->SetSelfMember(FunctionName);
 						return true;
 					}
 				}
@@ -1533,7 +1535,7 @@ bool FAnimBPImporter::SetNodeProperty(UAnimGraphNode_Base* Node, const FString& 
 				FMemberReference* MemberReference = static_cast<FMemberReference*>(ValuePtr);
 				if (MemberReference->IsSelfContext())
 				{
-					MemberReference->SetSelfMember(MemberReference->GetMemberName(), FGuid());
+					MemberReference->SetSelfMember(MemberReference->GetMemberName());
 				}
 			}
 			return true;
@@ -2367,10 +2369,12 @@ bool FAnimBPImporter::ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph
 		}
 
 		Node->Modify();
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
 		if (UObject* BindingObject = reinterpret_cast<UObject*>(Node->GetMutableBinding()))
 		{
 			BindingObject->Modify();
 		}
+#endif
 		const int32 OptionalPinIndex = Node->ShowPinForProperties.IndexOfByPredicate(
 			[&PropertyName](const FOptionalPinFromProperty& OptionalPin)
 			{
@@ -2399,7 +2403,9 @@ bool FAnimBPImporter::ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph
 		PropertyBinding.bIsBound = true;
 		PropertyBinding.ArrayIndex = ArrayIndex;
 		PropertyBinding.ContextId = ContextId;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
 		PropertyBinding.bOnlyUpdateWhenActive = bOnlyUpdateWhenActive;
+#endif
 		PropertyBindings->Add(FName(*PropertyName), PropertyBinding);
 
 		Node->ReconstructNode();
@@ -2442,10 +2448,12 @@ bool FAnimBPImporter::ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph
 		if (!PropertyName.IsEmpty() && PropertyBindings)
 		{
 			Node->Modify();
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
 			if (UObject* BindingObject = reinterpret_cast<UObject*>(Node->GetMutableBinding()))
 			{
 				BindingObject->Modify();
 			}
+#endif
 
 			FAnimGraphNodePropertyBinding PropertyBinding;
 			PropertyBinding.PropertyName = FName(*PropertyName);
@@ -3170,6 +3178,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 	// Restore typed module identity first; the reflected string remains a legacy fallback.
 	bool bRestoredTypedRig = false;
 	TMap<FString, FString> TypedRigInputPropertyNames;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 	if (NodeAST->RigBinding.IsSet())
 	{
 		const FAnimRigNodeBinding& Binding = NodeAST->RigBinding.GetValue();
@@ -3342,6 +3351,14 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 			return nullptr;
 		}
 	}
+#else
+	if (NodeAST->RigBinding.IsSet())
+	{
+		UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:ControlRigModule] Typed Control Rig module bindings require Unreal Engine 5.8 or newer"));
+		Graph->RemoveNode(NewNode);
+		return nullptr;
+	}
+#endif
 	if (!NodeAST->RigBinding.IsSet())
 	{
 		if (const FString* RigReference = NodeAST->Properties.Find(TEXT("control-rig-asset-reference"));
@@ -4011,9 +4028,8 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 				{
 					return false;
 				}
-				UAnimGraphNode_StateResult* ResultNode = StateNode->GetResultNodeInsideState();
 				UAnimGraphNode_Base* AnimTree = BuildAnimNode(StateAnimation, StateNode->BoundGraph, DefineNodes, HelperGraphs);
-				if (!AnimTree || !ResultNode)
+				if (!AnimTree)
 				{
 					return false;
 				}
@@ -4452,7 +4468,7 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 			if (Trans.bAutoRule)
 			{
 				TransNode->bAutomaticRuleBasedOnSequencePlayerInState = true;
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2)
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
 				TransNode->AutomaticRuleTriggerTime = Trans.AutoRuleTriggerTime;
 #endif
 			}

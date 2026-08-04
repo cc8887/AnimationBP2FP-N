@@ -176,7 +176,8 @@ public:
 		for (FRigGraphAST& Graph : Module->Graphs)
 		{
 			FGuid ParsedGuid;
-			if (FGuid::ParseExact(Graph.EditorGuid, EGuidFormats::DigitsWithHyphens, ParsedGuid)
+			if (Graph.EditorGuid.Len() == 36
+				&& FGuid::ParseExact(Graph.EditorGuid, EGuidFormats::DigitsWithHyphens, ParsedGuid)
 				&& ParsedGuid.IsValid())
 			{
 				Graph.EditorGuid = ParsedGuid.ToString(EGuidFormats::DigitsWithHyphens);
@@ -604,7 +605,8 @@ private:
 		for (const FRigGraphVariableAST& Variable : Graph.LocalVariables)
 		{
 			FGuid ParsedGuid;
-			if (FGuid::ParseExact(Variable.Guid, EGuidFormats::DigitsWithHyphens, ParsedGuid))
+			if (Variable.Guid.Len() == 36
+				&& FGuid::ParseExact(Variable.Guid, EGuidFormats::DigitsWithHyphens, ParsedGuid))
 			{
 				if (SeenLocalGuids.Contains(ParsedGuid))
 					ErrorAtLocation(Variable.Location, FString::Printf(TEXT("Duplicate local variable GUID '%s'"), *Variable.Guid));
@@ -1366,7 +1368,7 @@ private:
 				case ERigControlType::Bool: ValidatePayload({TEXT("bool")}, TEXT("control-value Bool state")); break;
 				case ERigControlType::Integer: ValidatePayload({TEXT("integer")}, TEXT("control-value Integer state")); break;
 				case ERigControlType::Float:
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
 				case ERigControlType::ScaleFloat:
 #endif
 					ValidatePayload({TEXT("number")}, TEXT("control-value scalar state")); break;
@@ -1412,8 +1414,13 @@ private:
 		{
 			FRigControlSettings ParsedSettings;
 			UScriptStruct* SettingsStruct = FRigControlSettings::StaticStruct();
-			const TCHAR* Remainder = SettingsStruct->ImportText(
-				*State.SerializedValue, &ParsedSettings, nullptr, PPF_None, nullptr, TEXT("FRigControlSettings"));
+			const FString TrimmedSettings = State.SerializedValue.TrimStartAndEnd();
+			const bool bHasStructEnvelope = TrimmedSettings.StartsWith(TEXT("("))
+				&& TrimmedSettings.EndsWith(TEXT(")"));
+			const TCHAR* Remainder = SettingsStruct && bHasStructEnvelope
+				? SettingsStruct->ImportText(*State.SerializedValue, &ParsedSettings, nullptr,
+					PPF_None, nullptr, TEXT("FRigControlSettings"))
+				: nullptr;
 			while (Remainder && FChar::IsWhitespace(*Remainder)) ++Remainder;
 			if (!Remainder || *Remainder != TEXT('\0'))
 			{
@@ -1936,7 +1943,9 @@ private:
 		else
 		{
 			FGuid ParsedGuid;
-			if (!FGuid::ParseExact(Variable.Guid, EGuidFormats::DigitsWithHyphens, ParsedGuid) || !ParsedGuid.IsValid())
+				if (Variable.Guid.Len() != 36
+					|| !FGuid::ParseExact(Variable.Guid, EGuidFormats::DigitsWithHyphens, ParsedGuid)
+					|| !ParsedGuid.IsValid())
 				ErrorAt(Head, TEXT("rig-local-variable requires a non-zero hyphenated GUID"));
 			else
 				Variable.Guid = ParsedGuid.ToString(EGuidFormats::DigitsWithHyphens);

@@ -1,20 +1,16 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
 #include "AnimBP2FPVersionCompat.h"
+#if ANIMBP2FP_HAS_MODERN_RIGVM_AUTHORING
 #include "Misc/AutomationTest.h"
 
 #include "RigLangExporter.h"
 #include "RigLangImporter.h"
-#if ENGINE_MAJOR_VERSION < 5
-#include "ControlRigBlueprint.h"
-#else
-#if ENGINE_MAJOR_VERSION >= 5
+#if ENGINE_MINOR_VERSION >= 7
 #include "ControlRigBlueprintLegacy.h"
 #else
 #include "ControlRigBlueprint.h"
-#endif
 #endif
 #include "ControlRigBlueprintFactory.h"
 #include "Rigs/RigHierarchy.h"
@@ -469,4 +465,5 @@ bool FRigLangHierarchyImportRollbackTest::RunTest(const FString& Parameters)
 }
 
 #endif
-#endif // UE 5.8+
+
+#endif // UE 5.4+

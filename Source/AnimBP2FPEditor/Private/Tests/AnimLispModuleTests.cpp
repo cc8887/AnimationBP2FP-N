@@ -1,6 +1,5 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
 #include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
@@ -191,4 +190,3 @@ bool FAnimLispLegacyRigObjectPathMigrationTest::RunTest(const FString& Parameter
 }
 
 #endif
-#endif // UE 5.8+

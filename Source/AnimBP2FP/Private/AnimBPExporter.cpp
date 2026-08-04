@@ -60,7 +60,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogAnimBP2FP, Log, All);
 #include "BlueprintLispConverter.h"
 #if ENGINE_MAJOR_VERSION >= 5
 #include "AnimGraphNode_ControlRig.h"
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7)
 #include "ControlRigBlueprintLegacy.h"
 #else
 #include "ControlRigBlueprint.h"
@@ -870,15 +870,15 @@ namespace
 		{
 			return EPinType::Object;
 		}
-		if (Category == UEdGraphSchema_K2::PC_Struct && PinType.PinSubCategoryObject == TBaseStructure<FVector>::Get())
+		if (Category == UEdGraphSchema_K2::PC_Struct.ToString() && PinType.PinSubCategoryObject == TBaseStructure<FVector>::Get())
 		{
 			return EPinType::Vector;
 		}
-		if (Category == UEdGraphSchema_K2::PC_Struct && PinType.PinSubCategoryObject == TBaseStructure<FRotator>::Get())
+		if (Category == UEdGraphSchema_K2::PC_Struct.ToString() && PinType.PinSubCategoryObject == TBaseStructure<FRotator>::Get())
 		{
 			return EPinType::Rotator;
 		}
-		if (Category == UEdGraphSchema_K2::PC_Struct && PinType.PinSubCategoryObject == TBaseStructure<FTransform>::Get())
+		if (Category == UEdGraphSchema_K2::PC_Struct.ToString() && PinType.PinSubCategoryObject == TBaseStructure<FTransform>::Get())
 		{
 			return EPinType::Transform;
 		}
@@ -2052,7 +2052,7 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 		return Result;
 	}
 
-#if ENGINE_MAJOR_VERSION >= 5
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 	if (UAnimGraphNode_ControlRig* ControlRigNode = Cast<UAnimGraphNode_ControlRig>(Node))
 	{
 		Result->NodeType = TEXT("control-rig");
@@ -2234,9 +2234,12 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 	{
 		Result->NodeType = TEXT("sequence-player");
 		
-#if ENGINE_MAJOR_VERSION >= 5
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
 		UAnimSequenceBase* Sequence = SeqPlayer->Node.GetSequence();
 		const bool bLoop = SeqPlayer->Node.IsLooping();
+#elif ENGINE_MAJOR_VERSION == 5
+		UAnimSequenceBase* Sequence = SeqPlayer->Node.GetSequence();
+		const bool bLoop = SeqPlayer->Node.GetLoopAnimation();
 #else
 		UAnimSequenceBase* Sequence = SeqPlayer->Node.Sequence;
 		const bool bLoop = SeqPlayer->Node.bLoopAnimation;
@@ -2256,13 +2259,13 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 	{
 		Result->NodeType = TEXT("blendspace-player");
 		
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
 		UBlendSpace* BlendSpace = BSPlayer->Node.GetBlendSpace();
 		const bool bLoop = BSPlayer->Node.IsLooping();
 		const float PlayRate = BSPlayer->Node.GetPlayRate();
-#elif ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2)
+#elif ENGINE_MAJOR_VERSION == 5
 		UBlendSpace* BlendSpace = BSPlayer->Node.GetBlendSpace();
-		const bool bLoop = BSPlayer->Node.IsLooping();
+		const bool bLoop = BSPlayer->Node.GetLoop();
 		const float PlayRate = BSPlayer->Node.GetPlayRate();
 #else
 		UBlendSpaceBase* BlendSpace = BSPlayer->Node.BlendSpace;
@@ -2788,29 +2791,16 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 			UEdGraph* StateGraph = StateNode->GetBoundGraph();
 			if (StateGraph)
 			{
-#if ENGINE_MAJOR_VERSION < 5 || (ENGINE_MAJOR_VERSION == 5 && (ENGINE_MINOR_VERSION == 1 || ENGINE_MINOR_VERSION >= 5))
-			// UE4, UE5.1, and UE5.5+: use the pose sink pin directly
-			UEdGraphPin* PoseSinkPin = StateNode->GetPoseSinkPinInsideState();
-			if (PoseSinkPin && PoseSinkPin->LinkedTo.Num() > 0)
-			{
-				UAnimGraphNode_Base* AnimRoot = Cast<UAnimGraphNode_Base>(PoseSinkPin->LinkedTo[0]->GetOwningNode());
-				if (AnimRoot)
+				// The pose sink pin is stable across all supported engine versions.
+				UEdGraphPin* PoseSinkPin = StateNode->GetPoseSinkPinInsideState();
+				if (PoseSinkPin && PoseSinkPin->LinkedTo.Num() > 0)
 				{
-					State.Animation = ConvertAnimNode(AnimRoot);
+					UAnimGraphNode_Base* AnimRoot = Cast<UAnimGraphNode_Base>(PoseSinkPin->LinkedTo[0]->GetOwningNode());
+					if (AnimRoot)
+					{
+						State.Animation = ConvertAnimNode(AnimRoot);
+					}
 				}
-			}
-#else
-			// UE < 5.5: Use legacy GetResultNodeInsideState()
-			UAnimGraphNode_StateResult* ResultNode = StateNode->GetResultNodeInsideState();
-			if (ResultNode)
-			{
-				UAnimGraphNode_Base* AnimRoot = GetFirstConnectedPoseNode(ResultNode);
-				if (AnimRoot)
-				{
-					State.Animation = ConvertAnimNode(AnimRoot);
-				}
-			}
-#endif
 			}
 			
 			Result->States.Add(State);
@@ -2859,7 +2849,7 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 	{
 		if (UAnimStateTransitionNode* TransNode = Cast<UAnimStateTransitionNode>(GraphNode))
 		{
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2)
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6)
 			// Newer UE5 exposes an explicit disabled transition flag.
 			if (TransNode->bDisabled) continue;
 #endif
@@ -2883,6 +2873,7 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 					// Auto-rule based on sequence player remaining time
 					TSharedPtr<FLiteralExpr> AutoExpr = MakeShared<FLiteralExpr>();
 					AutoExpr->Type = FLiteralExpr::EType::String;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
 					if (TransNode->AutomaticRuleTriggerTime < 0.0f)
 					{
 						AutoExpr->Value = TEXT("(auto-rule :time-remaining crossfade-duration)");
@@ -2892,6 +2883,9 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 						AutoExpr->Value = FString::Printf(TEXT("(auto-rule :time-remaining %s)"), 
 							*FString::SanitizeFloat(TransNode->AutomaticRuleTriggerTime));
 					}
+#else
+					AutoExpr->Value = TEXT("(auto-rule :time-remaining crossfade-duration)");
+#endif
 					Trans.Condition = AutoExpr;
 				}
 				else if (TransNode->GetBoundGraph() == nullptr)
@@ -3125,9 +3119,3 @@ bool FAnimBPExporter::ExportEventGraph(
 #endif // ENGINE_MAJOR_VERSION >= 5
 
 #endif // WITH_EDITOR
- // WITH_EDITOR
-TOR
-/ ENGINE_MAJOR_VERSION >= 5
-
-#endif // WITH_EDITOR
-TOR

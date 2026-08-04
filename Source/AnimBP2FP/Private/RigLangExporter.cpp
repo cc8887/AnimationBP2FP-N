@@ -199,7 +199,7 @@ bool FRigLangExporter::ValidateStrictCoverage(
 	return bValid;
 }
 
-#if WITH_EDITOR && (ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4))
+#if WITH_EDITOR && (ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8))
 
 #if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "ControlRigBlueprintLegacy.h"
@@ -1492,8 +1492,8 @@ FRigLangExportResult FRigLangExporter::Export(
 	const FRigLangExportOptions& Options)
 {
 	FRigLangExportResult Result;
-#if ENGINE_MAJOR_VERSION < 5
-	Result.Errors.Add(TEXT("[UNSUPPORTED:UE4ControlRigAssetAuthoring] RigLang asset export requires Unreal Engine 5"));
+#if ENGINE_MAJOR_VERSION < 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 8)
+	Result.Errors.Add(TEXT("[UNSUPPORTED:ControlRigAssetAuthoring] RigLang asset export requires Unreal Engine 5.8 or newer"));
 #else
 	Result.Errors.Add(TEXT("RigLang export requires an editor build"));
 #endif

@@ -1,6 +1,5 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
 #include "AnimBP2FPVersionCompat.h"
 #include "HAL/FileManager.h"
@@ -11,7 +10,11 @@
 #include "RigLangAST.h"
 #include "RigLangParser.h"
 #include "AnimLispWorkspace.h"
+#if ENGINE_MAJOR_VERSION < 5
+#include "Rigs/RigControlHierarchy.h"
+#else
 #include "Rigs/RigHierarchyElements.h"
+#endif
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -74,6 +77,7 @@ FString QuoteRigLangString(const FString& Value)
 	return TEXT("\"") + Escaped + TEXT("\"");
 }
 
+#if ENGINE_MAJOR_VERSION >= 5
 FString ExportControlSettings(const ERigControlType ControlType)
 {
 	FRigControlSettings Settings;
@@ -83,8 +87,10 @@ FString ExportControlSettings(const ERigControlType ControlType)
 		Serialized, &Settings, &Settings, nullptr, PPF_None, nullptr);
 	return Serialized;
 }
+#endif
 }
 
+#if ENGINE_MAJOR_VERSION >= 5
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserRoundTripTest,
 	"AnimBP2FP.RigLang.Parser.RoundTrip",
@@ -135,6 +141,7 @@ bool FRigLangParserRoundTripTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Legacy control type is authoritative"), LegacyControl.States[0].Type, FString(TEXT("Transform")));
 	TestFalse(TEXT("Legacy :control-type is removed after promotion"), LegacyControl.Properties.Contains(TEXT("control-type")));
 	TestFalse(TEXT("Legacy :settings is removed after promotion"), LegacyControl.Properties.Contains(TEXT("settings")));
+#if ENGINE_MAJOR_VERSION >= 5
 	FRigControlSettings PromotedSettings;
 	const TCHAR* SettingsRemainder = FRigControlSettings::StaticStruct()->ImportText(
 		*LegacyControl.States[0].SerializedValue, &PromotedSettings, nullptr, PPF_None, nullptr, TEXT("FRigControlSettings"));
@@ -149,6 +156,7 @@ bool FRigLangParserRoundTripTest::RunTest(const FString& Parameters)
 		TestFalse(TEXT("Second legacy limit remains disabled"),
 			PromotedSettings.LimitEnabled[1].bMinimum || PromotedSettings.LimitEnabled[1].bMaximum);
 	}
+#endif
 
 	const FString FirstCanonical = First->ToCanonicalString();
 	TestFalse(TEXT("Canonical output is not empty"), FirstCanonical.IsEmpty());
@@ -177,6 +185,7 @@ bool FRigLangParserRoundTripTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Canonical hash input reaches a fixed point"), Second->ToCanonicalHashInput(), First->ToCanonicalHashInput());
 	return true;
 }
+#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserTypedDeclarationsRoundTripTest,
@@ -370,6 +379,7 @@ bool FRigLangParserMalformedHierarchyTest::RunTest(const FString& Parameters)
 		*this, Source, TEXT("MalformedHierarchy.riglang"), TEXT("name"), 3, 4);
 }
 
+#if ENGINE_MAJOR_VERSION >= 5
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserTypedHierarchySchemaTest,
 	"AnimBP2FP.RigLang.Parser.TypedHierarchySchema",
@@ -404,7 +414,9 @@ bool FRigLangParserTypedHierarchySchemaTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Canonical printer emits typed parent form"), Module->ToCanonicalString().Contains(TEXT("(rig-parent")));
 	return true;
 }
+#endif
 
+#if ENGINE_MAJOR_VERSION >= 5
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserRejectsMalformedTypedHierarchyTest,
 	"AnimBP2FP.RigLang.Parser.RejectsMalformedTypedHierarchy",
@@ -431,6 +443,7 @@ bool FRigLangParserRejectsMalformedTypedHierarchyTest::RunTest(const FString& Pa
 	TestTrue(TEXT("Invalid control settings payload"), Contains(ErrorsFor(TEXT("(rig-state :kind control-settings :role initial :type Float :serialized \"not-a-control-settings-struct\")")), TEXT("invalid FRigControlSettings payload")));
 	return true;
 }
+#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserGraphOwnershipTest,
@@ -860,7 +873,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FRigLangParserReviewMetadataKindPrinterTest::RunTest(const FString& Parameters)
 {
 	FRigModuleAST Module;
-	Module.Header.ModuleId = FAnimLispModuleId(EAnimLispModuleKind::Rig, TEXT("/Game/Test/MetadataKinds"));
+	Module.Header.ModuleId.Kind = EAnimLispModuleKind::Rig;
+	Module.Header.ModuleId.AssetPath = TEXT("/Game/Test/MetadataKinds");
 	Module.Header.AssetClassPath = TEXT("/Script/ControlRig.ControlRigBlueprint");
 	Module.Header.Version = 1;
 	Module.Header.ContentHash = TEXT("metadata-kinds");
@@ -905,6 +919,7 @@ bool FRigLangParserReviewMetadataKindPrinterTest::RunTest(const FString& Paramet
 		&& TestEqual(TEXT("Metadata canonical text reaches a fixed point"), Reparsed->ToCanonicalString(), Canonical);
 }
 
+#if ENGINE_MAJOR_VERSION >= 5
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserReviewHierarchyStateSchemaTest,
 	"AnimBP2FP.RigLang.Review.C.HierarchyStateSchema",
@@ -940,7 +955,8 @@ bool FRigLangParserReviewHierarchyStateSchemaTest::RunTest(const FString& Parame
 		FRigLangParser::Parse(DuplicateSource, TEXT("ReviewDuplicateState.riglang"), DuplicateErrors).IsValid());
 
 	FRigModuleAST HashModule;
-	HashModule.Header.ModuleId = FAnimLispModuleId(EAnimLispModuleKind::Rig, TEXT("/Game/Test/StateHash"));
+	HashModule.Header.ModuleId.Kind = EAnimLispModuleKind::Rig;
+	HashModule.Header.ModuleId.AssetPath = TEXT("/Game/Test/StateHash");
 	HashModule.Header.AssetClassPath = TEXT("/Script/ControlRig.ControlRigBlueprint");
 	HashModule.Header.Version = 1;
 	FRigHierarchyElementAST& Element = HashModule.Hierarchy.AddDefaulted_GetRef();
@@ -956,6 +972,7 @@ bool FRigLangParserReviewHierarchyStateSchemaTest::RunTest(const FString& Parame
 		HashModule.ToCanonicalHashInput().Contains(TEXT(":role concurrent")));
 	return true;
 }
+#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserReviewVisibilityEnumTest,
@@ -1026,6 +1043,7 @@ bool FRigLangParserReviewLocalVariableDescriptionTest::RunTest(const FString& Pa
 	return true;
 }
 
+#if ENGINE_MAJOR_VERSION >= 5
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserReviewControlStateConsistencyTest,
 	"AnimBP2FP.RigLang.Review.F.ControlStateConsistency",
@@ -1068,6 +1086,7 @@ bool FRigLangParserReviewControlStateConsistencyTest::RunTest(const FString& Par
 		MissingSettingsErrors).IsValid());
 	return true;
 }
+#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserReviewMetadataFieldExclusivityTest,
@@ -1315,4 +1334,3 @@ bool FRigLangParserFunctionEntryNameCollisionTest::RunTest(const FString& Parame
 }
 
 #endif
-#endif // UE 5.8+

@@ -2,7 +2,7 @@
 
 #include "RigLangImporter.h"
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "AnimLangTokenizer.h"
 #include "ControlRig.h"
 #include "ControlRigBlueprintFactory.h"
@@ -2692,7 +2692,7 @@ FRigLangImportResult FRigLangImporter::Import(
 {
 	FRigLangImportResult Result;
 	Result.Diagnostics.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::RoundTrip,
-		TEXT("[UNSUPPORTED:UE4ControlRigAssetAuthoring] RigLang asset import requires Unreal Engine 5"));
+		TEXT("[UNSUPPORTED:ControlRigAssetAuthoring] RigLang asset import requires Unreal Engine 5.8 or newer"));
 	return Result;
 }
 
@@ -2702,7 +2702,7 @@ bool FRigLangImporter::ResolveTemplateNodeForTest(
 	FRigLangImportResult& Result)
 {
 	Result.Diagnostics.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::RoundTrip,
-		TEXT("[UNSUPPORTED:LegacyRigVMTemplate] RigVM template resolution requires Unreal Engine 5.4+"));
+		TEXT("[UNSUPPORTED:LegacyRigVMTemplate] RigVM template resolution requires Unreal Engine 5.8+"));
 	return false;
 }
 #endif

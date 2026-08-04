@@ -6,7 +6,7 @@
 #if ENGINE_MAJOR_VERSION < 5
 #include "ControlRigBlueprint.h"
 #else
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7)
 #include "ControlRigBlueprintLegacy.h"
 #else
 #include "ControlRigBlueprint.h"
@@ -29,6 +29,9 @@ namespace
 	bool IsGameAssetPath(const FString& AssetPath)
 	{
 		return AssetPath.StartsWith(TEXT("/Game/"), ESearchCase::CaseSensitive)
+			&& !AssetPath.Contains(TEXT("//"))
+			&& !AssetPath.Contains(TEXT("\\"))
+			&& !AssetPath.Contains(TEXT(":"))
 			&& FPackageName::IsValidLongPackageName(AssetPath, true);
 	}
 
@@ -140,9 +143,12 @@ bool AnimBP2FPCommandlets::ParseAnimExportParams(
 
 bool AnimBP2FPCommandlets::ValidateAssetRoot(const FString& AssetRoot, FString& OutError)
 {
-	if ((AssetRoot != TEXT("/Game")
-		&& !AssetRoot.StartsWith(TEXT("/Game/"), ESearchCase::CaseSensitive))
-		|| !FPackageName::IsValidLongPackageName(AssetRoot, true))
+	if (AssetRoot.Contains(TEXT("//"))
+		|| AssetRoot.Contains(TEXT("\\"))
+		|| AssetRoot.Contains(TEXT(":"))
+		|| (AssetRoot != TEXT("/Game")
+			&& (!AssetRoot.StartsWith(TEXT("/Game/"), ESearchCase::CaseSensitive)
+				|| !FPackageName::IsValidLongPackageName(AssetRoot, true))))
 	{
 		OutError = FString::Printf(
 			TEXT("Invalid -AssetRoot='%s'; expected /Game or a valid /Game package path"),
@@ -231,10 +237,11 @@ void AnimBP2FPCommandlets::CollectSafeBundleRevokePaths(
 	auto AddSafe = [&OutPaths](const FString& Path)
 	{
 		FString Error;
-		if (!Path.IsEmpty() && !FPaths::IsRelative(Path)
-			&& ValidateMappedOutputPath(Path, Error))
+		const FString FullPath = NormalizeFullPath(Path);
+		if (!FullPath.IsEmpty() && !FPaths::IsRelative(FullPath)
+			&& ValidateMappedOutputPath(FullPath, Error))
 		{
-			OutPaths.Add(NormalizeFullPath(Path));
+			OutPaths.Add(FullPath);
 		}
 	};
 	AddSafe(ManifestPath);
@@ -266,9 +273,10 @@ void AnimBP2FPCommandlets::CleanupBundleTargets(const TSet<FString>& Paths)
 	for (const FString& Path : Paths)
 	{
 		FString Error;
-		if (!FPaths::IsRelative(Path) && ValidateMappedOutputPath(Path, Error))
+		const FString FullPath = NormalizeFullPath(Path);
+		if (!FPaths::IsRelative(FullPath) && ValidateMappedOutputPath(FullPath, Error))
 		{
-			PrepareOutputForExport(Path, Error);
+			PrepareOutputForExport(FullPath, Error);
 		}
 	}
 }
@@ -398,13 +406,14 @@ bool AnimBP2FPCommandlets::CommitBundleAtomically(
 	for (const FString& PriorTarget : PriorBundleTargets)
 	{
 		FString SafetyError;
-		const FString Key = NormalizeFullPath(PriorTarget).ToLower();
-		if (!FPaths::IsRelative(PriorTarget)
+		const FString FullPriorTarget = NormalizeFullPath(PriorTarget);
+		const FString Key = FullPriorTarget.ToLower();
+		if (!FPaths::IsRelative(FullPriorTarget)
 			&& !CommitTargetKeys.Contains(Key)
-			&& ValidateMappedOutputPath(PriorTarget, SafetyError)
+			&& ValidateMappedOutputPath(FullPriorTarget, SafetyError)
 			&& !RevokeTargetKeys.Contains(Key))
 		{
-			RevokeTargets.Add(NormalizeFullPath(PriorTarget));
+			RevokeTargets.Add(FullPriorTarget);
 			RevokeTargetKeys.Add(Key);
 		}
 	}

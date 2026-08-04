@@ -1,8 +1,8 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
-#include "CoreMinimal.h"
 #include "AnimBP2FPVersionCompat.h"
+#if ANIMBP2FP_HAS_ANIM_AUTHORING
+#include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "Animation/AnimBlueprint.h"
 #include "AnimBPExporter.h"
@@ -204,4 +204,5 @@ bool FAnimBP2FPImportsNamedAnimationLayerGraphs::RunTest(const FString& Paramete
 }
 
 #endif
-#endif // UE 5.8+
+
+#endif // ANIMBP2FP_HAS_ANIM_AUTHORING

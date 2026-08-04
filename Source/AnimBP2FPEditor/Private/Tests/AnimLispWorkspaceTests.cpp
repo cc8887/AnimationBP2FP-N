@@ -1,6 +1,5 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "CoreMinimal.h"
 #include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
@@ -8,13 +7,15 @@
 #include "AnimLangDiagnostics.h"
 #include "AnimLispWorkspace.h"
 #include "RigLangAST.h"
+#if ENGINE_MAJOR_VERSION >= 5
 #include "Rigs/RigHierarchyElements.h"
+#endif
 
 #if WITH_DEV_AUTOMATION_TESTS
 
 namespace AnimLispWorkspaceTests
 {
-constexpr EAutomationTestFlags TestFlags =
+const ANIMBP2FP_AUTOMATION_TEST_FLAGS_TYPE TestFlags =
 	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter;
 
 FString RigHeader(const FString& Asset, const FString& Hash)
@@ -25,6 +26,7 @@ FString RigHeader(const FString& Asset, const FString& Hash)
 		*Hash);
 }
 
+#if ENGINE_MAJOR_VERSION >= 5
 FString TransformControlSettings()
 {
 	FRigControlSettings Settings;
@@ -36,6 +38,7 @@ FString TransformControlSettings()
 	Serialized.ReplaceInline(TEXT("\""), TEXT("\\\""));
 	return TEXT("\"") + Serialized + TEXT("\"");
 }
+#endif
 
 FString AnimHeader(const FString& Asset, const FString& Hash)
 {
@@ -218,6 +221,7 @@ bool FAnimLispWorkspaceRigFunctionSignatureTest::RunTest(const FString& Paramete
 	return true;
 }
 
+#if ENGINE_MAJOR_VERSION >= 5
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimLispWorkspaceTypedHierarchyValidationTest,
 	"AnimBP2FP.AnimLisp.Workspace.TypedHierarchyValidation",
@@ -245,6 +249,7 @@ bool FAnimLispWorkspaceTypedHierarchyValidationTest::RunTest(const FString& Para
 		Diagnostics, EAnimLangDiagCategory::Semantic, TEXT("duplicate transform role")));
 	return true;
 }
+#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimLispWorkspaceGraphOwnershipValidationTest,
@@ -773,8 +778,8 @@ bool FAnimLispWorkspaceParserIntegrityTest::RunTest(const FString& Parameters)
 		TestFalse(*(Label + TEXT(" build fails")), bBuilt);
 		TestTrue(
 			*(Label + TEXT(" emits parse or module diagnostic")),
-			!Diagnostics.GetByCategory(EAnimLangDiagCategory::Parse).IsEmpty()
-				|| !Diagnostics.GetByCategory(EAnimLangDiagCategory::Module).IsEmpty());
+			Diagnostics.GetByCategory(EAnimLangDiagCategory::Parse).Num() != 0
+				|| Diagnostics.GetByCategory(EAnimLangDiagCategory::Module).Num() != 0);
 		if (!PollutedSymbol.IsEmpty())
 		{
 			TestNull(
@@ -820,10 +825,10 @@ bool FAnimLispWorkspaceParserIntegrityTest::RunTest(const FString& Parameters)
 		MissingHeaderLexerWorkspace.Build(MissingHeaderLexerDiagnostics));
 	TestFalse(
 		TEXT("Missing header retains module diagnostic"),
-		MissingHeaderLexerDiagnostics.GetByCategory(EAnimLangDiagCategory::Module).IsEmpty());
+		MissingHeaderLexerDiagnostics.GetByCategory(EAnimLangDiagCategory::Module).Num() == 0);
 	TestFalse(
 		TEXT("Missing header retains lexer parse diagnostic"),
-		MissingHeaderLexerDiagnostics.GetByCategory(EAnimLangDiagCategory::Parse).IsEmpty());
+		MissingHeaderLexerDiagnostics.GetByCategory(EAnimLangDiagCategory::Parse).Num() == 0);
 	ExpectRejected(
 		TEXT("Duplicate Anim header"),
 		TEXT("DuplicateHeader.animlang"),
@@ -1843,4 +1848,3 @@ bool FAnimLispWorkspaceOptionalExactTypeSchemaTest::RunTest(const FString& Param
 }
 
 #endif
-#endif // UE 5.8+
