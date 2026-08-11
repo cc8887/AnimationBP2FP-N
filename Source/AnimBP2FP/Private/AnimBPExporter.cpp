@@ -6,10 +6,7 @@
 
 #if WITH_EDITOR
 
-// Keep UE4 on the public unsupported stubs below; all asset-authoring dependencies are UE5-only.
 DEFINE_LOG_CATEGORY_STATIC(LogAnimBP2FP, Log, All);
-
-#if ENGINE_MAJOR_VERSION >= 5
 
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
@@ -181,7 +178,11 @@ namespace
 			Notify.Time = Event.GetTriggerTime();
 			Notify.Duration = Event.GetDuration();
 			Notify.bIsState = Event.NotifyStateClass != nullptr;
+#if ENGINE_MAJOR_VERSION >= 5
 			const UObject* NotifyObject = Event.NotifyStateClass ? static_cast<const UObject*>(Event.NotifyStateClass.Get()) : static_cast<const UObject*>(Event.Notify.Get());
+#else
+			const UObject* NotifyObject = Event.NotifyStateClass ? static_cast<const UObject*>(Event.NotifyStateClass) : static_cast<const UObject*>(Event.Notify);
+#endif
 			Notify.ClassPath = NotifyObject ? NotifyObject->GetClass()->GetPathName() : TEXT("name-only");
 		}
 		Snapshot.Notifies.Sort([](const FAnimNotifySnapshot& A, const FAnimNotifySnapshot& B)
@@ -357,7 +358,11 @@ namespace
 		}
 
 		FString ExportedValue;
+#if ENGINE_MAJOR_VERSION >= 5
 		Property->ExportTextItem_Direct(ExportedValue, Value, Value, const_cast<UObject*>(RootAsset), PPF_None);
+#else
+		Property->ExportTextItem(ExportedValue, Value, Value, const_cast<UObject*>(RootAsset), PPF_None);
+#endif
 		Snapshot.Fields.Add({Path, Property->GetCPPType(), MoveTemp(ExportedValue)});
 	}
 
@@ -429,7 +434,13 @@ namespace
 			Canonical += TEXT("\nR\t") + Reference;
 		}
 		FTCHARToUTF8 Utf8(*Canonical);
+#if ENGINE_MAJOR_VERSION >= 5
 		Snapshot.StableHash = FSHA1::HashBuffer(Utf8.Get(), Utf8.Length()).ToString();
+#else
+		FSHAHash Hash;
+		FSHA1::HashBuffer(Utf8.Get(), Utf8.Length(), Hash.Hash);
+		Snapshot.StableHash = Hash.ToString();
+#endif
 		return Snapshot;
 	}
 
@@ -463,8 +474,14 @@ namespace
 			: &FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
 		for (const FString& ReferencedObjectPath : ReferencedObjects)
 		{
+#if ENGINE_MAJOR_VERSION >= 5
 			const FAssetData AssetData = AssetRegistry->GetAssetByObjectPath(FSoftObjectPath(ReferencedObjectPath));
-			if (AssetData.IsValid() && IsRecursiveTypedDependencyClassPath(AssetData.AssetClassPath.ToString()))
+			const FString AssetClassPath = AssetData.AssetClassPath.ToString();
+#else
+			const FAssetData AssetData = AssetRegistry->GetAssetByObjectPath(FName(*ReferencedObjectPath));
+			const FString AssetClassPath = AssetData.AssetClass.ToString();
+#endif
+			if (AssetData.IsValid() && IsRecursiveTypedDependencyClassPath(AssetClassPath))
 			{
 				AddExternalDependency(AssetData.GetAsset(), AST, SeenPaths);
 			}
@@ -606,10 +623,14 @@ namespace
 		if (Category == UEdGraphSchema_K2::PC_Boolean) Result.CPPType = TEXT("bool");
 		else if (Category == UEdGraphSchema_K2::PC_Int) Result.CPPType = TEXT("int32");
 		else if (Category == UEdGraphSchema_K2::PC_Int64) Result.CPPType = TEXT("int64");
+#if ENGINE_MAJOR_VERSION >= 5
 		else if (Category == UEdGraphSchema_K2::PC_Real)
 		{
 			Result.CPPType = PinType.PinSubCategory == UEdGraphSchema_K2::PC_Double ? TEXT("double") : TEXT("float");
 		}
+#else
+		else if (Category == UEdGraphSchema_K2::PC_Float) Result.CPPType = TEXT("float");
+#endif
 		else if (const UScriptStruct* Struct = Cast<UScriptStruct>(TypeObject)) Result.CPPType = Struct->GetStructCPPName();
 		else Result.CPPType = Category.ToString();
 		Result.CPPTypeObject = TypeObject ? TypeObject->GetPathName() : FString();
@@ -636,7 +657,12 @@ namespace
 		}
 		if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Int
 			|| Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Int64
-			|| Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Real)
+#if ENGINE_MAJOR_VERSION >= 5
+			|| Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Real
+#else
+			|| Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Float
+#endif
+			)
 		{
 			return FString::Printf(TEXT("(pin-default %s)"), *RawValue);
 		}
@@ -724,6 +750,33 @@ namespace
 
 		return false;
 	}
+#else
+	static bool TryGetPropertyBinding(const UAnimGraphNode_Base* Node, const FName& BindingName, FAnimGraphNodePropertyBinding& OutBinding)
+	{
+		if (!Node)
+		{
+			return false;
+		}
+
+		if (const FAnimGraphNodePropertyBinding* Exact = Node->PropertyBindings.Find(BindingName))
+		{
+			OutBinding = *Exact;
+			return Exact->bIsBound && Exact->PropertyPath.Num() > 0;
+		}
+
+		const FName ComparisonName(BindingName, 0);
+		for (const TPair<FName, FAnimGraphNodePropertyBinding>& Pair : Node->PropertyBindings)
+		{
+			if (FName(Pair.Key, 0) == ComparisonName)
+			{
+				OutBinding = Pair.Value;
+				return Pair.Value.bIsBound && Pair.Value.PropertyPath.Num() > 0;
+			}
+		}
+
+		return false;
+	}
+#endif
 
 	static FString FormatBindPathValue(const FAnimGraphNodePropertyBinding& Binding)
 	{
@@ -737,6 +790,7 @@ namespace
 			? TEXT("function")
 			: TEXT("property");
 		FString Result = FString::Printf(TEXT("(bind-path %s :type %s"), *QuoteDSLString(JoinedPath), TypeName);
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
 		if (Binding.ContextId != NAME_None)
 		{
 			Result += FString::Printf(TEXT(" :context %s"), *QuoteDSLString(Binding.ContextId.ToString()));
@@ -749,20 +803,10 @@ namespace
 		{
 			Result += TEXT(" :only-update-when-active true");
 		}
+#endif
 		Result += TEXT(")");
 		return Result;
 	}
-#else
-	static bool TryGetPropertyBinding(const UAnimGraphNode_Base*, const FName&, FAnimGraphNodePropertyBinding&)
-	{
-		return false;
-	}
-
-	static FString FormatBindPathValue(const FAnimGraphNodePropertyBinding&)
-	{
-		return FString();
-	}
-#endif
 
 	static bool IsManagedHelperGraphName(const FString& GraphName)
 	{
@@ -1653,11 +1697,16 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(
 		LispOptions.bStableIds = true;
 		const FBlueprintLispResult LispResult = FBlueprintLispConverter::ExportGraph(Graph, LispOptions);
 		const FString LispCode = LispResult.LispCode.TrimStartAndEnd();
-		if (!LispResult.bSuccess || LispCode.IsEmpty() || LispCode.StartsWith(TEXT("; skip:"), ESearchCase::IgnoreCase))
+		if (!LispResult.bSuccess || LispCode.IsEmpty())
 		{
 			UE_LOG(LogAnimBP2FP, Error, TEXT("[UNSUPPORTED:LogicGraph] Graph '%s' contains %d nodes but BlueprintLisp did not export it: %s"),
 				*Graph->GetName(), Graph->Nodes.Num(), LispResult.Error.IsEmpty() ? *LispCode : *LispResult.Error);
 			return false;
+		}
+		if (LispCode.StartsWith(TEXT("; skip:"), ESearchCase::IgnoreCase))
+		{
+			UE_LOG(LogAnimBP2FP, Verbose, TEXT("Skipping logic graph '%s': %s"), *Graph->GetName(), *LispCode);
+			return true;
 		}
 
 		FLogicGraphDef& LogicGraph = ResultAST->LogicGraphs.AddDefaulted_GetRef();
@@ -3058,64 +3107,5 @@ bool FAnimBPExporter::ExportEventGraph(
 		return false;
 	}
 }
-
-#else
-
-namespace
-{
-	const TCHAR* UE4ExporterUnsupported = TEXT("[UNSUPPORTED:UE4AnimAuthoring] Unreal Engine 4 supports parser/lint/diff only; Animation Blueprint export requires Unreal Engine 5");
-}
-
-FString FAnimBPExporter::Export(UAnimBlueprint* AnimBlueprint)
-{
-	UE_LOG(LogAnimBP2FP, Error, TEXT("%s"), UE4ExporterUnsupported);
-	return FString::Printf(TEXT("; Error: %s"), UE4ExporterUnsupported);
-}
-
-TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(UAnimBlueprint* AnimBlueprint)
-{
-	return ExportToAST(AnimBlueprint, nullptr);
-}
-
-TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(
-	UAnimBlueprint* AnimBlueprint,
-	TMap<FString, FRigLangExportResult>* OutRigModules)
-{
-	if (OutRigModules) OutRigModules->Reset();
-	UE_LOG(LogAnimBP2FP, Error, TEXT("%s"), UE4ExporterUnsupported);
-	return nullptr;
-}
-
-FString FAnimBPExporter::ExportWithOptions(UAnimBlueprint* AnimBlueprint, const FExportOptions& Options)
-{
-	TMap<FString, FRigLangExportResult> IgnoredRigModules;
-	return ExportWithOptions(AnimBlueprint, Options, IgnoredRigModules);
-}
-
-FString FAnimBPExporter::ExportWithOptions(
-	UAnimBlueprint* AnimBlueprint,
-	const FExportOptions& Options,
-	TMap<FString, FRigLangExportResult>& OutRigModules,
-	TSharedPtr<FAnimGraphAST>* OutAST)
-{
-	OutRigModules.Reset();
-	if (OutAST) OutAST->Reset();
-	UE_LOG(LogAnimBP2FP, Error, TEXT("%s"), UE4ExporterUnsupported);
-	return FString::Printf(TEXT("; Error: %s"), UE4ExporterUnsupported);
-}
-
-bool FAnimBPExporter::ExportEventGraph(
-	UAnimBlueprint* AnimBlueprint,
-	const FEventGraphExportOptions& Options,
-	FString& OutLispCode,
-	FString& OutError)
-{
-	OutLispCode.Reset();
-	OutError = UE4ExporterUnsupported;
-	UE_LOG(LogAnimBP2FP, Error, TEXT("%s"), UE4ExporterUnsupported);
-	return false;
-}
-
-#endif // ENGINE_MAJOR_VERSION >= 5
 
 #endif // WITH_EDITOR
