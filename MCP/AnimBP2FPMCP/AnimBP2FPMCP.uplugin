@@ -1,0 +1,32 @@
+{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "1.0.0",
+    "Name": "AnimBP2FPMCP",
+    "FriendlyName": "AnimBP2FP MCP",
+    "Description": "UE5.8 native MCP Toolset adapter for AnimBP2FP",
+    "Category": "AI",
+    "CanContainContent": false,
+    "EnabledByDefault": false,
+    "Modules": [
+        {
+            "Name": "AnimBP2FPMCP",
+            "Type": "Editor",
+            "LoadingPhase": "Default"
+        }
+    ],
+    "Plugins": [
+        {
+            "Name": "AnimBP2FP",
+            "Enabled": true
+        },
+        {
+            "Name": "ToolsetRegistry",
+            "Enabled": true
+        },
+        {
+            "Name": "ModelContextProtocol",
+            "Enabled": true
+        }
+    ]
+}
