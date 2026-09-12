@@ -23,7 +23,11 @@ static EPinType GetPinType(UEdGraphPin* Pin)
 
 	const FName& PinCategory = Pin->PinType.PinCategory;
 
+#if ENGINE_MAJOR_VERSION < 5
+	if (PinCategory == UEdGraphSchema_K2::PC_Float)
+#else
 	if (PinCategory == UEdGraphSchema_K2::PC_Float || PinCategory == UEdGraphSchema_K2::PC_Real)
+#endif
 		return EPinType::Float;
 	if (PinCategory == UEdGraphSchema_K2::PC_Int)
 		return EPinType::Int;

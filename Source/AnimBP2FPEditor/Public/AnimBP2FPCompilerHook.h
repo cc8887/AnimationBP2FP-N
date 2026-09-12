@@ -56,7 +56,11 @@ private:
 	// Delegate handles
 	FDelegateHandle PreCompileHandle;
 	FDelegateHandle PostCompileHandle;
+#if ENGINE_MAJOR_VERSION < 5
+	FDelegateHandle TickerHandle;
+#else
 	FTSTicker::FDelegateHandle TickerHandle;
+#endif
 
 	// Registration state
 	bool bIsRegistered = false;

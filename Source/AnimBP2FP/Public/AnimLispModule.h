@@ -37,6 +37,7 @@ struct ANIMBP2FP_API FAnimLispModuleId
 	static FAnimLispModuleId FromAssetPath(const FString& InAssetPath, EAnimLispModuleKind InKind);
 	FString ToString() const;
 	bool operator==(const FAnimLispModuleId& Other) const;
+	bool operator!=(const FAnimLispModuleId& Other) const { return !(*this == Other); }
 };
 
 ANIMBP2FP_API uint32 GetTypeHash(const FAnimLispModuleId& ModuleId);

@@ -6,6 +6,11 @@
 
 #if WITH_EDITOR
 
+// Keep UE4 on the public unsupported stubs below; all asset-authoring dependencies are UE5-only.
+DEFINE_LOG_CATEGORY_STATIC(LogAnimBPImporter, Log, All);
+
+#if ENGINE_MAJOR_VERSION >= 5
+
 #include "AnimLangParser.h"
 #include "AnimBPExporter.h"
 #include "AnimLangDiffer.h"
@@ -37,7 +42,9 @@
 #include "AnimStateEntryNode.h"
 #include "AnimStateNodeBase.h"
 #include "AnimStateNode.h"
+#if ENGINE_MAJOR_VERSION >= 5
 #include "AnimStateAliasNode.h"
+#endif
 #include "AnimStateConduitNode.h"
 #include "AnimStateTransitionNode.h"
 #include "AnimGraphNode_ModifyCurve.h"
@@ -47,8 +54,16 @@
 #include "K2Node_AnimGetter.h"
 #include "AnimGraphNode_LinkedInputPose.h"
 #include "AnimGraphNode_IdentityPose.h"
+#if ENGINE_MAJOR_VERSION >= 5
 #include "AnimGraphNode_ControlRig.h"
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7)
 #include "ControlRigBlueprintLegacy.h"
+#else
+#include "ControlRigBlueprint.h"
+#endif
+#else
+#include "ControlRigBlueprint.h"
+#endif
 #include "AnimationGraph.h"
 #include "AnimLangTokenizer.h"
 #include "RigLangExporter.h"
@@ -78,8 +93,6 @@
 #include "UObject/SavePackage.h"
 #include "Misc/PackageName.h"
 #include "Framework/Application/SlateApplication.h"
-
-DEFINE_LOG_CATEGORY_STATIC(LogAnimBPImporter, Log, All);
 
 static FAnimLispTypeRef IMP_RigInputTypeFromPin(const FEdGraphPinType& PinType)
 {
@@ -802,6 +815,7 @@ namespace
 
 	static TMap<FName, FAnimGraphNodePropertyBinding>* GetMutablePropertyBindingMap(UAnimGraphNode_Base* Node)
 	{
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
 		if (!Node || !Node->GetMutableBinding())
 		{
 			return nullptr;
@@ -813,7 +827,9 @@ namespace
 			void* MapPtr = MapProperty->ContainerPtrToValuePtr<void>(BindingObject);
 			return reinterpret_cast<TMap<FName, FAnimGraphNodePropertyBinding>*>(MapPtr);
 		}
-
+#elif ENGINE_MAJOR_VERSION == 5
+		return Node ? &Node->PropertyBindings : nullptr;
+#endif
 		return nullptr;
 	}
 
@@ -1038,7 +1054,7 @@ namespace
 
 	static bool RestoreCustomPinVisibility(UAnimGraphNode_Base* Node, const TSet<FString>& NormalizedNames)
 	{
-		if (!Node || NormalizedNames.IsEmpty()) return false;
+		if (!Node || NormalizedNames.Num() == 0) return false;
 		FArrayProperty* ArrayProperty = FindFProperty<FArrayProperty>(Node->GetClass(), TEXT("CustomPinProperties"));
 		FStructProperty* ElementProperty = ArrayProperty ? CastField<FStructProperty>(ArrayProperty->Inner) : nullptr;
 		if (!ElementProperty || !ElementProperty->Struct) return false;
@@ -1461,7 +1477,7 @@ bool FAnimBPImporter::SetNodeProperty(UAnimGraphNode_Base* Node, const FString& 
 				&& SelfNode->StringValue.Equals(TEXT("true"), ESearchCase::IgnoreCase);
 			if (bSelfContext)
 			{
-				MemberReference->SetSelfMember(MemberName, FGuid());
+				MemberReference->SetSelfMember(MemberName);
 				return true;
 			}
 
@@ -1503,7 +1519,7 @@ bool FAnimBPImporter::SetNodeProperty(UAnimGraphNode_Base* Node, const FString& 
 						FunctionNameProperty->ContainerPtrToValuePtr<void>(RuntimeFunctionValue.GetStructMemory()));
 					if (!FunctionName.IsNone())
 					{
-						static_cast<FMemberReference*>(ValuePtr)->SetSelfMember(FunctionName, FGuid());
+						static_cast<FMemberReference*>(ValuePtr)->SetSelfMember(FunctionName);
 						return true;
 					}
 				}
@@ -1519,7 +1535,7 @@ bool FAnimBPImporter::SetNodeProperty(UAnimGraphNode_Base* Node, const FString& 
 				FMemberReference* MemberReference = static_cast<FMemberReference*>(ValuePtr);
 				if (MemberReference->IsSelfContext())
 				{
-					MemberReference->SetSelfMember(MemberReference->GetMemberName(), FGuid());
+					MemberReference->SetSelfMember(MemberReference->GetMemberName());
 				}
 			}
 			return true;
@@ -1719,7 +1735,7 @@ bool FAnimBPImporter::ApplyMapVariableDefaults(
 	const bool bHasMapEntries = Variables.ContainsByPredicate([](const FVariableDef& Variable)
 	{
 		return Variable.ContainerType.Equals(TEXT("map"), ESearchCase::IgnoreCase)
-			&& !Variable.MapEntries.IsEmpty();
+			&& Variable.MapEntries.Num() != 0;
 	});
 	if (!bHasMapEntries)
 	{
@@ -1734,7 +1750,7 @@ bool FAnimBPImporter::ApplyMapVariableDefaults(
 	for (const FVariableDef& Variable : Variables)
 	{
 		if (!Variable.ContainerType.Equals(TEXT("map"), ESearchCase::IgnoreCase)
-			|| Variable.MapEntries.IsEmpty())
+			|| Variable.MapEntries.Num() == 0)
 		{
 			continue;
 		}
@@ -2276,7 +2292,7 @@ bool FAnimBPImporter::BuildLogicGraphs(UAnimBlueprint* Blueprint, const TArray<F
 		}
 	}
 	while (bFoundNewPrivateMacro);
-	if (!InternalizedMacros.IsEmpty())
+	if (InternalizedMacros.Num() != 0)
 	{
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 	}
@@ -2353,10 +2369,12 @@ bool FAnimBPImporter::ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph
 		}
 
 		Node->Modify();
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
 		if (UObject* BindingObject = reinterpret_cast<UObject*>(Node->GetMutableBinding()))
 		{
 			BindingObject->Modify();
 		}
+#endif
 		const int32 OptionalPinIndex = Node->ShowPinForProperties.IndexOfByPredicate(
 			[&PropertyName](const FOptionalPinFromProperty& OptionalPin)
 			{
@@ -2385,7 +2403,9 @@ bool FAnimBPImporter::ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph
 		PropertyBinding.bIsBound = true;
 		PropertyBinding.ArrayIndex = ArrayIndex;
 		PropertyBinding.ContextId = ContextId;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
 		PropertyBinding.bOnlyUpdateWhenActive = bOnlyUpdateWhenActive;
+#endif
 		PropertyBindings->Add(FName(*PropertyName), PropertyBinding);
 
 		Node->ReconstructNode();
@@ -2428,10 +2448,12 @@ bool FAnimBPImporter::ConnectPropertyBinding(UAnimBlueprint* Blueprint, UEdGraph
 		if (!PropertyName.IsEmpty() && PropertyBindings)
 		{
 			Node->Modify();
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
 			if (UObject* BindingObject = reinterpret_cast<UObject*>(Node->GetMutableBinding()))
 			{
 				BindingObject->Modify();
 			}
+#endif
 
 			FAnimGraphNodePropertyBinding PropertyBinding;
 			PropertyBinding.PropertyName = FName(*PropertyName);
@@ -2894,7 +2916,11 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 					
 					TArray<FAssetData> AssetList;
 					// Search for UBlendSpace and all subclasses (including BlendSpace1D)
+#if ENGINE_MAJOR_VERSION < 5
+					AssetRegistry.GetAssetsByClass(UBlendSpace::StaticClass()->GetFName(), AssetList, true);
+#else
 					AssetRegistry.GetAssetsByClass(UBlendSpace::StaticClass()->GetClassPathName(), AssetList, true);
+#endif
 					
 					for (const FAssetData& AssetData : AssetList)
 					{
@@ -3152,6 +3178,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 	// Restore typed module identity first; the reflected string remains a legacy fallback.
 	bool bRestoredTypedRig = false;
 	TMap<FString, FString> TypedRigInputPropertyNames;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 	if (NodeAST->RigBinding.IsSet())
 	{
 		const FAnimRigNodeBinding& Binding = NodeAST->RigBinding.GetValue();
@@ -3177,7 +3204,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 						&& !ResolvedRig
 						&& NodeAST->Coverage == EAnimNodeCoverage::Lossy
 						&& Binding.EntryName.IsEmpty()
-						&& Binding.Inputs.IsEmpty();
+						&& Binding.Inputs.Num() == 0;
 					if (bLegacyMigratedBinding)
 					{
 						FString SerializedReference;
@@ -3324,6 +3351,14 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 			return nullptr;
 		}
 	}
+#else
+	if (NodeAST->RigBinding.IsSet())
+	{
+		UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:ControlRigModule] Typed Control Rig module bindings require Unreal Engine 5.8 or newer"));
+		Graph->RemoveNode(NewNode);
+		return nullptr;
+	}
+#endif
 	if (!NodeAST->RigBinding.IsSet())
 	{
 		if (const FString* RigReference = NodeAST->Properties.Find(TEXT("control-rig-asset-reference"));
@@ -3512,7 +3547,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 					*NodeType, *PropertyName, *ImportedExpression.Error);
 				return false;
 			}
-			if (TargetPin->LinkedTo.IsEmpty())
+			if (TargetPin->LinkedTo.Num() == 0)
 			{
 				UE_LOG(LogAnimBPImporter, Error, TEXT("[SKIP:LinkedPureExpression] Node '%s' property ':%s' import produced no target connection"),
 					*NodeType, *PropertyName);
@@ -3661,7 +3696,7 @@ UAnimGraphNode_Base* FAnimBPImporter::BuildAnimNode(const TSharedPtr<FAnimNodeAS
 	{
 		const FNamedChild* SampleChild = NodeAST->Children.FindByPredicate(
 			[](const FNamedChild& Child) { return Child.PinName == TEXT("sample-graph"); });
-		if (!SampleChild || !SampleChild->Node.IsValid() || NewNode->GetSubGraphs().IsEmpty())
+		if (!SampleChild || !SampleChild->Node.IsValid() || NewNode->GetSubGraphs().Num() == 0)
 		{
 			UE_LOG(LogAnimBPImporter, Error, TEXT("[UNSUPPORTED:BlendStackBoundGraph] BlendStack '%s' is missing :sample-graph or bound graph"), *NodeType);
 			Graph->RemoveNode(NewNode);
@@ -3993,9 +4028,8 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 				{
 					return false;
 				}
-				UAnimGraphNode_StateResult* ResultNode = StateNode->GetResultNodeInsideState();
 				UAnimGraphNode_Base* AnimTree = BuildAnimNode(StateAnimation, StateNode->BoundGraph, DefineNodes, HelperGraphs);
-				if (!AnimTree || !ResultNode)
+				if (!AnimTree)
 				{
 					return false;
 				}
@@ -4434,7 +4468,9 @@ bool FAnimBPImporter::BuildStateMachine(UAnimGraphNode_StateMachine* SMNode, con
 			if (Trans.bAutoRule)
 			{
 				TransNode->bAutomaticRuleBasedOnSequencePlayerInState = true;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
 				TransNode->AutomaticRuleTriggerTime = Trans.AutoRuleTriggerTime;
+#endif
 			}
 			// Restore full transition condition graph from BlueprintLisp DSL
 			else if (!Trans.RuleGraph.IsEmpty())
@@ -4830,7 +4866,7 @@ FAnimLispBundleImportResult FAnimBPImporter::ImportBundle(
 	const FAnimLispBundleImportOptions& Options)
 {
 	FAnimLispBundleImportResult Result;
-	if (Sources.IsEmpty())
+	if (Sources.Num() == 0)
 	{
 		Result.Diagnostics.Add(
 			EAnimLangDiagSeverity::Error,
@@ -5090,7 +5126,7 @@ FAnimLispBundleImportResult FAnimBPImporter::ImportBundle(
 			CommittedContext.ResolvedRigs.Reset();
 			CommittedAssets.Reset();
 			FText UnloadError;
-			if (!PackagesToUnload.IsEmpty()
+			if (PackagesToUnload.Num() != 0
 				&& !UPackageTools::UnloadPackages(PackagesToUnload, UnloadError, true))
 			{
 				for (UPackage* Package : PackagesToUnload)
@@ -5937,5 +5973,70 @@ bool FAnimBPImporter::UpdateBlueprint(UAnimBlueprint* ExistingBlueprint, const F
 	
 	return Result.bSuccess;
 }
+
+#else
+
+namespace
+{
+	const TCHAR* UE4ImporterUnsupported = TEXT("[UNSUPPORTED:UE4AnimAuthoring] Unreal Engine 4 supports parser/lint/diff only; Animation Blueprint authoring requires Unreal Engine 5");
+}
+
+FAnimLispBundleImportResult FAnimBPImporter::ImportBundle(
+	const TArray<FAnimLispBundleSource>& Sources,
+	const FAnimLispBundleImportOptions& Options)
+{
+	FAnimLispBundleImportResult Result;
+	Result.Diagnostics.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::Capability, UE4ImporterUnsupported);
+	UE_LOG(LogAnimBPImporter, Error, TEXT("%s"), UE4ImporterUnsupported);
+	return Result;
+}
+
+UAnimBlueprint* FAnimBPImporter::Import(const FString& DSLCode, const FString& PackagePath, FString* OutError)
+{
+	if (OutError) *OutError = UE4ImporterUnsupported;
+	UE_LOG(LogAnimBPImporter, Error, TEXT("%s"), UE4ImporterUnsupported);
+	return nullptr;
+}
+
+UAnimBlueprint* FAnimBPImporter::ImportFromAST(
+	const TSharedPtr<FAnimGraphAST>& AST,
+	const FString& PackagePath,
+	FString* OutError)
+{
+	return ImportFromAST(AST, PackagePath, FAnimBPImportContext(), OutError);
+}
+
+UAnimBlueprint* FAnimBPImporter::ImportFromAST(
+	const TSharedPtr<FAnimGraphAST>& AST,
+	const FString& PackagePath,
+	const FAnimBPImportContext& Context,
+	FString* OutError)
+{
+	if (OutError) *OutError = UE4ImporterUnsupported;
+	UE_LOG(LogAnimBPImporter, Error, TEXT("%s"), UE4ImporterUnsupported);
+	return nullptr;
+}
+
+FAnimBPImporter::FUpdateResult FAnimBPImporter::UpdateBlueprintDetailed(
+	UAnimBlueprint* ExistingBlueprint,
+	const FString& NewDSLCode)
+{
+	FUpdateResult Result;
+	Result.Warnings.Add(UE4ImporterUnsupported);
+	UE_LOG(LogAnimBPImporter, Error, TEXT("%s"), UE4ImporterUnsupported);
+	return Result;
+}
+
+bool FAnimBPImporter::UpdateBlueprint(
+	UAnimBlueprint* ExistingBlueprint,
+	const FString& NewDSLCode,
+	FString* OutError)
+{
+	if (OutError) *OutError = UE4ImporterUnsupported;
+	UE_LOG(LogAnimBPImporter, Error, TEXT("%s"), UE4ImporterUnsupported);
+	return false;
+}
+
+#endif // ENGINE_MAJOR_VERSION >= 5
 
 #endif // WITH_EDITOR

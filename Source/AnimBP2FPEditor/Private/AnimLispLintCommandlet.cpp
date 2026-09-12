@@ -188,7 +188,7 @@ int32 UAnimLispLintCommandlet::Main(const FString& Params)
 	Sources.Sort();
 	FAnimLispWorkspace Workspace;
 	FAnimLangDiagnostics Diagnostics;
-	if (!bWorkspaceExists || Sources.IsEmpty())
+	if (!bWorkspaceExists || Sources.Num() == 0)
 	{
 		FAnimLangSourceLoc Location;
 		Location.SourceFile = WorkspaceRoot;

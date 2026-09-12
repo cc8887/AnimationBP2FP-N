@@ -8,6 +8,10 @@ public class AnimBP2FPEditor : ModuleRules
 	public AnimBP2FPEditor(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+		string CppStandardName = Target.Version.MajorVersion > 5
+			|| (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion >= 5)
+			? "Cpp20" : "Cpp17";
+		CppStandard = (CppStandardVersion)System.Enum.Parse(typeof(CppStandardVersion), CppStandardName);
 		
 		PublicDependencyModuleNames.AddRange(new string[]
 		{

@@ -36,12 +36,16 @@ void FBP2FPMappingRegistry::Initialize()
 	// Phase 3: Reconcile
 	Reconcile();
 
+	const int32 SyncedCount = Entries.FilterByPredicate(
+		[](const FBP2FPMappingEntry& E) { return E.State == EBP2FPSyncState::Synced; }).Num();
+	const int32 BPOnlyCount = Entries.FilterByPredicate(
+		[](const FBP2FPMappingEntry& E) { return E.State == EBP2FPSyncState::BPOnly; }).Num();
+	const int32 DSLOnlyCount = Entries.FilterByPredicate(
+		[](const FBP2FPMappingEntry& E) { return E.State == EBP2FPSyncState::DSLOnly; }).Num();
+	const int32 OutOfSyncCount = Entries.FilterByPredicate(
+		[](const FBP2FPMappingEntry& E) { return E.State == EBP2FPSyncState::OutOfSync; }).Num();
 	UE_LOG(LogTemp, Log, TEXT("BP2FPMappingRegistry: Initialized with %d entries (%d synced, %d BP-only, %d DSL-only, %d out-of-sync)"),
-		Entries.Num(),
-		Entries.FilterByPredicate([](const FBP2FPMappingEntry& E) { return E.State == EBP2FPSyncState::Synced; }).Num(),
-		Entries.FilterByPredicate([](const FBP2FPMappingEntry& E) { return E.State == EBP2FPSyncState::BPOnly; }).Num(),
-		Entries.FilterByPredicate([](const FBP2FPMappingEntry& E) { return E.State == EBP2FPSyncState::DSLOnly; }).Num(),
-		Entries.FilterByPredicate([](const FBP2FPMappingEntry& E) { return E.State == EBP2FPSyncState::OutOfSync; }).Num());
+		Entries.Num(), SyncedCount, BPOnlyCount, DSLOnlyCount, OutOfSyncCount);
 }
 
 void FBP2FPMappingRegistry::Reset()
@@ -165,7 +169,11 @@ FString FBP2FPMappingRegistry::DSLToBlueprintPath(
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 
 	TArray<FAssetData> AllBPs;
+#if ENGINE_MAJOR_VERSION < 5
+	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetFName(), AllBPs);
+#else
 	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetClassPathName(), AllBPs);
+#endif
 
 	TArray<FString> Candidates;
 	for (const FAssetData& Asset : AllBPs)
@@ -262,7 +270,11 @@ void FBP2FPMappingRegistry::ScanBlueprints()
 
 	// Scan Animation Blueprints
 	TArray<FAssetData> AnimBPAssets;
+#if ENGINE_MAJOR_VERSION < 5
+	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetFName(), AnimBPAssets);
+#else
 	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetClassPathName(), AnimBPAssets);
+#endif
 
 	for (const FAssetData& AssetData : AnimBPAssets)
 	{
@@ -310,7 +322,11 @@ void FBP2FPMappingRegistry::ScanDSLFiles(const FString& CategoryTag)
 
 	TMap<FString, TArray<FString>> BPNameToPaths;
 	TArray<FAssetData> AllBPs;
+#if ENGINE_MAJOR_VERSION < 5
+	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetFName(), AllBPs);
+#else
 	AssetRegistry.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetClassPathName(), AllBPs);
+#endif
 	for (const FAssetData& Asset : AllBPs)
 	{
 		FString PkgPath = Asset.PackageName.ToString();

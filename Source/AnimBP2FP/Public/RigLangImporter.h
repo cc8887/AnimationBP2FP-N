@@ -2,6 +2,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "AnimLangDiagnostics.h"
 #include "RigLangAST.h"
 
@@ -18,7 +19,7 @@ struct ANIMBP2FP_API FRigLangImportOptions
 
 struct ANIMBP2FP_API FRigLangImportResult
 {
-	TObjectPtr<UControlRigBlueprint> Blueprint = nullptr;
+	TAnimBP2FPObjectPtr<UControlRigBlueprint> Blueprint = nullptr;
 	FAnimLangDiagnostics Diagnostics;
 	bool bCompiled = false;
 };

@@ -1,6 +1,7 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
@@ -17,12 +18,12 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "UObject/UnrealType.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && ANIMBP2FP_HAS_ANIM_AUTHORING
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPVariableExporterPreservesReadableTypes,
 	"AnimBP2FP.VariableTypes.ExporterPreservesReadableTypes",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPVariableExporterPreservesReadableTypes::RunTest(const FString& Parameters)
 {
@@ -83,7 +84,7 @@ bool FAnimBP2FPVariableExporterPreservesReadableTypes::RunTest(const FString& Pa
 
 	TArray<FAnimLangParseError> Errors;
 	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(DSL, Errors);
-	TestTrue(TEXT("exact pin metadata parses"), Parsed.IsValid() && Errors.IsEmpty());
+	TestTrue(TEXT("exact pin metadata parses"), Parsed.IsValid() && Errors.Num() == 0);
 	if (Parsed.IsValid() && Parsed->Variables.Num() == 5)
 	{
 		TestEqual(TEXT("object category round-trips"), Parsed->Variables[2].PinCategory, UEdGraphSchema_K2::PC_Object.ToString());
@@ -98,7 +99,7 @@ bool FAnimBP2FPVariableExporterPreservesReadableTypes::RunTest(const FString& Pa
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPVariablePinTypeSurvivesDSLRoundTrip,
 	"AnimBP2FP.VariableTypes.PinTypeSurvivesDSLRoundTrip",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPVariablePinTypeSurvivesDSLRoundTrip::RunTest(const FString& Parameters)
 {
@@ -117,7 +118,7 @@ bool FAnimBP2FPVariablePinTypeSurvivesDSLRoundTrip::RunTest(const FString& Param
 
 	TArray<FAnimLangParseError> Errors;
 	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(ExportedDSL, Errors);
-	TestTrue(TEXT("exported DSL parses without errors"), Parsed.IsValid() && Errors.IsEmpty());
+	TestTrue(TEXT("exported DSL parses without errors"), Parsed.IsValid() && Errors.Num() == 0);
 	if (!Parsed.IsValid())
 	{
 		return false;
@@ -136,7 +137,7 @@ bool FAnimBP2FPVariablePinTypeSurvivesDSLRoundTrip::RunTest(const FString& Param
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPVariableNameWithSpacesRoundTrips,
 	"AnimBP2FP.VariableTypes.NameWithSpacesRoundTrips",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPVariableNameWithSpacesRoundTrips::RunTest(const FString& Parameters)
 {
@@ -145,7 +146,11 @@ bool FAnimBP2FPVariableNameWithSpacesRoundTrips::RunTest(const FString& Paramete
 	FVariableDef& Variable = AST->Variables.AddDefaulted_GetRef();
 	Variable.Name = TEXT("MM Search Cost");
 	Variable.Type = EPinType::Float;
+#if ENGINE_MAJOR_VERSION >= 5
 	Variable.PinCategory = UEdGraphSchema_K2::PC_Real.ToString();
+#else
+	Variable.PinCategory = UEdGraphSchema_K2::PC_Float.ToString();
+#endif
 
 	const FString DSL = AST->ToString();
 	const bool bUsesExplicitQuotedName = DSL.Contains(TEXT(":name \"MM Search Cost\""));
@@ -157,7 +162,7 @@ bool FAnimBP2FPVariableNameWithSpacesRoundTrips::RunTest(const FString& Paramete
 
 	TArray<FAnimLangParseError> Errors;
 	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(DSL, Errors);
-	TestTrue(TEXT("spaced variable DSL parses"), Parsed.IsValid() && Errors.IsEmpty());
+	TestTrue(TEXT("spaced variable DSL parses"), Parsed.IsValid() && Errors.Num() == 0);
 	TestEqual(TEXT("one variable survives"), Parsed.IsValid() ? Parsed->Variables.Num() : 0, 1);
 	if (Parsed.IsValid() && Parsed->Variables.Num() == 1)
 	{
@@ -169,7 +174,7 @@ bool FAnimBP2FPVariableNameWithSpacesRoundTrips::RunTest(const FString& Paramete
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPVariableExactTypeDiff,
 	"AnimBP2FP.VariableTypes.ExactTypeDiff",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPVariableExactTypeDiff::RunTest(const FString& Parameters)
 {
@@ -193,7 +198,7 @@ bool FAnimBP2FPVariableExactTypeDiff::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPVariableCompiledMapExport,
 	"AnimBP2FP.VariableTypes.CompiledMapExport",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPVariableCompiledMapExport::RunTest(const FString& Parameters)
 {
@@ -267,7 +272,7 @@ bool FAnimBP2FPVariableCompiledMapExport::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPVariableMapDefaultImport,
 	"AnimBP2FP.VariableTypes.MapDefaultImport",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPVariableMapDefaultImport::RunTest(const FString& Parameters)
 {
@@ -275,7 +280,7 @@ bool FAnimBP2FPVariableMapDefaultImport::RunTest(const FString& Parameters)
 	{
 		TArray<FAnimLangParseError> ParseErrors;
 		const TSharedPtr<FAnimGraphAST> AST = FAnimLangParser::Parse(Source, ParseErrors);
-		TestTrue(TEXT("map import fixture parses"), AST.IsValid() && ParseErrors.IsEmpty());
+		TestTrue(TEXT("map import fixture parses"), AST.IsValid() && ParseErrors.Num() == 0);
 		if (!AST.IsValid())
 		{
 			return false;
@@ -342,7 +347,7 @@ bool FAnimBP2FPVariableMapDefaultImport::RunTest(const FString& Parameters)
 )ANIM");
 	TArray<FAnimLangParseError> DuplicateParseErrors;
 	const TSharedPtr<FAnimGraphAST> DuplicateAST = FAnimLangParser::Parse(DuplicateSource, DuplicateParseErrors);
-	TestTrue(TEXT("typed duplicate fixture parses"), DuplicateAST.IsValid() && DuplicateParseErrors.IsEmpty());
+	TestTrue(TEXT("typed duplicate fixture parses"), DuplicateAST.IsValid() && DuplicateParseErrors.Num() == 0);
 	FAnimBPImportContext Context;
 	Context.bTransient = true;
 	FString DuplicateError;
@@ -357,7 +362,7 @@ bool FAnimBP2FPVariableMapDefaultImport::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPVariableMapDiffAndPatch,
 	"AnimBP2FP.VariableTypes.MapDiffAndPatch",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPVariableMapDiffAndPatch::RunTest(const FString& Parameters)
 {
@@ -450,7 +455,7 @@ bool FAnimBP2FPVariableMapDiffAndPatch::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPVariableMapCanonicalSyntax,
 	"AnimBP2FP.VariableTypes.MapCanonicalSyntax",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPVariableMapCanonicalSyntax::RunTest(const FString& Parameters)
 {
@@ -468,7 +473,7 @@ bool FAnimBP2FPVariableMapCanonicalSyntax::RunTest(const FString& Parameters)
 
 	TArray<FAnimLangParseError> Errors;
 	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(Source, Errors);
-	TestTrue(TEXT("typed map syntax parses"), Parsed.IsValid() && Errors.IsEmpty());
+	TestTrue(TEXT("typed map syntax parses"), Parsed.IsValid() && Errors.Num() == 0);
 	TestEqual(TEXT("one map variable parses"), Parsed.IsValid() ? Parsed->Variables.Num() : 0, 1);
 	if (!Parsed.IsValid() || Parsed->Variables.Num() != 1)
 	{
@@ -498,7 +503,7 @@ bool FAnimBP2FPVariableMapCanonicalSyntax::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPVariableMapSyntaxValidation,
 	"AnimBP2FP.VariableTypes.MapSyntaxValidation",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPVariableMapSyntaxValidation::RunTest(const FString& Parameters)
 {
@@ -527,7 +532,7 @@ bool FAnimBP2FPVariableMapSyntaxValidation::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPVariableMapPinTypeCodec,
 	"AnimBP2FP.VariableTypes.MapPinTypeCodec",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPVariableMapPinTypeCodec::RunTest(const FString& Parameters)
 {

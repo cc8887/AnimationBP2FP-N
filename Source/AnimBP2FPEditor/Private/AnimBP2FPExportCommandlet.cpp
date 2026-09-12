@@ -7,7 +7,15 @@
 #include "RigLangExporter.h"
 #include "RigLangExportCommandlet.h"
 #include "FBP2FPMappingRegistry.h"
+#if ENGINE_MAJOR_VERSION < 5
+#include "ControlRigBlueprint.h"
+#else
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7)
 #include "ControlRigBlueprintLegacy.h"
+#else
+#include "ControlRigBlueprint.h"
+#endif
+#endif
 #include "Animation/AnimBlueprint.h"
 #include "AssetRegistry/ARFilter.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -93,7 +101,11 @@ int32 UAnimBP2FPExportCommandlet::Main(const FString& Params)
 
 	TArray<FAssetData> AnimBPAssets;
 	FARFilter Filter;
+#if ENGINE_MAJOR_VERSION < 5
+	Filter.ClassNames.Add(UAnimBlueprint::StaticClass()->GetFName());
+#else
 	Filter.ClassPaths.Add(UAnimBlueprint::StaticClass()->GetClassPathName());
+#endif
 	Filter.PackagePaths.Add(FName(*AssetRoot));
 	Filter.bRecursivePaths = true;
 	AssetRegistry.GetAssets(Filter, AnimBPAssets);
@@ -101,8 +113,13 @@ int32 UAnimBP2FPExportCommandlet::Main(const FString& Params)
 	{
 		AnimBPAssets.RemoveAll([&ExactAssetPath](const FAssetData& AssetData)
 		{
+#if ENGINE_MAJOR_VERSION < 5
+			return AssetData.PackageName.ToString() != ExactAssetPath
+				&& AssetData.ObjectPath.ToString() != ExactAssetPath;
+#else
 			return AssetData.PackageName.ToString() != ExactAssetPath
 				&& AssetData.GetObjectPathString() != ExactAssetPath;
+#endif
 		});
 	}
 	
@@ -125,7 +142,11 @@ int32 UAnimBP2FPExportCommandlet::Main(const FString& Params)
 	{
 		FString AssetName = AssetData.AssetName.ToString();
 		FString PackagePath = AssetData.PackageName.ToString();
+#if ENGINE_MAJOR_VERSION < 5
+		FString ObjectPath = AssetData.ObjectPath.ToString();
+#else
 		FString ObjectPath = AssetData.GetObjectPathString();
+#endif
 		
 		UE_LOG(LogTemp, Log, TEXT("Processing: %s (%s)"), *AssetName, *PackagePath);
 		
@@ -386,9 +407,9 @@ int32 UAnimBP2FPExportCommandlet::Main(const FString& Params)
 			if (FailCount == 0) ++FailCount;
 		}
 	}
-	
-	UE_LOG(LogTemp, Log, TEXT("=== Export Complete: %d/%d succeeded. Output: %s ==="), 
+
+	UE_LOG(LogTemp, Log, TEXT("=== Export Complete: %d/%d succeeded. Output: %s ==="),
 		SuccessCount, AnimBPAssets.Num(), *OutputDir);
-	
+
 	return (FailCount > 0) ? 1 : 0;
 }

@@ -383,7 +383,7 @@ bool FAnimLangPatcher::ApplyMapVariableDefaults(
 	const bool bHasMapEntries = Variables.ContainsByPredicate([](const FVariableDef& Variable)
 	{
 		return Variable.ContainerType.Equals(TEXT("map"), ESearchCase::IgnoreCase)
-			&& !Variable.MapEntries.IsEmpty();
+			&& Variable.MapEntries.Num() != 0;
 	});
 	if (!bHasMapEntries)
 	{
@@ -397,7 +397,7 @@ bool FAnimLangPatcher::ApplyMapVariableDefaults(
 	for (const FVariableDef& Variable : Variables)
 	{
 		if (!Variable.ContainerType.Equals(TEXT("map"), ESearchCase::IgnoreCase)
-			|| Variable.MapEntries.IsEmpty())
+			|| Variable.MapEntries.Num() == 0)
 		{
 			continue;
 		}

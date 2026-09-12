@@ -1,6 +1,7 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 #include "Modules/ModuleManager.h"
 
@@ -19,7 +20,7 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && ANIMBP2FP_HAS_ANIM_AUTHORING
 
 namespace AnimBP2FPFallbackSemanticsTests
 {
@@ -83,7 +84,7 @@ namespace AnimBP2FPFallbackSemanticsTests
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPGenericMetadataRoundTrips,
 	"AnimBP2FP.FallbackSemantics.GenericMetadataRoundTrips",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPGenericMetadataRoundTrips::RunTest(const FString& Parameters)
 {
@@ -100,7 +101,7 @@ bool FAnimBP2FPGenericMetadataRoundTrips::RunTest(const FString& Parameters)
 
 	TArray<FAnimLangParseError> Errors;
 	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(DSL, Errors);
-	TestTrue(TEXT("generic metadata DSL parses"), Parsed.IsValid() && Errors.IsEmpty());
+	TestTrue(TEXT("generic metadata DSL parses"), Parsed.IsValid() && Errors.Num() == 0);
 	if (!Parsed.IsValid() || !Parsed->RootNode.IsValid())
 	{
 		return false;
@@ -113,7 +114,7 @@ bool FAnimBP2FPGenericMetadataRoundTrips::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPGenericStructDefaultIsExported,
 	"AnimBP2FP.FallbackSemantics.GenericStructDefaultIsExported",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPGenericStructDefaultIsExported::RunTest(const FString& Parameters)
 {
@@ -202,7 +203,7 @@ bool FAnimBP2FPGenericStructDefaultIsExported::RunTest(const FString& Parameters
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPClassPathTakesPriorityOnImport,
 	"AnimBP2FP.FallbackSemantics.ClassPathTakesPriorityOnImport",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPClassPathTakesPriorityOnImport::RunTest(const FString& Parameters)
 {
@@ -243,7 +244,7 @@ bool FAnimBP2FPClassPathTakesPriorityOnImport::RunTest(const FString& Parameters
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPUnknownNodeDoesNotBecomeCachedPose,
 	"AnimBP2FP.FallbackSemantics.UnknownNodeDoesNotBecomeCachedPose",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPUnknownNodeDoesNotBecomeCachedPose::RunTest(const FString& Parameters)
 {
@@ -266,17 +267,18 @@ bool FAnimBP2FPUnknownNodeDoesNotBecomeCachedPose::RunTest(const FString& Parame
 	return true;
 }
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 9)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPBlendStackEmptyBoundGraphIsUnsupported,
 	"AnimBP2FP.FallbackSemantics.BlendStackEmptyBoundGraphIsUnsupported",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPBlendStackEmptyBoundGraphIsUnsupported::RunTest(const FString& Parameters)
 {
 	using namespace AnimBP2FPFallbackSemanticsTests;
 	FModuleManager::Get().LoadModule(TEXT("BlendStackEditor"));
 	UClass* BlendStackClass = LoadClass<UAnimGraphNode_Base>(nullptr, TEXT("/Script/BlendStackEditor.AnimGraphNode_BlendStack"));
-	TestNotNull(TEXT("UE 5.9 BlendStack editor class loads"), BlendStackClass);
+	TestNotNull(TEXT("BlendStack editor class loads"), BlendStackClass);
 	if (!BlendStackClass)
 	{
 		return false;
@@ -360,5 +362,7 @@ bool FAnimBP2FPBlendStackEmptyBoundGraphIsUnsupported::RunTest(const FString& Pa
 			[](const FNamedChild& Child) { return Child.PinName == TEXT("sample-graph") && Child.Node.IsValid(); }));
 	return true;
 }
+
+#endif
 
 #endif // WITH_DEV_AUTOMATION_TESTS

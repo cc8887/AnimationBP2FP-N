@@ -2,6 +2,8 @@
 
 AnimBP2FP 是一个 Unreal Editor 插件，用 Lisp 风格的领域语言在 Animation Blueprint 与文本之间进行双向转换。动画 Pose、状态机和动画层使用 AnimLang 表达，普通 K2 逻辑复用 BlueprintLisp，Control Rig 则使用独立的 RigLang 模块。
 
+UE5.8 及以上可额外启用 `MCP/AnimBP2FPMCP` companion plugin 提供原生 MCP Toolset；低版本继续使用现有 Python Bridge、命令行和编辑器 API。
+
 文本结果适合交给 AI 读取和修改，也便于 Git diff、代码评审、批量处理和自动化验证。
 
 ## 当前支持的功能
@@ -138,6 +140,28 @@ if not update.saved_package:
 ```
 
 推荐工作流是“导出、保留稳定 ID、局部编辑、lint、导入测试资产、编译、重新导出比较”。这种方式既能让文本 diff 聚焦于实际语义变化，也更容易命中增量更新路径。
+
+## UE5.8 原生 MCP Toolset
+
+UE5.8 Editor 中将 `MCP/AnimBP2FPMCP` 复制到项目的 `Plugins/AnimBP2FPMCP/`，启用该 companion plugin 以及引擎插件 **Toolset Registry** 和 **Model Context Protocol / Unreal MCP**，重新生成项目文件并编译。它会在编辑器启动时注册原生 Toolset；它只接收 Unreal 资产路径和内存中的 DSL，不开放任意本地文件读写。核心插件本身不依赖 UE5.8 MCP。
+
+当前暴露 7 个工具：
+
+Toolset Registry 中的完整 toolset 标识为 `AnimBP2FPMCP.AnimBP2FPToolset`，下表列出函数名后缀。若 UE5.8 的 MCP 保持默认 tool-search 模式，代理通过 `list_toolsets`、`describe_toolset`、`call_tool` 发现和调用它们；关闭 tool-search 时，完整工具名为 `AnimBP2FPMCP.AnimBP2FPToolset.<FunctionName>`。
+
+| Tool | 权限 | 用途 |
+|------|------|------|
+| `ExportAnimBlueprint` | Read | 导出 AnimBlueprint 为 AnimLang |
+| `ExportEventGraph` | Read | 导出 EventGraph 为 BlueprintLisp |
+| `GetAnimBlueprintSyncState` | Read | 查询单个资产的 BP/DSL 映射状态 |
+| `ApplyAnimBundle` | Write | 严格预检并应用内存中的 Anim/Rig bundle |
+| `UpdateAnimBlueprint` | Write | 更新已有 AnimBlueprint |
+| `ReplaceEventGraph` | Write | 替换 BlueprintLisp 图 |
+| `MergeEventGraph` | Write | 以 MergeAppend 语义更新 BlueprintLisp 图 |
+
+`list_anim_blueprints`、`validate_anim_blueprint_roundtrip` 和 `lint_anim_bundle` 明确不属于该 MCP toolset，不会注册到 Toolset Registry。往返验证和 lint 仍可通过现有 Commandlet/测试链路执行。
+
+`ApplyAnimBundle` 默认严格模式，并支持 `bCommitPersistent=false` 的瞬态预检；需要持久化时再显式提交。写工具的返回值包含 `bMutationStarted`、`bSavedPackage`/`bPersisted`、变更计数和结构化诊断，调用方应据此判断成功，不应只看 RPC 是否返回。
 
 ## 配套 AI Skill
 

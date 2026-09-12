@@ -3,10 +3,15 @@
 
 #include "RigLangParser.h"
 #include "RigLangExporter.h"
+#include "AnimBP2FPVersionCompat.h"
 
 #include "AnimLangParser.h"
 #include "AnimLangTokenizer.h"
+#if ENGINE_MAJOR_VERSION < 5
+#include "Rigs/RigControlHierarchy.h"
+#else
 #include "Rigs/RigHierarchyElements.h"
+#endif
 
 namespace
 {
@@ -95,9 +100,9 @@ public:
 
 		auto HasInlineGraphContent = [](const FRigGraphAST& Graph)
 		{
-			return !Graph.LocalVariables.IsEmpty() || !Graph.Nodes.IsEmpty() || !Graph.Links.IsEmpty();
+			return Graph.LocalVariables.Num() != 0 || Graph.Nodes.Num() != 0 || Graph.Links.Num() != 0;
 		};
-		const bool bHasDeclaredGraphInventory = !Module->Graphs.IsEmpty();
+		const bool bHasDeclaredGraphInventory = Module->Graphs.Num() != 0;
 		if (bHasDeclaredGraphInventory)
 		{
 			for (const FRigFunctionAST& Function : Module->Functions)
@@ -131,7 +136,7 @@ public:
 					return HasInlineGraphContent(Entry.Graph);
 				});
 			const FString LegacyLibraryId = TEXT("legacy-function-library");
-			if (bNeedsMigration && !Module->Functions.IsEmpty())
+			if (bNeedsMigration && Module->Functions.Num() != 0)
 			{
 				FRigGraphAST& Library = Module->Graphs.AddDefaulted_GetRef();
 				Library.StableId = LegacyLibraryId;
@@ -171,10 +176,11 @@ public:
 		for (FRigGraphAST& Graph : Module->Graphs)
 		{
 			FGuid ParsedGuid;
-			if (FGuid::ParseExact(Graph.EditorGuid, EGuidFormats::DigitsWithHyphens, ParsedGuid)
+			if (Graph.EditorGuid.Len() == 36
+				&& FGuid::ParseExact(Graph.EditorGuid, EGuidFormats::DigitsWithHyphens, ParsedGuid)
 				&& ParsedGuid.IsValid())
 			{
-				Graph.EditorGuid = ParsedGuid.ToString(EGuidFormats::DigitsWithHyphensLower);
+				Graph.EditorGuid = ParsedGuid.ToString(EGuidFormats::DigitsWithHyphens);
 			}
 			else
 			{
@@ -429,7 +435,7 @@ private:
 			GraphVisitPath.Add(GraphId);
 			if (const FRigGraphAST* Graph = GraphsById.FindRef(GraphId))
 				if (GraphsById.Contains(Graph->ParentStableId)) VisitGraphParent(Graph->ParentStableId);
-			GraphVisitPath.Pop(EAllowShrinking::No);
+			GraphVisitPath.Pop(ANIMBP2FP_NO_SHRINKING);
 			GraphVisitState.Add(GraphId, 2);
 		};
 		for (const FRigGraphAST& Graph : Module.Graphs) VisitGraphParent(Graph.StableId);
@@ -455,7 +461,7 @@ private:
 				}
 				else SeenFunctionIdentifiers.Add(Identifier, Function.Location);
 			}
-			if (!Module.Graphs.IsEmpty())
+			if (Module.Graphs.Num() != 0)
 			{
 				if (Function.GraphStableId.IsEmpty())
 				{
@@ -482,7 +488,7 @@ private:
 					TEXT("Duplicate entry stable ID '%s'"), *Entry.StableId));
 			}
 			else SeenEntryIds.Add(Entry.StableId);
-			if (!Module.Graphs.IsEmpty())
+			if (Module.Graphs.Num() != 0)
 			{
 				if (Entry.GraphStableId.IsEmpty())
 				{
@@ -500,7 +506,7 @@ private:
 			ValidateGraphNodeIds(Entry.Graph);
 		}
 
-		if (!Module.Graphs.IsEmpty())
+		if (Module.Graphs.Num() != 0)
 		{
 			TMap<FString, int32> FunctionOwners;
 			TMap<FString, int32> EntryOwners;
@@ -599,7 +605,8 @@ private:
 		for (const FRigGraphVariableAST& Variable : Graph.LocalVariables)
 		{
 			FGuid ParsedGuid;
-			if (FGuid::ParseExact(Variable.Guid, EGuidFormats::DigitsWithHyphens, ParsedGuid))
+			if (Variable.Guid.Len() == 36
+				&& FGuid::ParseExact(Variable.Guid, EGuidFormats::DigitsWithHyphens, ParsedGuid))
 			{
 				if (SeenLocalGuids.Contains(ParsedGuid))
 					ErrorAtLocation(Variable.Location, FString::Printf(TEXT("Duplicate local variable GUID '%s'"), *Variable.Guid));
@@ -841,7 +848,7 @@ private:
 		ClosingStack.Add(OpenType == EAnimLangTokenType::LParen
 			? EAnimLangTokenType::RParen
 			: EAnimLangTokenType::RBracket);
-		while (!AtEnd() && !ClosingStack.IsEmpty())
+		while (!AtEnd() && ClosingStack.Num() != 0)
 		{
 			if (Check(EAnimLangTokenType::LParen))
 			{
@@ -855,7 +862,7 @@ private:
 			}
 			else if (Current().Type == ClosingStack.Last())
 			{
-				ClosingStack.Pop(EAllowShrinking::No);
+				ClosingStack.Pop(ANIMBP2FP_NO_SHRINKING);
 				Advance();
 			}
 			else
@@ -999,6 +1006,10 @@ private:
 
 	bool MigrateLegacyControlSettings(const FAnimLangToken& Head, FRigHierarchyElementAST& Element)
 	{
+#if ENGINE_MAJOR_VERSION < 5
+		ErrorAt(Head, TEXT("[UNSUPPORTED:UE4TypedRigSnapshot] typed Control Rig settings require Unreal Engine 5"));
+		return false;
+#else
 		const FString* LegacyControlType = Element.Properties.Find(TEXT("control-type"));
 		const FString* LegacySettings = Element.Properties.Find(TEXT("settings"));
 		if (!LegacyControlType && !LegacySettings) return false;
@@ -1070,6 +1081,7 @@ private:
 			TEXT("legacy-control-settings-lossy-migrated: control '%s' promoted to typed settings; migration is not exact (shape=%s, limits=%s, unspecified fields use engine defaults)"),
 			*Element.Name, bMappedShape ? TEXT("mapped") : TEXT("defaulted"), bMappedLimits ? TEXT("mapped") : TEXT("defaulted")));
 		return true;
+#endif
 	}
 
 	void ParseHierarchy(const FAnimLangToken& Open, TArray<FRigHierarchyElementAST>& Hierarchy)
@@ -1313,8 +1325,12 @@ private:
 			ValidateElementKind(ERigHierarchyElementKind::Bone, TEXT("bone-type state"));
 			RequireRole({TEXT("initial")});
 			ValidatePayload({}, TEXT("bone-type state"));
+#if ENGINE_MAJOR_VERSION >= 5
 			if (StaticEnum<ERigBoneType>()->GetValueByNameString(State.Type) == INDEX_NONE)
 				ErrorAt(Head, FString::Printf(TEXT("bone-type state has invalid type '%s'"), *State.Type));
+#else
+			ErrorAt(Head, TEXT("[UNSUPPORTED:UE4TypedRigSnapshot] typed Rig hierarchy state requires Unreal Engine 5"));
+#endif
 		}
 		else if (Kind == TEXT("curve"))
 		{
@@ -1328,12 +1344,17 @@ private:
 			ValidateElementKind(ERigHierarchyElementKind::Control, TEXT("control-settings state"));
 			RequireRole({TEXT("initial")});
 			ValidatePayload({TEXT("serialized")}, TEXT("control-settings state"));
+#if ENGINE_MAJOR_VERSION >= 5
 			if (StaticEnum<ERigControlType>()->GetValueByNameString(State.Type) == INDEX_NONE)
 				ErrorAt(Head, FString::Printf(TEXT("control-settings state has invalid type '%s'"), *State.Type));
+#else
+			ErrorAt(Head, TEXT("[UNSUPPORTED:UE4TypedRigSnapshot] typed Control Rig settings require Unreal Engine 5"));
+#endif
 		}
 		else if (Kind == TEXT("control-value"))
 		{
 			ValidateElementKind(ERigHierarchyElementKind::Control, TEXT("control-value state"));
+#if ENGINE_MAJOR_VERSION >= 5
 			RequireRole({TEXT("current"), TEXT("initial"), TEXT("minimum"), TEXT("maximum")});
 			const int64 ControlTypeValue = StaticEnum<ERigControlType>()->GetValueByNameString(State.Type);
 			if (ControlTypeValue == INDEX_NONE)
@@ -1347,7 +1368,10 @@ private:
 				case ERigControlType::Bool: ValidatePayload({TEXT("bool")}, TEXT("control-value Bool state")); break;
 				case ERigControlType::Integer: ValidatePayload({TEXT("integer")}, TEXT("control-value Integer state")); break;
 				case ERigControlType::Float:
-				case ERigControlType::ScaleFloat: ValidatePayload({TEXT("number")}, TEXT("control-value scalar state")); break;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
+				case ERigControlType::ScaleFloat:
+#endif
+					ValidatePayload({TEXT("number")}, TEXT("control-value scalar state")); break;
 				case ERigControlType::Vector2D:
 					ValidatePayload({TEXT("components")}, TEXT("control-value Vector2D state"));
 					if (State.Components.Num() != 2) ErrorAt(Head, TEXT("control-value Vector2D state requires 2 components")); break;
@@ -1367,6 +1391,10 @@ private:
 					if (State.Components.Num() != 9) ErrorAt(Head, TEXT("control-value EulerTransform state requires 9 components")); break;
 				}
 			}
+#else
+			RequireRole({TEXT("current"), TEXT("initial"), TEXT("minimum"), TEXT("maximum")});
+			ErrorAt(Head, TEXT("[UNSUPPORTED:UE4TypedRigSnapshot] typed Control Rig values require Unreal Engine 5"));
+#endif
 		}
 		else if (Kind == TEXT("preferred-euler"))
 		{
@@ -1374,15 +1402,25 @@ private:
 			RequireRole({TEXT("current"), TEXT("initial")});
 			ValidatePayload({TEXT("components")}, TEXT("preferred-euler state"));
 			if (State.Components.Num() != 3) ErrorAt(Head, TEXT("preferred-euler state requires 3 components"));
+#if ENGINE_MAJOR_VERSION >= 5
 			if (StaticEnum<EEulerRotationOrder>()->GetValueByNameString(State.Type) == INDEX_NONE)
 				ErrorAt(Head, FString::Printf(TEXT("preferred-euler state has invalid type '%s'"), *State.Type));
+#else
+			ErrorAt(Head, TEXT("[UNSUPPORTED:UE4TypedRigSnapshot] preferred Euler state requires Unreal Engine 5"));
+#endif
 		}
+#if ENGINE_MAJOR_VERSION >= 5
 		if (State.Kind == ERigHierarchyStateKind::ControlSettings && Seen.Contains(TEXT("serialized")))
 		{
 			FRigControlSettings ParsedSettings;
-			const UScriptStruct* SettingsStruct = FRigControlSettings::StaticStruct();
-			const TCHAR* Remainder = SettingsStruct->ImportText(
-				*State.SerializedValue, &ParsedSettings, nullptr, PPF_None, nullptr, TEXT("FRigControlSettings"));
+			UScriptStruct* SettingsStruct = FRigControlSettings::StaticStruct();
+			const FString TrimmedSettings = State.SerializedValue.TrimStartAndEnd();
+			const bool bHasStructEnvelope = TrimmedSettings.StartsWith(TEXT("("))
+				&& TrimmedSettings.EndsWith(TEXT(")"));
+			const TCHAR* Remainder = SettingsStruct && bHasStructEnvelope
+				? SettingsStruct->ImportText(*State.SerializedValue, &ParsedSettings, nullptr,
+					PPF_None, nullptr, TEXT("FRigControlSettings"))
+				: nullptr;
 			while (Remainder && FChar::IsWhitespace(*Remainder)) ++Remainder;
 			if (!Remainder || *Remainder != TEXT('\0'))
 			{
@@ -1403,6 +1441,7 @@ private:
 				State.SerializedValue = MoveTemp(CanonicalSettings);
 			}
 		}
+#endif
 		if (Element.States.ContainsByPredicate([&State](const FRigHierarchyStateAST& Existing)
 			{ return Existing.Kind == State.Kind && Existing.Role == State.Role; }))
 		{
@@ -1904,10 +1943,12 @@ private:
 		else
 		{
 			FGuid ParsedGuid;
-			if (!FGuid::ParseExact(Variable.Guid, EGuidFormats::DigitsWithHyphens, ParsedGuid) || !ParsedGuid.IsValid())
+				if (Variable.Guid.Len() != 36
+					|| !FGuid::ParseExact(Variable.Guid, EGuidFormats::DigitsWithHyphens, ParsedGuid)
+					|| !ParsedGuid.IsValid())
 				ErrorAt(Head, TEXT("rig-local-variable requires a non-zero hyphenated GUID"));
 			else
-				Variable.Guid = ParsedGuid.ToString(EGuidFormats::DigitsWithHyphensLower);
+				Variable.Guid = ParsedGuid.ToString(EGuidFormats::DigitsWithHyphens);
 		}
 		if (FName(*Variable.Name).IsNone()) ErrorAt(Head, TEXT("rig-local-variable requires a non-None :name"));
 		if (Variable.Type.CPPType.IsEmpty()) ErrorAt(Head, TEXT("rig-local-variable requires :cpp-type"));
@@ -2154,7 +2195,7 @@ TSharedPtr<FRigModuleAST> FRigLangParser::Parse(
 		Error.Location.Line = TokenError.Line;
 		Error.Location.Column = TokenError.Column;
 	}
-	if (!OutErrors.IsEmpty())
+	if (OutErrors.Num() != 0)
 	{
 		return nullptr;
 	}

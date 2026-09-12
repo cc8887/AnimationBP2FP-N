@@ -6,7 +6,9 @@
 // Or in Editor:
 //   Window -> Developer Tools -> Session Frontend -> Automation
 
+#if ENGINE_MAJOR_VERSION >= 5
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 #include "Engine/Blueprint.h"
 #include "Animation/AnimBlueprint.h"
@@ -14,7 +16,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 // Standard test flags: runs in Editor + Commandlet context, ProductFilter
-#define ABP_FLAGS (EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+#define ABP_FLAGS (ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 #define ABP_TEST(Name) \
 	IMPLEMENT_SIMPLE_AUTOMATION_TEST(F##Name, "AnimBP2FP.CompilerHook." #Name, ABP_FLAGS)
@@ -316,3 +318,4 @@ bool FLifecycle_AnimHookPriorityOrdering::RunTest(const FString& Parameters)
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS
+#endif // ENGINE_MAJOR_VERSION >= 5

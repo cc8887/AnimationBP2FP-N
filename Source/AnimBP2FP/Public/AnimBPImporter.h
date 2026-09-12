@@ -20,7 +20,7 @@ struct FRigModuleAST;
 
 struct ANIMBP2FP_API FAnimBPResolvedRig
 {
-	TObjectPtr<UControlRigBlueprint> Blueprint = nullptr;
+	TAnimBP2FPObjectPtr<UControlRigBlueprint> Blueprint = nullptr;
 	TSharedPtr<const FRigModuleAST> Module;
 };
 
@@ -65,7 +65,7 @@ struct ANIMBP2FP_API FAnimLispBundleImportResult
 	bool bMutationStarted = false;
 	FAnimLangDiagnostics Diagnostics;
 	TArray<FAnimLispImportPlanEntry> Plan;
-	TArray<TObjectPtr<UObject>> StagedAssets;
+	TArray<TAnimBP2FPObjectPtr<UObject>> StagedAssets;
 };
 
 class UAnimGraphNode_Base;

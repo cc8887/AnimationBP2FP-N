@@ -2,10 +2,15 @@
 
 #include "RigLangImporter.h"
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "AnimLangTokenizer.h"
 #include "ControlRig.h"
 #include "ControlRigBlueprintFactory.h"
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "ControlRigBlueprintLegacy.h"
+#else
+#include "ControlRigBlueprint.h"
+#endif
 #include "EdGraph/RigVMEdGraph.h"
 #include "EdGraph/RigVMEdGraphNode.h"
 #include "EdGraph/RigVMEdGraphSchema.h"
@@ -659,7 +664,7 @@ bool RestoreAndVerifyVariableRemapping(
 	TArray<FAnimLangToken> Tokens;
 	TArray<FAnimLangLexError> Errors;
 	if (!FAnimLangTokenizer::Tokenize(Encoded.IsEmpty() ? TEXT("()") : Encoded, Tokens, Errors)
-		|| !Errors.IsEmpty())
+		|| Errors.Num() != 0)
 	{
 		AddError(Result, FString::Printf(TEXT("Malformed variable remapping on Rig call '%s'"),
 			*Source.StableId), Source.Location);
@@ -818,6 +823,7 @@ ERigVMPinDirection ToRigVMPinDirection(const ERigPinDirection Direction)
 	}
 }
 
+#if ENGINE_MAJOR_VERSION >= 5
 TRigVMTypeIndex TypeIndexForPin(const FRigPinAST& PinAST)
 {
 	FString CPPType = PinAST.Type.CPPType;
@@ -1011,6 +1017,20 @@ bool ResolveTemplateNodeFromSource(
 	}
 	return true;
 }
+#else
+bool ResolveTemplateNodeFromSource(
+	URigVMController*,
+	URigVMNode*&,
+	const FRigNodeAST& Source,
+	FRigLangImportResult& Result)
+{
+	if (!Source.Properties.Contains(TEXT("template-notation"))
+		&& Source.Kind != ERigNodeKind::Dispatch) return true;
+	AddError(Result, TEXT("UE4.27 cannot restore UE5 RigVM template type maps for: ")
+		+ Source.StableId, Source.Location);
+	return false;
+}
+#endif
 
 bool RestoreAndVerifyPins(
 	URigVMController* Controller,
@@ -1197,7 +1217,7 @@ FString GraphSemanticSnapshot(const FRigModuleAST& Value, const FRigModuleAST& S
 	const FGraphSemanticTokenIndex ValueGraphTokenIndex =
 		BuildGraphSemanticTokenIndex(Value);
 	const TArray<FString> GraphTokenCollisions = ValueGraphTokenIndex.CollisionMarkers();
-	if (!GraphTokenCollisions.IsEmpty())
+	if (GraphTokenCollisions.Num() != 0)
 	{
 		FString CollisionText = FString::Join(GraphTokenCollisions, TEXT(" | "));
 		CollisionText.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
@@ -1228,7 +1248,7 @@ FString GraphSemanticSnapshot(const FRigModuleAST& Value, const FRigModuleAST& S
 	for (const FRigGraphAST& Graph : SourceIdentity.Graphs)
 	{
 		const FString Token = SourceGraphTokenIndex.ByStableId.FindRef(Graph.StableId);
-		if (Graph.Nodes.IsEmpty() || !Graph.Nodes.ContainsByPredicate([](const FRigNodeAST& Node)
+		if (Graph.Nodes.Num() == 0 || !Graph.Nodes.ContainsByPredicate([](const FRigNodeAST& Node)
 			{
 				FGuid EditorGuid;
 				return !Node.bInjected && FGuid::Parse(Node.Guid, EditorGuid);
@@ -1526,12 +1546,17 @@ FRigLangImportResult FRigLangImporter::Import(
 	const FName BlueprintName = Options.bTransient
 		? MakeUniqueObjectName(Package, UControlRigBlueprint::StaticClass(), *AssetName)
 		: FName(*AssetName);
+#if ENGINE_MAJOR_VERSION >= 5
 	UControlRigBlueprintFactory* Factory = NewObject<UControlRigBlueprintFactory>();
 	Factory->ParentClass = UControlRig::StaticClass();
 	Result.Blueprint = Cast<UControlRigBlueprint>(Factory->FactoryCreateNew(
 		UControlRigBlueprint::StaticClass(), Package, BlueprintName,
 		Options.bTransient ? RF_Transient : RF_Public | RF_Standalone,
 		nullptr, GWarn));
+#else
+	Result.Blueprint = NewObject<UControlRigBlueprint>(Package, BlueprintName,
+		Options.bTransient ? RF_Transient : RF_Public | RF_Standalone);
+#endif
 	if (!Result.Blueprint)
 	{
 		AddError(Result, TEXT("Failed to create Rig staging blueprint"));
@@ -1546,7 +1571,7 @@ FRigLangImportResult FRigLangImporter::Import(
 	{
 		const FRigHierarchyElementAST& Element = Module.Hierarchy[Index];
 		const bool bDeferTypedParents = Element.Kind != ERigHierarchyElementKind::Bone
-			&& !Element.Parents.IsEmpty();
+			&& Element.Parents.Num() != 0;
 		const FRigElementKey Parent = bDeferTypedParents || Element.ParentName.IsEmpty()
 			? FRigElementKey() : Keys.FindChecked(Element.ParentName);
 		const FRigHierarchyTransformAST* InitialLocal = FindTransform(Element, ERigHierarchyTransformRole::InitialLocal);
@@ -1608,7 +1633,7 @@ FRigLangImportResult FRigLangImporter::Import(
 
 	for (const FRigHierarchyElementAST& Element : Module.Hierarchy)
 	{
-		if (Element.Kind == ERigHierarchyElementKind::Bone || Element.Parents.IsEmpty()) continue;
+		if (Element.Kind == ERigHierarchyElementKind::Bone || Element.Parents.Num() == 0) continue;
 		const FRigElementKey Child = Keys.FindChecked(Element.Name);
 		for (const FRigHierarchyParentAST& Parent : Element.Parents)
 		{
@@ -1760,7 +1785,7 @@ FRigLangImportResult FRigLangImporter::Import(
 			if (Reflected->bPublic != (Variable.Access == ERigVariableAccess::PublicInput)) Mismatches.Add(TEXT("access"));
 			if (Reflected->DefaultValue != BlueprintMemberDefault(Variable)) Mismatches.Add(TEXT("default"));
 		}
-		if (!Mismatches.IsEmpty())
+		if (Mismatches.Num() != 0)
 		{
 			AddError(Result, FString::Printf(TEXT("Rig variable '%s' reflection mismatch: %s"),
 				*Variable.Name, *FString::Join(Mismatches, TEXT(", "))), Variable.Location);
@@ -1768,11 +1793,11 @@ FRigLangImportResult FRigLangImporter::Import(
 		}
 	}
 
-	const bool bHasGraphInventory = !Module.Graphs.IsEmpty();
-	const bool bHasExecutableGraphContent = !Module.Functions.IsEmpty() || !Module.Entries.IsEmpty()
+	const bool bHasGraphInventory = Module.Graphs.Num() != 0;
+	const bool bHasExecutableGraphContent = Module.Functions.Num() != 0 || Module.Entries.Num() != 0
 		|| Module.Graphs.ContainsByPredicate([](const FRigGraphAST& Graph)
 		{
-			return !Graph.Nodes.IsEmpty() || !Graph.Links.IsEmpty() || !Graph.LocalVariables.IsEmpty();
+			return Graph.Nodes.Num() != 0 || Graph.Links.Num() != 0 || Graph.LocalVariables.Num() != 0;
 		});
 	if (bHasGraphInventory)
 	{
@@ -2016,7 +2041,7 @@ FRigLangImportResult FRigLangImporter::Import(
 				if (!BuildGraphRecursive(*ContainedAST, TargetGraph, Controller,
 					OwningLocalScopeStableId, true, &InnerNames))
 					return nullptr;
-				URigVMCollapseNode* CollapseNode = InnerNames.IsEmpty() ? nullptr
+				URigVMCollapseNode* CollapseNode = InnerNames.Num() == 0 ? nullptr
 					: Controller->CollapseNodes(InnerNames, NodeAST.StableId, false, false, false);
 				if (!CollapseNode || !CollapseNode->GetContainedGraph()) return nullptr;
 				GraphsByStableId.Add(NodeAST.ContainedGraphStableId, CollapseNode->GetContainedGraph());
@@ -2320,6 +2345,7 @@ FRigLangImportResult FRigLangImporter::Import(
 				return AbortImport();
 		}
 
+#if ENGINE_MAJOR_VERSION >= 5
 		TMap<const URigVMGraph*, URigVMEdGraph*> EditorGraphsByModel;
 		auto FindEditorGraphForModel = [&Result, &EditorGraphsByModel](const URigVMGraph* Model) -> URigVMEdGraph*
 		{
@@ -2411,14 +2437,14 @@ FRigLangImportResult FRigLangImporter::Import(
 		FRigVMGraphFunctionStore* FunctionStore = FunctionHost
 			? FunctionHost->GetRigVMGraphFunctionStore() : nullptr;
 		if (!FunctionStore && Module.Functions.ContainsByPredicate(
-			[](const FRigFunctionAST& Function) { return !Function.ExternalVariables.IsEmpty(); }))
+			[](const FRigFunctionAST& Function) { return Function.ExternalVariables.Num() != 0; }))
 		{
 			AddError(Result, TEXT("Cannot restore Rig function external-variable identities"));
 			return AbortImport();
 		}
 		for (const FRigFunctionAST& Function : Module.Functions)
 		{
-			if (Function.ExternalVariables.IsEmpty()) continue;
+			if (Function.ExternalVariables.Num() == 0) continue;
 			FString FunctionName = Function.Name;
 			if (const FString* ShortName = Function.Properties.Find(TEXT("short-name")))
 				FunctionName = UnquoteRigLangProperty(*ShortName);
@@ -2511,6 +2537,7 @@ FRigLangImportResult FRigLangImporter::Import(
 			}
 		}
 		Result.bCompiled = bHasExecutableGraphContent;
+#endif
 	}
 
 	TSet<FString> GeneratedIdentityVariables;
@@ -2627,4 +2654,57 @@ bool FRigLangInheritedLocalSemanticSnapshotTest::RunTest(const FString& Paramete
 		Actual.Contains(TEXT("$generated-local-guid:graph/function:PublicScale|FunctionLocal")));
 	return true;
 }
+#endif
+
+#else
+
+FString FRigLangImporter::BuildCanonicalPinDefault(const FRigPinAST& Pin)
+{
+	return Pin.DefaultValue;
+}
+
+FString FRigLangImporter::BuildHierarchyVariableSemanticSnapshot(
+	const FRigModuleAST& Value, const FRigModuleAST& SourceIdentity)
+{
+	return Value.ToCanonicalHashInput();
+}
+
+FString FRigLangImporter::BuildGraphSemanticSnapshot(
+	const FRigModuleAST& Value, const FRigModuleAST& SourceIdentity)
+{
+	return Value.ToCanonicalHashInput();
+}
+
+TMap<FString, FString> FRigLangImporter::BuildGraphSemanticTokens(
+	const FRigModuleAST& Value, TSet<FString>* OutCollidingTokens)
+{
+	if (OutCollidingTokens) OutCollidingTokens->Reset();
+	TMap<FString, FString> Result;
+	for (const FRigGraphAST& Graph : Value.Graphs)
+	{
+		Result.Add(Graph.StableId, Graph.StableId);
+	}
+	return Result;
+}
+
+FRigLangImportResult FRigLangImporter::Import(
+	const FRigModuleAST& Module, const FRigLangImportOptions& Options)
+{
+	FRigLangImportResult Result;
+	Result.Diagnostics.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::RoundTrip,
+		TEXT("[UNSUPPORTED:ControlRigAssetAuthoring] RigLang asset import requires Unreal Engine 5.8 or newer"));
+	return Result;
+}
+
+#if WITH_DEV_AUTOMATION_TESTS
+bool FRigLangImporter::ResolveTemplateNodeForTest(
+	URigVMController* Controller, URigVMNode*& Node, const FRigNodeAST& Source,
+	FRigLangImportResult& Result)
+{
+	Result.Diagnostics.Add(EAnimLangDiagSeverity::Error, EAnimLangDiagCategory::RoundTrip,
+		TEXT("[UNSUPPORTED:LegacyRigVMTemplate] RigVM template resolution requires Unreal Engine 5.8+"));
+	return false;
+}
+#endif
+
 #endif

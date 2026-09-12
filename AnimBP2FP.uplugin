@@ -1,6 +1,7 @@
 {
     "FileVersion": 3,
-    "Version": 1.0,
+    "Version": 1,
+    "VersionName": "1.0.0",
     "Name": "AnimBP2FP",
     "Description": "Converts Animation Blueprints to Function Blueprints in Unreal Engine",
     "CanContainContent": true,
@@ -9,7 +10,7 @@
     "Modules": [
         {
             "Name": "AnimBP2FP",
-            "Type": "Runtime",
+            "Type": "Editor",
             "LoadingPhase": "Default"
         },
         {
@@ -24,15 +25,7 @@
             "Enabled": true
         },
         {
-            "Name": "AnimationData",
-            "Enabled": true
-        },
-        {
             "Name": "ControlRig",
-            "Enabled": true
-        },
-        {
-            "Name": "RigVM",
             "Enabled": true
         }
     ]

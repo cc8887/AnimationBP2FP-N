@@ -17,8 +17,12 @@ namespace
 		switch (Type)
 		{
 		case EPinType::Float:
+#if ENGINE_MAJOR_VERSION >= 5
 			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Real;
 			OutPinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
+#else
+			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Float;
+#endif
 			return true;
 		case EPinType::Int:
 			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Int;
@@ -260,7 +264,11 @@ FString FAnimLangVariableCodec::ExportPropertyExpression(const FProperty& Proper
 	}
 
 	FString Exported;
+#if ENGINE_MAJOR_VERSION < 5
+	Property.ExportTextItem(Exported, Value, Value, nullptr, PPF_None);
+#else
 	Property.ExportTextItem_Direct(Exported, Value, Value, nullptr, PPF_None);
+#endif
 	if (Property.IsA<FNumericProperty>() || Property.IsA<FEnumProperty>())
 	{
 		return Exported;
@@ -329,7 +337,7 @@ bool FAnimLangVariableCodec::ExportMapEntries(
 			? Left.ValueExpression < Right.ValueExpression
 			: Left.KeyExpression < Right.KeyExpression;
 	});
-	InOutVariable.bHasStructuredMapDefault = !InOutVariable.MapEntries.IsEmpty();
+	InOutVariable.bHasStructuredMapDefault = InOutVariable.MapEntries.Num() != 0;
 	return true;
 }
 
@@ -387,7 +395,11 @@ bool FAnimLangVariableCodec::ImportPropertyExpression(
 		else if (Trimmed.Equals(TEXT("false"), ESearchCase::IgnoreCase)) ImportText = TEXT("False");
 	}
 
+#if ENGINE_MAJOR_VERSION < 5
+	const TCHAR* End = Property.ImportText(*ImportText, Value, PPF_None, nullptr);
+#else
 	const TCHAR* End = Property.ImportText_Direct(*ImportText, Value, nullptr, PPF_None);
+#endif
 	if (!End || !FString(End).TrimStartAndEnd().IsEmpty())
 	{
 		OutError = FString::Printf(
@@ -458,7 +470,11 @@ bool FAnimLangVariableCodec::BuildMapDefaultText(
 	}
 
 	MapHelper.Rehash();
+#if ENGINE_MAJOR_VERSION < 5
+	MapProperty->ExportTextItem(OutDefaultText, MapStorage, nullptr, nullptr, PPF_None, nullptr);
+#else
 	MapProperty->ExportTextItem_Direct(OutDefaultText, MapStorage, nullptr, nullptr, PPF_None);
+#endif
 	return true;
 }
 

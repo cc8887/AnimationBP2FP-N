@@ -6,6 +6,8 @@
 
 #if WITH_EDITOR
 
+DEFINE_LOG_CATEGORY_STATIC(LogAnimBP2FP, Log, All);
+
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
 #include "Animation/AnimInstance.h"
@@ -21,7 +23,11 @@
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Modules/ModuleManager.h"
 #include "Misc/SecureHash.h"
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 #include "StructUtils/InstancedStruct.h"
+#elif ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
+#include "InstancedStruct.h"
+#endif
 #include "UObject/UnrealType.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
@@ -49,22 +55,27 @@
 #include "AnimationStateMachineGraph.h"
 #include "Animation/AnimLayerInterface.h"
 #include "BlueprintLispConverter.h"
+#if ENGINE_MAJOR_VERSION >= 5
 #include "AnimGraphNode_ControlRig.h"
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7)
 #include "ControlRigBlueprintLegacy.h"
+#else
+#include "ControlRigBlueprint.h"
+#endif
+#endif
 #include "RigLangExporter.h"
 
 // State machine node headers
 #include "AnimStateEntryNode.h"
 #include "AnimStateNode.h"
+#if ENGINE_MAJOR_VERSION >= 5
 #include "AnimStateAliasNode.h"
+#endif
 #include "AnimStateTransitionNode.h"
 #include "AnimStateConduitNode.h"
 #include "AnimGraphNode_StateResult.h"
 #include "AnimationGraph.h"
 #include "AnimationGraphSchema.h"
-
-// Logging
-DEFINE_LOG_CATEGORY_STATIC(LogAnimBP2FP, Log, All);
 
 // ========== Helper Functions ==========
 
@@ -167,7 +178,11 @@ namespace
 			Notify.Time = Event.GetTriggerTime();
 			Notify.Duration = Event.GetDuration();
 			Notify.bIsState = Event.NotifyStateClass != nullptr;
+#if ENGINE_MAJOR_VERSION >= 5
 			const UObject* NotifyObject = Event.NotifyStateClass ? static_cast<const UObject*>(Event.NotifyStateClass.Get()) : static_cast<const UObject*>(Event.Notify.Get());
+#else
+			const UObject* NotifyObject = Event.NotifyStateClass ? static_cast<const UObject*>(Event.NotifyStateClass) : static_cast<const UObject*>(Event.Notify);
+#endif
 			Notify.ClassPath = NotifyObject ? NotifyObject->GetClass()->GetPathName() : TEXT("name-only");
 		}
 		Snapshot.Notifies.Sort([](const FAnimNotifySnapshot& A, const FAnimNotifySnapshot& B)
@@ -295,6 +310,7 @@ namespace
 
 		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
 		{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
 			if (StructProperty->Struct == FInstancedStruct::StaticStruct())
 			{
 				const FInstancedStruct* Instance = static_cast<const FInstancedStruct*>(Value);
@@ -309,12 +325,11 @@ namespace
 				{
 					Snapshot.Fields.Add({Path, Property->GetCPPType(), TEXT("invalid")});
 				}
+				return;
 			}
-			else
-			{
-				Snapshot.Fields.Add({Path, Property->GetCPPType(), TEXT("struct=") + StructProperty->Struct->GetPathName()});
-				CaptureSnapshotStruct(StructProperty->Struct, Value, Path, RootAsset, Snapshot, VisitedObjects);
-			}
+#endif
+			Snapshot.Fields.Add({Path, Property->GetCPPType(), TEXT("struct=") + StructProperty->Struct->GetPathName()});
+			CaptureSnapshotStruct(StructProperty->Struct, Value, Path, RootAsset, Snapshot, VisitedObjects);
 			return;
 		}
 
@@ -343,7 +358,11 @@ namespace
 		}
 
 		FString ExportedValue;
+#if ENGINE_MAJOR_VERSION >= 5
 		Property->ExportTextItem_Direct(ExportedValue, Value, Value, const_cast<UObject*>(RootAsset), PPF_None);
+#else
+		Property->ExportTextItem(ExportedValue, Value, Value, const_cast<UObject*>(RootAsset), PPF_None);
+#endif
 		Snapshot.Fields.Add({Path, Property->GetCPPType(), MoveTemp(ExportedValue)});
 	}
 
@@ -415,7 +434,13 @@ namespace
 			Canonical += TEXT("\nR\t") + Reference;
 		}
 		FTCHARToUTF8 Utf8(*Canonical);
+#if ENGINE_MAJOR_VERSION >= 5
 		Snapshot.StableHash = FSHA1::HashBuffer(Utf8.Get(), Utf8.Length()).ToString();
+#else
+		FSHAHash Hash;
+		FSHA1::HashBuffer(Utf8.Get(), Utf8.Length(), Hash.Hash);
+		Snapshot.StableHash = Hash.ToString();
+#endif
 		return Snapshot;
 	}
 
@@ -437,18 +462,26 @@ namespace
 		{
 			Dependency.AssetMetadata = SnapshotAnimationAsset(Animation);
 		}
+#if ENGINE_MAJOR_VERSION >= 5
 		if (const UAnimMontage* Montage = Cast<UAnimMontage>(Object))
 		{
 			AddExternalDependency(Montage->BlendProfileIn, AST, SeenPaths);
 			AddExternalDependency(Montage->BlendProfileOut, AST, SeenPaths);
 		}
-		IAssetRegistry* AssetRegistry = ReferencedObjects.IsEmpty()
+#endif
+		IAssetRegistry* AssetRegistry = ReferencedObjects.Num() == 0
 			? nullptr
 			: &FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
 		for (const FString& ReferencedObjectPath : ReferencedObjects)
 		{
+#if ENGINE_MAJOR_VERSION >= 5
 			const FAssetData AssetData = AssetRegistry->GetAssetByObjectPath(FSoftObjectPath(ReferencedObjectPath));
-			if (AssetData.IsValid() && IsRecursiveTypedDependencyClassPath(AssetData.AssetClassPath.ToString()))
+			const FString AssetClassPath = AssetData.AssetClassPath.ToString();
+#else
+			const FAssetData AssetData = AssetRegistry->GetAssetByObjectPath(FName(*ReferencedObjectPath));
+			const FString AssetClassPath = AssetData.AssetClass.ToString();
+#endif
+			if (AssetData.IsValid() && IsRecursiveTypedDependencyClassPath(AssetClassPath))
 			{
 				AddExternalDependency(AssetData.GetAsset(), AST, SeenPaths);
 			}
@@ -470,7 +503,12 @@ namespace
 			Module.Get().GetAssetsByPackageName(PackageName, Assets, true);
 			for (const FAssetData& AssetData : Assets)
 			{
-				if (IsDependencyCandidateClassPath(AssetData.AssetClassPath.ToString()))
+#if ENGINE_MAJOR_VERSION >= 5
+				const FString AssetClassPath = AssetData.AssetClassPath.ToString();
+#else
+				const FString AssetClassPath = AssetData.AssetClass.ToString();
+#endif
+				if (IsDependencyCandidateClassPath(AssetClassPath))
 				{
 					AddExternalDependency(AssetData.GetAsset(), AST, SeenPaths);
 				}
@@ -541,7 +579,7 @@ namespace
 	static FString FormatExposedCustomPinNames(const UAnimGraphNode_Base* Node)
 	{
 		const TArray<FString> Names = GetExposedCustomPinNames(Node);
-		if (Names.IsEmpty()) return FString();
+		if (Names.Num() == 0) return FString();
 
 		FString Result = TEXT("(pin-names");
 		for (const FString& Name : Names)
@@ -585,10 +623,14 @@ namespace
 		if (Category == UEdGraphSchema_K2::PC_Boolean) Result.CPPType = TEXT("bool");
 		else if (Category == UEdGraphSchema_K2::PC_Int) Result.CPPType = TEXT("int32");
 		else if (Category == UEdGraphSchema_K2::PC_Int64) Result.CPPType = TEXT("int64");
+#if ENGINE_MAJOR_VERSION >= 5
 		else if (Category == UEdGraphSchema_K2::PC_Real)
 		{
 			Result.CPPType = PinType.PinSubCategory == UEdGraphSchema_K2::PC_Double ? TEXT("double") : TEXT("float");
 		}
+#else
+		else if (Category == UEdGraphSchema_K2::PC_Float) Result.CPPType = TEXT("float");
+#endif
 		else if (const UScriptStruct* Struct = Cast<UScriptStruct>(TypeObject)) Result.CPPType = Struct->GetStructCPPName();
 		else Result.CPPType = Category.ToString();
 		Result.CPPTypeObject = TypeObject ? TypeObject->GetPathName() : FString();
@@ -615,7 +657,12 @@ namespace
 		}
 		if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Int
 			|| Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Int64
-			|| Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Real)
+#if ENGINE_MAJOR_VERSION >= 5
+			|| Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Real
+#else
+			|| Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Float
+#endif
+			)
 		{
 			return FString::Printf(TEXT("(pin-default %s)"), *RawValue);
 		}
@@ -659,6 +706,7 @@ namespace
 		});
 	}
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
 	static const TMap<FName, FAnimGraphNodePropertyBinding>* GetPropertyBindingMap(const UAnimGraphNode_Base* Node)
 	{
 		if (!Node || !Node->GetBinding())
@@ -702,6 +750,33 @@ namespace
 
 		return false;
 	}
+#else
+	static bool TryGetPropertyBinding(const UAnimGraphNode_Base* Node, const FName& BindingName, FAnimGraphNodePropertyBinding& OutBinding)
+	{
+		if (!Node)
+		{
+			return false;
+		}
+
+		if (const FAnimGraphNodePropertyBinding* Exact = Node->PropertyBindings.Find(BindingName))
+		{
+			OutBinding = *Exact;
+			return Exact->bIsBound && Exact->PropertyPath.Num() > 0;
+		}
+
+		const FName ComparisonName(BindingName, 0);
+		for (const TPair<FName, FAnimGraphNodePropertyBinding>& Pair : Node->PropertyBindings)
+		{
+			if (FName(Pair.Key, 0) == ComparisonName)
+			{
+				OutBinding = Pair.Value;
+				return Pair.Value.bIsBound && Pair.Value.PropertyPath.Num() > 0;
+			}
+		}
+
+		return false;
+	}
+#endif
 
 	static FString FormatBindPathValue(const FAnimGraphNodePropertyBinding& Binding)
 	{
@@ -715,6 +790,7 @@ namespace
 			? TEXT("function")
 			: TEXT("property");
 		FString Result = FString::Printf(TEXT("(bind-path %s :type %s"), *QuoteDSLString(JoinedPath), TypeName);
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
 		if (Binding.ContextId != NAME_None)
 		{
 			Result += FString::Printf(TEXT(" :context %s"), *QuoteDSLString(Binding.ContextId.ToString()));
@@ -727,6 +803,7 @@ namespace
 		{
 			Result += TEXT(" :only-update-when-active true");
 		}
+#endif
 		Result += TEXT(")");
 		return Result;
 	}
@@ -837,15 +914,15 @@ namespace
 		{
 			return EPinType::Object;
 		}
-		if (Category == UEdGraphSchema_K2::PC_Struct && PinType.PinSubCategoryObject == TBaseStructure<FVector>::Get())
+		if (Category == UEdGraphSchema_K2::PC_Struct.ToString() && PinType.PinSubCategoryObject == TBaseStructure<FVector>::Get())
 		{
 			return EPinType::Vector;
 		}
-		if (Category == UEdGraphSchema_K2::PC_Struct && PinType.PinSubCategoryObject == TBaseStructure<FRotator>::Get())
+		if (Category == UEdGraphSchema_K2::PC_Struct.ToString() && PinType.PinSubCategoryObject == TBaseStructure<FRotator>::Get())
 		{
 			return EPinType::Rotator;
 		}
-		if (Category == UEdGraphSchema_K2::PC_Struct && PinType.PinSubCategoryObject == TBaseStructure<FTransform>::Get())
+		if (Category == UEdGraphSchema_K2::PC_Struct.ToString() && PinType.PinSubCategoryObject == TBaseStructure<FTransform>::Get())
 		{
 			return EPinType::Transform;
 		}
@@ -1610,7 +1687,7 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(
 
 	auto ExportLogicGraph = [AnimBlueprint, &ResultAST](UEdGraph* Graph, const TCHAR* Role, const TCHAR* Kind) -> bool
 	{
-		if (!Graph || Graph->Nodes.IsEmpty())
+		if (!Graph || Graph->Nodes.Num() == 0)
 		{
 			return true;
 		}
@@ -1620,11 +1697,16 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(
 		LispOptions.bStableIds = true;
 		const FBlueprintLispResult LispResult = FBlueprintLispConverter::ExportGraph(Graph, LispOptions);
 		const FString LispCode = LispResult.LispCode.TrimStartAndEnd();
-		if (!LispResult.bSuccess || LispCode.IsEmpty() || LispCode.StartsWith(TEXT("; skip:"), ESearchCase::IgnoreCase))
+		if (!LispResult.bSuccess || LispCode.IsEmpty())
 		{
 			UE_LOG(LogAnimBP2FP, Error, TEXT("[UNSUPPORTED:LogicGraph] Graph '%s' contains %d nodes but BlueprintLisp did not export it: %s"),
 				*Graph->GetName(), Graph->Nodes.Num(), LispResult.Error.IsEmpty() ? *LispCode : *LispResult.Error);
 			return false;
+		}
+		if (LispCode.StartsWith(TEXT("; skip:"), ESearchCase::IgnoreCase))
+		{
+			UE_LOG(LogAnimBP2FP, Verbose, TEXT("Skipping logic graph '%s': %s"), *Graph->GetName(), *LispCode);
+			return true;
 		}
 
 		FLogicGraphDef& LogicGraph = ResultAST->LogicGraphs.AddDefaulted_GetRef();
@@ -1684,7 +1766,7 @@ TSharedPtr<FAnimGraphAST> FAnimBPExporter::ExportToAST(
 		FAnimationLayerDef& Layer = ResultAST->AnimationLayers.AddDefaulted_GetRef();
 		Layer.InterfaceClassPath = InterfacePath;
 		Layer.GraphName = LayerGraph->GetName();
-		Layer.GraphGuid = LayerGraph->GraphGuid.ToString(EGuidFormats::DigitsWithHyphensLower);
+		Layer.GraphGuid = LayerGraph->GraphGuid.ToString(EGuidFormats::DigitsWithHyphens);
 		Layer.SchemaClassPath = LayerGraph->GetSchema()->GetClass()->GetPathName();
 
 		TSharedPtr<FAnimGraphAST> LayerAST = MakeShared<FAnimGraphAST>();
@@ -2019,6 +2101,7 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 		return Result;
 	}
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 	if (UAnimGraphNode_ControlRig* ControlRigNode = Cast<UAnimGraphNode_ControlRig>(Node))
 	{
 		Result->NodeType = TEXT("control-rig");
@@ -2041,9 +2124,27 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 		UControlRigBlueprint* RigBlueprint = Cast<UControlRigBlueprint>(Reference.GetEditorAsset());
 		if (!RigBlueprint)
 		{
-			UE_LOG(LogAnimBP2FP, Error, TEXT("[UNSUPPORTED:ControlRigModule] Node '%s' has no source Control Rig Blueprint"),
-				*Node->GetName());
-			GActiveRigExportContext->bFatal = true;
+			Result->Coverage = EAnimNodeCoverage::Unsupported;
+			Result->Properties.Add(TEXT("control-rig-reference"), Reference.GetPathName());
+			Result->Properties.Add(TEXT("control-rig-reference-name"), Reference.GetName());
+			Result->Properties.Add(TEXT("control-rig-reference-kind"),
+				Reference.IsNative() ? TEXT("native")
+				: Reference.IsRigModule() ? TEXT("module")
+				: Reference.IsModularRig() ? TEXT("modular-rig") : TEXT("unresolved"));
+			if (UClass* RigClass = Reference.GetRigClass())
+			{
+				Result->Properties.Add(TEXT("control-rig-class"), RigClass->GetPathName());
+			}
+			UE_LOG(LogAnimBP2FP, Warning,
+				TEXT("[UNSUPPORTED:ControlRigModule] Node '%s' has no source Control Rig Blueprint; exporting reflected analysis data for '%s'"),
+				*Node->GetName(), *Reference.GetPathName());
+			for (const FPoseInput& Input : CollectPoseInputs(Node))
+			{
+				if (TSharedPtr<FAnimNodeAST> ChildAST = ConvertAnimNode(Input.Node))
+				{
+					Result->AddChild(Input.PinName, ChildAST);
+				}
+			}
 			return Result;
 		}
 
@@ -2165,7 +2266,7 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 			FAnimGraphNodePropertyBinding PropertyBinding;
 			const bool bHasPropertyBinding = TryGetPropertyBinding(Node, Pin->GetFName(), PropertyBinding)
 				&& !FormatBindPathValue(PropertyBinding).IsEmpty();
-			if (!bHasPropertyBinding && Pin->LinkedTo.IsEmpty())
+			if (!bHasPropertyBinding && Pin->LinkedTo.Num() == 0)
 			{
 				Input.ValueExpression = FormatRigPinDefault(Pin);
 			}
@@ -2193,22 +2294,26 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 		}
 		return Result;
 	}
+#endif
 
 	// ---- SequencePlayer ----
 	if (UAnimGraphNode_SequencePlayer* SeqPlayer = Cast<UAnimGraphNode_SequencePlayer>(Node))
 	{
 		Result->NodeType = TEXT("sequence-player");
 		
-		if (SeqPlayer->Node.GetSequence())
-		{
-			Result->Properties.Add(TEXT("name"), FString::Printf(TEXT("\"%s\""), *SeqPlayer->Node.GetSequence()->GetName()));
-		}
-		else
-		{
-			Result->Properties.Add(TEXT("name"), TEXT("\"None\""));
-		}
-		
-		Result->Properties.Add(TEXT("loop"), SeqPlayer->Node.IsLooping() ? TEXT("true") : TEXT("false"));
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
+		UAnimSequenceBase* Sequence = SeqPlayer->Node.GetSequence();
+		const bool bLoop = SeqPlayer->Node.IsLooping();
+#elif ENGINE_MAJOR_VERSION == 5
+		UAnimSequenceBase* Sequence = SeqPlayer->Node.GetSequence();
+		const bool bLoop = SeqPlayer->Node.GetLoopAnimation();
+#else
+		UAnimSequenceBase* Sequence = SeqPlayer->Node.Sequence;
+		const bool bLoop = SeqPlayer->Node.bLoopAnimation;
+#endif
+		Result->Properties.Add(TEXT("name"), Sequence
+			? FString::Printf(TEXT("\"%s\""), *Sequence->GetName()) : TEXT("\"None\""));
+		Result->Properties.Add(TEXT("loop"), bLoop ? TEXT("true") : TEXT("false"));
 		
 		// Collect all other non-pose parameters from pins
 		CollectNonPoseParams(Node, Result->Properties);
@@ -2221,18 +2326,22 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 	{
 		Result->NodeType = TEXT("blendspace-player");
 		
-		if (BSPlayer->Node.GetBlendSpace())
-		{
-			Result->Properties.Add(TEXT("name"), FString::Printf(TEXT("\"%s\""), *BSPlayer->Node.GetBlendSpace()->GetName()));
-		}
-		else
-		{
-			Result->Properties.Add(TEXT("name"), TEXT("\"None\""));
-		}
-		
-		Result->Properties.Add(TEXT("loop"), BSPlayer->Node.IsLooping() ? TEXT("true") : TEXT("false"));
-		
-		float PlayRate = BSPlayer->Node.GetPlayRate();
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
+		UBlendSpace* BlendSpace = BSPlayer->Node.GetBlendSpace();
+		const bool bLoop = BSPlayer->Node.IsLooping();
+		const float PlayRate = BSPlayer->Node.GetPlayRate();
+#elif ENGINE_MAJOR_VERSION == 5
+		UBlendSpace* BlendSpace = BSPlayer->Node.GetBlendSpace();
+		const bool bLoop = BSPlayer->Node.GetLoop();
+		const float PlayRate = BSPlayer->Node.GetPlayRate();
+#else
+		UBlendSpaceBase* BlendSpace = BSPlayer->Node.BlendSpace;
+		const bool bLoop = BSPlayer->Node.bLoop;
+		const float PlayRate = BSPlayer->Node.PlayRate;
+#endif
+		Result->Properties.Add(TEXT("name"), BlendSpace
+			? FString::Printf(TEXT("\"%s\""), *BlendSpace->GetName()) : TEXT("\"None\""));
+		Result->Properties.Add(TEXT("loop"), bLoop ? TEXT("true") : TEXT("false"));
 		if (!FMath::IsNearlyEqual(PlayRate, 1.0f))
 		{
 			Result->Properties.Add(TEXT("play-rate"), FString::SanitizeFloat(PlayRate));
@@ -2577,6 +2686,7 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 	}
 
 	// ---- Generic fallback: auto-extract all pins ----
+#if ENGINE_MAJOR_VERSION >= 5
 	for (const UClass* TestClass = Node->GetClass(); TestClass; TestClass = TestClass->GetSuperClass())
 	{
 		if (TestClass->GetName() != TEXT("AnimGraphNode_BlendStack_Base"))
@@ -2601,7 +2711,7 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 			}
 			Result->Properties.Add(TEXT("bound-graph-class"), QuoteDSLString(BoundGraph->GetClass()->GetPathName()));
 			Result->Properties.Add(TEXT("bound-graph-guid"), QuoteDSLString(
-				BoundGraph->GraphGuid.ToString(EGuidFormats::DigitsWithHyphensLower)));
+				BoundGraph->GraphGuid.ToString(EGuidFormats::DigitsWithHyphens)));
 			if (const UEdGraphSchema* Schema = BoundGraph->GetSchema())
 			{
 				Result->Properties.Add(TEXT("bound-graph-schema"), QuoteDSLString(Schema->GetClass()->GetPathName()));
@@ -2666,6 +2776,7 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 		}
 		return Result;
 	}
+#endif
 
 	{
 		// Convert "AnimGraphNode_XYZ" to "xyz" in kebab-case
@@ -2747,35 +2858,23 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 			UEdGraph* StateGraph = StateNode->GetBoundGraph();
 			if (StateGraph)
 			{
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
-			// UE5.5+: GetResultNodeInsideState() was removed, use GetPoseSinkPinInsideState() instead
-			UEdGraphPin* PoseSinkPin = StateNode->GetPoseSinkPinInsideState();
-			if (PoseSinkPin && PoseSinkPin->LinkedTo.Num() > 0)
-			{
-				UAnimGraphNode_Base* AnimRoot = Cast<UAnimGraphNode_Base>(PoseSinkPin->LinkedTo[0]->GetOwningNode());
-				if (AnimRoot)
+				// The pose sink pin is stable across all supported engine versions.
+				UEdGraphPin* PoseSinkPin = StateNode->GetPoseSinkPinInsideState();
+				if (PoseSinkPin && PoseSinkPin->LinkedTo.Num() > 0)
 				{
-					State.Animation = ConvertAnimNode(AnimRoot);
+					UAnimGraphNode_Base* AnimRoot = Cast<UAnimGraphNode_Base>(PoseSinkPin->LinkedTo[0]->GetOwningNode());
+					if (AnimRoot)
+					{
+						State.Animation = ConvertAnimNode(AnimRoot);
+					}
 				}
-			}
-#else
-			// UE < 5.5: Use legacy GetResultNodeInsideState()
-			UAnimGraphNode_StateResult* ResultNode = StateNode->GetResultNodeInsideState();
-			if (ResultNode)
-			{
-				UAnimGraphNode_Base* AnimRoot = GetFirstConnectedPoseNode(ResultNode);
-				if (AnimRoot)
-				{
-					State.Animation = ConvertAnimNode(AnimRoot);
-				}
-			}
-#endif
 			}
 			
 			Result->States.Add(State);
 			UE_LOG(LogAnimBP2FP, Log, TEXT("    State: %s (has animation: %s)"), 
 				*State.Name, State.Animation.IsValid() ? TEXT("yes") : TEXT("no"));
 		}
+#if ENGINE_MAJOR_VERSION >= 5
 		else if (UAnimStateAliasNode* Alias = Cast<UAnimStateAliasNode>(GraphNode))
 		{
 			FStateMachineAST::FState State;
@@ -2791,6 +2890,7 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 			UE_LOG(LogAnimBP2FP, Log, TEXT("    Alias: %s (global: %s, targets: %d)"),
 				*State.Name, State.bGlobalAlias ? TEXT("true") : TEXT("false"), State.AliasedStates.Num());
 		}
+#endif
 		else if (UAnimStateConduitNode* Conduit = Cast<UAnimStateConduitNode>(GraphNode))
 		{
 			FStateMachineAST::FState State;
@@ -2816,8 +2916,10 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 	{
 		if (UAnimStateTransitionNode* TransNode = Cast<UAnimStateTransitionNode>(GraphNode))
 		{
-			// Skip disabled transitions
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6)
+			// Newer UE5 exposes an explicit disabled transition flag.
 			if (TransNode->bDisabled) continue;
+#endif
 			
 			UAnimStateNodeBase* FromState = TransNode->GetPreviousState();
 			UAnimStateNodeBase* ToState = TransNode->GetNextState();
@@ -2838,6 +2940,7 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 					// Auto-rule based on sequence player remaining time
 					TSharedPtr<FLiteralExpr> AutoExpr = MakeShared<FLiteralExpr>();
 					AutoExpr->Type = FLiteralExpr::EType::String;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
 					if (TransNode->AutomaticRuleTriggerTime < 0.0f)
 					{
 						AutoExpr->Value = TEXT("(auto-rule :time-remaining crossfade-duration)");
@@ -2847,6 +2950,9 @@ TSharedPtr<FStateMachineAST> FAnimBPExporter::ConvertStateMachine(UAnimGraphNode
 						AutoExpr->Value = FString::Printf(TEXT("(auto-rule :time-remaining %s)"), 
 							*FString::SanitizeFloat(TransNode->AutomaticRuleTriggerTime));
 					}
+#else
+					AutoExpr->Value = TEXT("(auto-rule :time-remaining crossfade-duration)");
+#endif
 					Trans.Condition = AutoExpr;
 				}
 				else if (TransNode->GetBoundGraph() == nullptr)

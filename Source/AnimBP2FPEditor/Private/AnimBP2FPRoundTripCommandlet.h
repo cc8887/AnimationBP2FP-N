@@ -1,5 +1,4 @@
-// AnimBP2FPRoundTripCommandlet.h - Round-trip validation commandlet
-// Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
+// Round-trip commandlet.
 
 #pragma once
 
@@ -7,14 +6,7 @@
 #include "Commandlets/Commandlet.h"
 #include "AnimBP2FPRoundTripCommandlet.generated.h"
 
-/**
- * Commandlet to run round-trip validation on exported .animlang files
- * Usage: UnrealEditor.exe <project> -run=AnimBP2FPRoundTrip -Bundle=<workspace> [-Legacy]
- * 
- * Tests: Export → Parse → ToString → Compare
- * Reads from: <ProjectDir>/AnimLang/Exported/*.animlang
- * Writes report to: <ProjectDir>/AnimLang/Exported/round_trip_report.txt
- */
+// Executes round-trip validation.
 UCLASS()
 class UAnimBP2FPRoundTripCommandlet : public UCommandlet
 {

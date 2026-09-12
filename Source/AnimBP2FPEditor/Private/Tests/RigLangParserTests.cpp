@@ -1,6 +1,7 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "HAL/FileManager.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
@@ -9,14 +10,18 @@
 #include "RigLangAST.h"
 #include "RigLangParser.h"
 #include "AnimLispWorkspace.h"
+#if ENGINE_MAJOR_VERSION < 5
+#include "Rigs/RigControlHierarchy.h"
+#else
 #include "Rigs/RigHierarchyElements.h"
+#endif
 
 #if WITH_DEV_AUTOMATION_TESTS
 
 namespace RigLangParserTests
 {
-const EAutomationTestFlags TestFlags =
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter;
+const auto TestFlags =
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter;
 
 FString MakeModuleHeader()
 {
@@ -43,8 +48,8 @@ bool ExpectParseError(
 	const TSharedPtr<FRigModuleAST> Module = FRigLangParser::Parse(Source, SourceFile, Errors);
 
 	Test.TestFalse(TEXT("Invalid source does not produce a module"), Module.IsValid());
-	Test.TestFalse(TEXT("Invalid source reports at least one error"), Errors.IsEmpty());
-	if (Errors.IsEmpty())
+	Test.TestFalse(TEXT("Invalid source reports at least one error"), Errors.Num() == 0);
+	if (Errors.Num() == 0)
 	{
 		return false;
 	}
@@ -72,6 +77,7 @@ FString QuoteRigLangString(const FString& Value)
 	return TEXT("\"") + Escaped + TEXT("\"");
 }
 
+#if ENGINE_MAJOR_VERSION >= 5
 FString ExportControlSettings(const ERigControlType ControlType)
 {
 	FRigControlSettings Settings;
@@ -81,8 +87,10 @@ FString ExportControlSettings(const ERigControlType ControlType)
 		Serialized, &Settings, &Settings, nullptr, PPF_None, nullptr);
 	return Serialized;
 }
+#endif
 }
 
+#if ENGINE_MAJOR_VERSION >= 5
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserRoundTripTest,
 	"AnimBP2FP.RigLang.Parser.RoundTrip",
@@ -133,6 +141,7 @@ bool FRigLangParserRoundTripTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Legacy control type is authoritative"), LegacyControl.States[0].Type, FString(TEXT("Transform")));
 	TestFalse(TEXT("Legacy :control-type is removed after promotion"), LegacyControl.Properties.Contains(TEXT("control-type")));
 	TestFalse(TEXT("Legacy :settings is removed after promotion"), LegacyControl.Properties.Contains(TEXT("settings")));
+#if ENGINE_MAJOR_VERSION >= 5
 	FRigControlSettings PromotedSettings;
 	const TCHAR* SettingsRemainder = FRigControlSettings::StaticStruct()->ImportText(
 		*LegacyControl.States[0].SerializedValue, &PromotedSettings, nullptr, PPF_None, nullptr, TEXT("FRigControlSettings"));
@@ -147,6 +156,7 @@ bool FRigLangParserRoundTripTest::RunTest(const FString& Parameters)
 		TestFalse(TEXT("Second legacy limit remains disabled"),
 			PromotedSettings.LimitEnabled[1].bMinimum || PromotedSettings.LimitEnabled[1].bMaximum);
 	}
+#endif
 
 	const FString FirstCanonical = First->ToCanonicalString();
 	TestFalse(TEXT("Canonical output is not empty"), FirstCanonical.IsEmpty());
@@ -175,6 +185,7 @@ bool FRigLangParserRoundTripTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Canonical hash input reaches a fixed point"), Second->ToCanonicalHashInput(), First->ToCanonicalHashInput());
 	return true;
 }
+#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserTypedDeclarationsRoundTripTest,
@@ -197,7 +208,7 @@ bool FRigLangParserTypedDeclarationsRoundTripTest::RunTest(const FString& Parame
 		+ TEXT("  (rig-dependency :host \"/Game/Rigs/CR_Dep.CR_Dep\" :library-node-path \"RigVMLibrary.Dep\" :hash 4294967295))");
 	TArray<FRigLangParseError> Errors;
 	const TSharedPtr<FRigModuleAST> First = FRigLangParser::Parse(Source, TEXT("TypedDeclarations.riglang"), Errors);
-	TestTrue(TEXT("Typed declaration source parses"), Errors.IsEmpty());
+	TestTrue(TEXT("Typed declaration source parses"), Errors.Num() == 0);
 	if (!TestNotNull(TEXT("Typed declaration source produces a module"), First.Get())) return false;
 	if (!TestEqual(TEXT("Two graphs parsed"), First->Graphs.Num(), 2)
 		|| !TestEqual(TEXT("One function parsed"), First->Functions.Num(), 1)) return false;
@@ -236,7 +247,7 @@ bool FRigLangParserTypedDeclarationsRoundTripTest::RunTest(const FString& Parame
 	const FString Canonical = First->ToCanonicalString();
 	TArray<FRigLangParseError> ReparseErrors;
 	const TSharedPtr<FRigModuleAST> Second = FRigLangParser::Parse(Canonical, TEXT("TypedDeclarations.canonical.riglang"), ReparseErrors);
-	TestTrue(TEXT("Typed declaration canonical text reparses"), ReparseErrors.IsEmpty());
+	TestTrue(TEXT("Typed declaration canonical text reparses"), ReparseErrors.Num() == 0);
 	if (!TestNotNull(TEXT("Typed declaration canonical text produces a module"), Second.Get())) return false;
 	TestEqual(TEXT("Typed declarations reach a byte-stable fixed point"), Second->ToCanonicalString(), Canonical);
 	TestEqual(TEXT("Typed declarations reach a hash-input fixed point"), Second->ToCanonicalHashInput(), First->ToCanonicalHashInput());
@@ -264,11 +275,11 @@ bool FRigLangParserTypedCallIdentityTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Typed call identity source parses"), Module.IsValid()
 		&& !Errors.ContainsByPredicate([](const FRigLangParseError& Error)
 		{ return !RigLangParserTests::IsExpectedLegacyGraphWarning(Error); }));
-	if (!Module.IsValid() || Module->Functions.IsEmpty()) return false;
+	if (!Module.IsValid() || Module->Functions.Num() == 0) return false;
 	const FRigGraphAST* FunctionGraph = Module->Graphs.FindByPredicate([&Module](const FRigGraphAST& Graph)
 		{ return Graph.StableId == Module->Functions[0].GraphStableId; });
 	if (!TestNotNull(TEXT("Typed call resolves through authoritative graph inventory"), FunctionGraph)
-		|| FunctionGraph->Nodes.IsEmpty()) return false;
+		|| FunctionGraph->Nodes.Num() == 0) return false;
 	const FRigNodeAST& Call = FunctionGraph->Nodes[0];
 	TestFalse(TEXT("Function identifier host is promoted out of raw properties"),
 		Call.Properties.Contains(TEXT("function-identifier-host")));
@@ -285,7 +296,7 @@ bool FRigLangParserTypedCallIdentityTest::RunTest(const FString& Parameters)
 	const TSharedPtr<FRigModuleAST> Reparsed = FRigLangParser::Parse(
 		Canonical, TEXT("TypedCallIdentity.canonical.riglang"), ReparseErrors);
 	TestTrue(TEXT("Typed call canonical form reparses without diagnostics"),
-		Reparsed.IsValid() && ReparseErrors.IsEmpty());
+		Reparsed.IsValid() && ReparseErrors.Num() == 0);
 	if (Reparsed.IsValid())
 	{
 		TestEqual(TEXT("Typed call canonical text reaches a fixed point"),
@@ -368,6 +379,7 @@ bool FRigLangParserMalformedHierarchyTest::RunTest(const FString& Parameters)
 		*this, Source, TEXT("MalformedHierarchy.riglang"), TEXT("name"), 3, 4);
 }
 
+#if ENGINE_MAJOR_VERSION >= 5
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserTypedHierarchySchemaTest,
 	"AnimBP2FP.RigLang.Parser.TypedHierarchySchema",
@@ -388,7 +400,7 @@ bool FRigLangParserTypedHierarchySchemaTest::RunTest(const FString& Parameters)
 		+ TEXT("    (rig-metadata :name \"Speed\" :kind float :numbers (3.5))))\n");
 	TArray<FRigLangParseError> Errors;
 	const TSharedPtr<FRigModuleAST> Module = FRigLangParser::Parse(Source, TEXT("TypedHierarchy.riglang"), Errors);
-	TestTrue(TEXT("Typed hierarchy parses"), Errors.IsEmpty());
+	TestTrue(TEXT("Typed hierarchy parses"), Errors.Num() == 0);
 	if (!TestNotNull(TEXT("Typed hierarchy produces a module"), Module.Get())) return false;
 	const FRigHierarchyElementAST& Element = Module->Hierarchy[0];
 	TestEqual(TEXT("Typed parent count"), Element.Parents.Num(), 1);
@@ -402,7 +414,9 @@ bool FRigLangParserTypedHierarchySchemaTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Canonical printer emits typed parent form"), Module->ToCanonicalString().Contains(TEXT("(rig-parent")));
 	return true;
 }
+#endif
 
+#if ENGINE_MAJOR_VERSION >= 5
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserRejectsMalformedTypedHierarchyTest,
 	"AnimBP2FP.RigLang.Parser.RejectsMalformedTypedHierarchy",
@@ -429,6 +443,7 @@ bool FRigLangParserRejectsMalformedTypedHierarchyTest::RunTest(const FString& Pa
 	TestTrue(TEXT("Invalid control settings payload"), Contains(ErrorsFor(TEXT("(rig-state :kind control-settings :role initial :type Float :serialized \"not-a-control-settings-struct\")")), TEXT("invalid FRigControlSettings payload")));
 	return true;
 }
+#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserGraphOwnershipTest,
@@ -520,7 +535,7 @@ bool FRigLangParserGraphOwnershipTest::RunTest(const FString& Parameters)
 		const TSharedPtr<FRigModuleAST> CanonicalModule = FRigLangParser::Parse(
 			Canonical, TEXT("GraphOwnership.canonical.riglang"), CanonicalErrors);
 		TestTrue(TEXT("Migrated contained graph canonical form reparses"),
-			CanonicalModule.IsValid() && CanonicalErrors.IsEmpty());
+			CanonicalModule.IsValid() && CanonicalErrors.Num() == 0);
 		if (CanonicalModule.IsValid())
 			TestEqual(TEXT("Legacy migration reaches a hash-input fixed point"),
 				CanonicalModule->ToCanonicalHashInput(), LegacyContained->ToCanonicalHashInput());
@@ -759,7 +774,7 @@ bool FRigLangParserStructuredLinkRoundTripTest::RunTest(const FString& Parameter
 	TestFalse(TEXT("Structured link parses without hard errors"),
 		Errors.ContainsByPredicate([](const FRigLangParseError& Error) { return !Error.bWarning; }));
 	TestTrue(TEXT("Structured link fixture reports only expected legacy graph warnings"),
-		!Errors.IsEmpty() && !Errors.ContainsByPredicate([](const FRigLangParseError& Error)
+		Errors.Num() != 0 && !Errors.ContainsByPredicate([](const FRigLangParseError& Error)
 		{
 			return !RigLangParserTests::IsExpectedLegacyGraphWarning(Error);
 		}));
@@ -776,7 +791,7 @@ bool FRigLangParserStructuredLinkRoundTripTest::RunTest(const FString& Parameter
 	TestFalse(TEXT("Canonical structured link reparses without hard errors"),
 		ReparseErrors.ContainsByPredicate([](const FRigLangParseError& Error) { return !Error.bWarning; }));
 	TestTrue(TEXT("Canonical structured link retains only the expected migration warning"),
-		!ReparseErrors.IsEmpty() && !ReparseErrors.ContainsByPredicate([](const FRigLangParseError& Error)
+		ReparseErrors.Num() != 0 && !ReparseErrors.ContainsByPredicate([](const FRigLangParseError& Error)
 		{
 			return !RigLangParserTests::IsExpectedLegacyGraphWarning(Error);
 		}));
@@ -795,7 +810,7 @@ bool FRigLangParserImportUnknownPropertyRoundTripTest::RunTest(const FString& Pa
 		+ TEXT("\n(import-rig :asset \"/Game/Test/CR_Future\" :alias Future :content-hash \"future-hash\" :capability (future (nested true)))");
 	TArray<FRigLangParseError> Errors;
 	const TSharedPtr<FRigModuleAST> Module = FRigLangParser::Parse(Source, TEXT("ImportFuture.riglang"), Errors);
-	TestTrue(TEXT("Import with balanced future property parses"), Errors.IsEmpty());
+	TestTrue(TEXT("Import with balanced future property parses"), Errors.Num() == 0);
 	if (!TestNotNull(TEXT("Import with balanced future property produces a module"), Module.Get()))
 	{
 		return false;
@@ -810,7 +825,7 @@ bool FRigLangParserImportUnknownPropertyRoundTripTest::RunTest(const FString& Pa
 		Canonical,
 		TEXT("ImportFuture.canonical.riglang"),
 		ReparseErrors);
-	TestTrue(TEXT("Canonical future import reparses"), ReparseErrors.IsEmpty());
+	TestTrue(TEXT("Canonical future import reparses"), ReparseErrors.Num() == 0);
 	return TestNotNull(TEXT("Canonical future import produces a module"), Reparsed.Get())
 		&& TestTrue(TEXT("Future import semantics survive roundtrip"), Module->SemanticEquals(*Reparsed));
 }
@@ -839,13 +854,13 @@ bool FRigLangParserReviewGraphTruthSourceTest::RunTest(const FString& Parameters
 		&& !LegacyErrors.ContainsByPredicate([](const FRigLangParseError& Error) { return !Error.bWarning; }));
 	if (!Legacy.IsValid()) return false;
 	TestEqual(TEXT("Legacy function migration creates library and function inventory"), Legacy->Graphs.Num(), 2);
-	TestTrue(TEXT("Legacy function retains only graph reference"), Legacy->Functions[0].Graph.Nodes.IsEmpty()
+	TestTrue(TEXT("Legacy function retains only graph reference"), Legacy->Functions[0].Graph.Nodes.Num() == 0
 		&& !Legacy->Functions[0].GraphStableId.IsEmpty());
 	const FString Canonical = Legacy->ToCanonicalString();
 	TArray<FRigLangParseError> ReparseErrors;
 	const TSharedPtr<FRigModuleAST> Reparsed = FRigLangParser::Parse(
 		Canonical, TEXT("ReviewLegacyMigration.canonical.riglang"), ReparseErrors);
-	TestTrue(TEXT("Migrated canonical inventory reparses without diagnostics"), Reparsed.IsValid() && ReparseErrors.IsEmpty());
+	TestTrue(TEXT("Migrated canonical inventory reparses without diagnostics"), Reparsed.IsValid() && ReparseErrors.Num() == 0);
 	return bRejectedMixedTruth && Reparsed.IsValid()
 		&& TestEqual(TEXT("Migrated canonical inventory reaches a fixed point"), Reparsed->ToCanonicalString(), Canonical);
 }
@@ -858,7 +873,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FRigLangParserReviewMetadataKindPrinterTest::RunTest(const FString& Parameters)
 {
 	FRigModuleAST Module;
-	Module.Header.ModuleId = FAnimLispModuleId(EAnimLispModuleKind::Rig, TEXT("/Game/Test/MetadataKinds"));
+	Module.Header.ModuleId.Kind = EAnimLispModuleKind::Rig;
+	Module.Header.ModuleId.AssetPath = TEXT("/Game/Test/MetadataKinds");
 	Module.Header.AssetClassPath = TEXT("/Script/ControlRig.ControlRigBlueprint");
 	Module.Header.Version = 1;
 	Module.Header.ContentHash = TEXT("metadata-kinds");
@@ -897,12 +913,13 @@ bool FRigLangParserReviewMetadataKindPrinterTest::RunTest(const FString& Paramet
 	const TSharedPtr<FRigModuleAST> Reparsed = FRigLangParser::Parse(
 		Canonical, TEXT("ReviewMetadataKinds.riglang"), Errors);
 	for (const FRigLangParseError& Error : Errors) AddError(TEXT("Metadata kind parse diagnostic: ") + Error.ToString());
-	TestTrue(TEXT("All metadata kinds, including empty arrays, reparse"), Reparsed.IsValid() && Errors.IsEmpty());
+	TestTrue(TEXT("All metadata kinds, including empty arrays, reparse"), Reparsed.IsValid() && Errors.Num() == 0);
 	return Reparsed.IsValid()
 		&& TestEqual(TEXT("All metadata kinds survive roundtrip"), Reparsed->Hierarchy[0].Metadata.Num(), 20)
 		&& TestEqual(TEXT("Metadata canonical text reaches a fixed point"), Reparsed->ToCanonicalString(), Canonical);
 }
 
+#if ENGINE_MAJOR_VERSION >= 5
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserReviewHierarchyStateSchemaTest,
 	"AnimBP2FP.RigLang.Review.C.HierarchyStateSchema",
@@ -938,7 +955,8 @@ bool FRigLangParserReviewHierarchyStateSchemaTest::RunTest(const FString& Parame
 		FRigLangParser::Parse(DuplicateSource, TEXT("ReviewDuplicateState.riglang"), DuplicateErrors).IsValid());
 
 	FRigModuleAST HashModule;
-	HashModule.Header.ModuleId = FAnimLispModuleId(EAnimLispModuleKind::Rig, TEXT("/Game/Test/StateHash"));
+	HashModule.Header.ModuleId.Kind = EAnimLispModuleKind::Rig;
+	HashModule.Header.ModuleId.AssetPath = TEXT("/Game/Test/StateHash");
 	HashModule.Header.AssetClassPath = TEXT("/Script/ControlRig.ControlRigBlueprint");
 	HashModule.Header.Version = 1;
 	FRigHierarchyElementAST& Element = HashModule.Hierarchy.AddDefaulted_GetRef();
@@ -954,6 +972,7 @@ bool FRigLangParserReviewHierarchyStateSchemaTest::RunTest(const FString& Parame
 		HashModule.ToCanonicalHashInput().Contains(TEXT(":role concurrent")));
 	return true;
 }
+#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserReviewVisibilityEnumTest,
@@ -990,7 +1009,7 @@ bool FRigLangParserReviewLocalVariableDescriptionTest::RunTest(const FString& Pa
 	TArray<FRigLangParseError> Errors;
 	const TSharedPtr<FRigModuleAST> Module = FRigLangParser::Parse(Source, TEXT("ReviewLocalVariable.riglang"), Errors);
 	for (const FRigLangParseError& Error : Errors) AddError(TEXT("Local variable parse diagnostic: ") + Error.ToString());
-	TestTrue(TEXT("Complete local variable description parses"), Module.IsValid() && Errors.IsEmpty());
+	TestTrue(TEXT("Complete local variable description parses"), Module.IsValid() && Errors.Num() == 0);
 	if (!Module.IsValid()) return false;
 	const FRigGraphVariableAST& Local = Module->Graphs[0].LocalVariables[0];
 	TestEqual(TEXT("Local CPP type object path is exact"), Local.CPPTypeObjectPath, FString(TEXT("/Script/CoreUObject.Vector")));
@@ -1005,7 +1024,7 @@ bool FRigLangParserReviewLocalVariableDescriptionTest::RunTest(const FString& Pa
 	TArray<FRigLangParseError> ReparseErrors;
 	const TSharedPtr<FRigModuleAST> Reparsed = FRigLangParser::Parse(
 		Canonical, TEXT("ReviewLocalVariable.canonical.riglang"), ReparseErrors);
-	TestTrue(TEXT("Complete local variable canonical text reparses"), Reparsed.IsValid() && ReparseErrors.IsEmpty());
+	TestTrue(TEXT("Complete local variable canonical text reparses"), Reparsed.IsValid() && ReparseErrors.Num() == 0);
 	if (Reparsed.IsValid())
 		TestEqual(TEXT("Complete local variable canonical text reaches a fixed point"), Reparsed->ToCanonicalString(), Canonical);
 
@@ -1024,6 +1043,7 @@ bool FRigLangParserReviewLocalVariableDescriptionTest::RunTest(const FString& Pa
 	return true;
 }
 
+#if ENGINE_MAJOR_VERSION >= 5
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserReviewControlStateConsistencyTest,
 	"AnimBP2FP.RigLang.Review.F.ControlStateConsistency",
@@ -1066,6 +1086,7 @@ bool FRigLangParserReviewControlStateConsistencyTest::RunTest(const FString& Par
 		MissingSettingsErrors).IsValid());
 	return true;
 }
+#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRigLangParserReviewMetadataFieldExclusivityTest,
@@ -1090,7 +1111,7 @@ bool FRigLangParserReviewMetadataFieldExclusivityTest::RunTest(const FString& Pa
 	TArray<FRigLangParseError> ValidErrors;
 	TestTrue(TEXT("Matching metadata array field may be empty"), ParseMetadata(
 		TEXT("(rig-metadata :name \"Array\" :kind bool-array :bools ())"), ValidErrors).IsValid()
-		&& ValidErrors.IsEmpty());
+		&& ValidErrors.Num() == 0);
 	return true;
 }
 

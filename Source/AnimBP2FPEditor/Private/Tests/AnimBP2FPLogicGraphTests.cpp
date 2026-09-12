@@ -1,6 +1,7 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
 #include "Misc/AutomationTest.h"
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
@@ -15,7 +16,7 @@
 #include "K2Node_CustomEvent.h"
 #include "K2Node_FunctionEntry.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && ANIMBP2FP_HAS_ANIM_AUTHORING
 
 namespace AnimBP2FPLogicGraphTests
 {
@@ -38,7 +39,7 @@ namespace AnimBP2FPLogicGraphTests
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPMainDSLIncludesBlueprintLispLogicGraphs,
 	"AnimBP2FP.LogicGraphs.MainDSLIncludesBlueprintLisp",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPMainDSLIncludesBlueprintLispLogicGraphs::RunTest(const FString& Parameters)
 {
@@ -78,7 +79,7 @@ bool FAnimBP2FPMainDSLIncludesBlueprintLispLogicGraphs::RunTest(const FString& P
 
 	TArray<FAnimLangParseError> Errors;
 	const TSharedPtr<FAnimGraphAST> Parsed = FAnimLangParser::Parse(DSL, Errors);
-	TestTrue(TEXT("main DSL with BlueprintLisp parses"), Parsed.IsValid() && Errors.IsEmpty());
+	TestTrue(TEXT("main DSL with BlueprintLisp parses"), Parsed.IsValid() && Errors.Num() == 0);
 	if (!Parsed.IsValid() || Parsed->LogicGraphs.Num() != 2)
 	{
 		return false;
@@ -93,7 +94,7 @@ bool FAnimBP2FPMainDSLIncludesBlueprintLispLogicGraphs::RunTest(const FString& P
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPImporterRestoresLogicGraphs,
 	"AnimBP2FP.LogicGraphs.ImporterRestoresBeforeCompile",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPImporterRestoresLogicGraphs::RunTest(const FString& Parameters)
 {
@@ -142,7 +143,7 @@ bool FAnimBP2FPImporterRestoresLogicGraphs::RunTest(const FString& Parameters)
 		}
 	}
 	TestTrue(TEXT("EventGraph is created"), RestoredEventGraph != nullptr);
-	TestTrue(TEXT("EventGraph nodes are restored"), RestoredEventGraph && !RestoredEventGraph->Nodes.IsEmpty());
+	TestTrue(TEXT("EventGraph nodes are restored"), RestoredEventGraph && RestoredEventGraph->Nodes.Num() != 0);
 
 	UEdGraph* RestoredFunctionGraph = nullptr;
 	for (UEdGraph* Graph : Destination->FunctionGraphs)
@@ -154,14 +155,14 @@ bool FAnimBP2FPImporterRestoresLogicGraphs::RunTest(const FString& Parameters)
 		}
 	}
 	TestTrue(TEXT("function graph is created"), RestoredFunctionGraph != nullptr);
-	TestTrue(TEXT("function graph nodes are restored"), RestoredFunctionGraph && !RestoredFunctionGraph->Nodes.IsEmpty());
+	TestTrue(TEXT("function graph nodes are restored"), RestoredFunctionGraph && RestoredFunctionGraph->Nodes.Num() != 0);
 	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAnimBP2FPPureFunctionFlagsRoundTrip,
 	"AnimBP2FP.LogicGraphs.PureFunctionFlagsRoundTrip",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter)
 
 bool FAnimBP2FPPureFunctionFlagsRoundTrip::RunTest(const FString& Parameters)
 {
@@ -172,7 +173,8 @@ bool FAnimBP2FPPureFunctionFlagsRoundTrip::RunTest(const FString& Parameters)
 	UK2Node_FunctionEntry* SourceEntry = nullptr;
 	for (UEdGraphNode* Node : SourceGraph->Nodes)
 	{
-		if ((SourceEntry = Cast<UK2Node_FunctionEntry>(Node))) break;
+		SourceEntry = Cast<UK2Node_FunctionEntry>(Node);
+		if (SourceEntry) break;
 	}
 	TestNotNull(TEXT("source function entry exists"), SourceEntry);
 	if (!SourceEntry) return false;
@@ -212,7 +214,8 @@ bool FAnimBP2FPPureFunctionFlagsRoundTrip::RunTest(const FString& Parameters)
 	{
 		for (UEdGraphNode* Node : DestinationGraph->Nodes)
 		{
-			if ((DestinationEntry = Cast<UK2Node_FunctionEntry>(Node))) break;
+			DestinationEntry = Cast<UK2Node_FunctionEntry>(Node);
+			if (DestinationEntry) break;
 		}
 	}
 	TestTrue(TEXT("destination entry preserves BlueprintPure"), DestinationEntry

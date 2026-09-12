@@ -1,11 +1,17 @@
 // Copyright (c) 2026 OpenClaw Research. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "AnimBP2FPVersionCompat.h"
+#if ANIMBP2FP_HAS_MODERN_RIGVM_AUTHORING
 #include "Misc/AutomationTest.h"
 
 #include "RigLangExporter.h"
 #include "RigLangImporter.h"
+#if ENGINE_MINOR_VERSION >= 7
 #include "ControlRigBlueprintLegacy.h"
+#else
+#include "ControlRigBlueprint.h"
+#endif
 #include "ControlRigBlueprintFactory.h"
 #include "Rigs/RigHierarchy.h"
 #include "Rigs/RigHierarchyController.h"
@@ -15,8 +21,8 @@
 
 namespace RigLangHierarchyImportTests
 {
-const EAutomationTestFlags Flags =
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::ProductFilter;
+const ANIMBP2FP_AUTOMATION_TEST_FLAGS_TYPE Flags =
+	ANIMBP2FP_APPLICATION_CONTEXT_FLAGS | EAutomationTestFlags::ProductFilter;
 
 UControlRigBlueprint* MakeSourceRig()
 {
@@ -459,3 +465,5 @@ bool FRigLangHierarchyImportRollbackTest::RunTest(const FString& Parameters)
 }
 
 #endif
+
+#endif // UE 5.4+

@@ -70,7 +70,11 @@ int32 UAnimBP2FPBlueprintLispCommandlet::Main(const FString& Params)
 	if (!TargetBP.IsEmpty())
 	{
 		// Single BP by path
+#if ENGINE_MAJOR_VERSION < 5
+		FAssetData AD = AR.GetAssetByObjectPath(FName(*TargetBP));
+#else
 		FAssetData AD = AR.GetAssetByObjectPath(FSoftObjectPath(TargetBP));
+#endif
 		if (AD.IsValid()) Assets.Add(AD);
 		else
 		{
@@ -80,10 +84,14 @@ int32 UAnimBP2FPBlueprintLispCommandlet::Main(const FString& Params)
 	}
 	else
 	{
+#if ENGINE_MAJOR_VERSION < 5
+		AR.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetFName(), Assets);
+#else
 		AR.GetAssetsByClass(UAnimBlueprint::StaticClass()->GetClassPathName(), Assets);
+#endif
 	}
 
-	if (Assets.IsEmpty())
+	if (Assets.Num() == 0)
 	{
 		UE_LOG(LogBlueprintLispTest, Warning, TEXT("No AnimBlueprints found."));
 		return 0;
