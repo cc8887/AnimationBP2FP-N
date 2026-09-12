@@ -2124,9 +2124,27 @@ TSharedPtr<FAnimNodeAST> FAnimBPExporter::ConvertAnimNode(UAnimGraphNode_Base* N
 		UControlRigBlueprint* RigBlueprint = Cast<UControlRigBlueprint>(Reference.GetEditorAsset());
 		if (!RigBlueprint)
 		{
-			UE_LOG(LogAnimBP2FP, Error, TEXT("[UNSUPPORTED:ControlRigModule] Node '%s' has no source Control Rig Blueprint"),
-				*Node->GetName());
-			GActiveRigExportContext->bFatal = true;
+			Result->Coverage = EAnimNodeCoverage::Unsupported;
+			Result->Properties.Add(TEXT("control-rig-reference"), Reference.GetPathName());
+			Result->Properties.Add(TEXT("control-rig-reference-name"), Reference.GetName());
+			Result->Properties.Add(TEXT("control-rig-reference-kind"),
+				Reference.IsNative() ? TEXT("native")
+				: Reference.IsRigModule() ? TEXT("module")
+				: Reference.IsModularRig() ? TEXT("modular-rig") : TEXT("unresolved"));
+			if (UClass* RigClass = Reference.GetRigClass())
+			{
+				Result->Properties.Add(TEXT("control-rig-class"), RigClass->GetPathName());
+			}
+			UE_LOG(LogAnimBP2FP, Warning,
+				TEXT("[UNSUPPORTED:ControlRigModule] Node '%s' has no source Control Rig Blueprint; exporting reflected analysis data for '%s'"),
+				*Node->GetName(), *Reference.GetPathName());
+			for (const FPoseInput& Input : CollectPoseInputs(Node))
+			{
+				if (TSharedPtr<FAnimNodeAST> ChildAST = ConvertAnimNode(Input.Node))
+				{
+					Result->AddChild(Input.PinName, ChildAST);
+				}
+			}
 			return Result;
 		}
 
